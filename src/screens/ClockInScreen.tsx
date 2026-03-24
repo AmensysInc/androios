@@ -35,18 +35,17 @@ export default function ClockInScreen() {
       return;
     }
     try {
-      const empList = await api.getEmployees({ user: user.id });
-      const emp = Array.isArray(empList) ? empList[0] : null;
+      const emp = await api.resolveEmployeeForUser(user);
       setEmployee(emp);
       if (!emp) {
         setLoading(false);
         setRefreshing(false);
         return;
       }
-      const entryList = await api.getTimeClockEntries({ employee: emp.id });
+      const entryList = await api.getTimeClockEntriesForEmployee(emp.id);
       const list = Array.isArray(entryList) ? entryList : [];
       setEntries(list);
-      const active = list.find((e: any) => e.clock_in && !e.clock_out) || null;
+      const active = api.pickActiveTimeClockEntry(list);
       setActiveEntry(active);
       if (active) {
         const ci = parseMs(active.clock_in);
@@ -98,10 +97,14 @@ export default function ClockInScreen() {
   };
 
   const onClockOut = async () => {
-    if (!activeEntry) return;
+    const entryId = api.timeClockEntryId(activeEntry);
+    if (!entryId) {
+      Alert.alert('Error', 'No active time entry to clock out.');
+      return;
+    }
     setActionLoading(true);
     try {
-      await api.clockOut({ time_clock_entry_id: activeEntry.id });
+      await api.clockOut({ time_clock_entry_id: entryId, employee_id: employee.id });
       await load();
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Clock out failed');
@@ -111,10 +114,11 @@ export default function ClockInScreen() {
   };
 
   const onStartBreak = async () => {
-    if (!activeEntry) return;
+    const entryId = api.timeClockEntryId(activeEntry);
+    if (!entryId) return;
     setActionLoading(true);
     try {
-      await api.startBreak(activeEntry.id);
+      await api.startBreak(entryId);
       await load();
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Start break failed');
@@ -124,10 +128,11 @@ export default function ClockInScreen() {
   };
 
   const onEndBreak = async () => {
-    if (!activeEntry) return;
+    const entryId = api.timeClockEntryId(activeEntry);
+    if (!entryId) return;
     setActionLoading(true);
     try {
-      await api.endBreak(activeEntry.id);
+      await api.endBreak(entryId);
       await load();
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'End break failed');

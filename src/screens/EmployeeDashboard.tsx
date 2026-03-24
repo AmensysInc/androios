@@ -67,8 +67,7 @@ export default function EmployeeDashboard() {
   const load = useCallback(async () => {
     if (!user?.id) return;
     try {
-      const empList = await api.getEmployees({ user: user.id });
-      const emp = Array.isArray(empList) ? empList[0] : null;
+      const emp = await api.resolveEmployeeForUser(user);
       setEmployee(emp);
       if (!emp) {
         setLoading(false);
@@ -80,12 +79,12 @@ export default function EmployeeDashboard() {
       const weekEnd = endOfWeek(today);
       const [shiftList, entryList] = await Promise.all([
         api.getShifts({ employee: emp.id, start_time__gte: weekStart.toISOString(), start_time__lte: weekEnd.toISOString() }),
-        api.getTimeClockEntries({ employee: emp.id }),
+        api.getTimeClockEntriesForEmployee(emp.id),
       ]);
       setShifts(Array.isArray(shiftList) ? shiftList : []);
       const list = Array.isArray(entryList) ? entryList : [];
       setEntries(list);
-      const active = list.find((e: any) => e.clock_in && !e.clock_out) || null;
+      const active = api.pickActiveTimeClockEntry(list);
       setActiveEntry(active);
       const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
       const todayEnd = todayStart + 24 * 60 * 60 * 1000 - 1;
@@ -175,10 +174,14 @@ export default function EmployeeDashboard() {
     }
   };
   const handleClockOut = async () => {
-    if (!activeEntry?.id) return;
+    const entryId = api.timeClockEntryId(activeEntry);
+    if (!entryId) {
+      Alert.alert('Error', 'No active time entry to clock out.');
+      return;
+    }
     setActionLoading(true);
     try {
-      await api.clockOut({ time_clock_entry_id: activeEntry.id });
+      await api.clockOut({ time_clock_entry_id: entryId, employee_id: employee.id });
       await load();
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Clock out failed');
@@ -187,10 +190,11 @@ export default function EmployeeDashboard() {
     }
   };
   const handleStartBreak = async () => {
-    if (!activeEntry?.id) return;
+    const entryId = api.timeClockEntryId(activeEntry);
+    if (!entryId) return;
     setActionLoading(true);
     try {
-      await api.startBreak(activeEntry.id);
+      await api.startBreak(entryId);
       await load();
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'Start break failed');
@@ -199,10 +203,11 @@ export default function EmployeeDashboard() {
     }
   };
   const handleEndBreak = async () => {
-    if (!activeEntry?.id) return;
+    const entryId = api.timeClockEntryId(activeEntry);
+    if (!entryId) return;
     setActionLoading(true);
     try {
-      await api.endBreak(activeEntry.id);
+      await api.endBreak(entryId);
       await load();
     } catch (e: any) {
       Alert.alert('Error', e?.message || 'End break failed');

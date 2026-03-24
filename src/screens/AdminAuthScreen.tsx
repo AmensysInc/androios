@@ -13,35 +13,22 @@ import {
 import apiClient from '../lib/api-client';
 import { useAuth } from '../context/AuthContext';
 
-function getAccessToken(data: any): string | undefined {
-  return data?.access ?? data?.access_token;
-}
-function getRefreshToken(data: any): string | undefined {
-  return data?.refresh ?? data?.refresh_token;
-}
-
-const ALLOWED_ADMIN_EMAIL = 'kuladeepparchuri@gmail.com';
-
 export default function AdminAuthScreen({ navigation }: any) {
-  const [email, setEmail] = useState('');
+  const [usernameOrEmail, setUsernameOrEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const { setSessionFromLogin } = useAuth();
 
   const handleSignIn = async () => {
-    if (email !== ALLOWED_ADMIN_EMAIL) {
-      Alert.alert('Access Denied', 'This admin portal is restricted to authorized personnel only.');
+    const trimmed = usernameOrEmail.trim();
+    if (!trimmed || !password) {
+      Alert.alert('Validation', 'Please enter username or email and password');
       return;
     }
     setLoading(true);
     try {
-      const response = await apiClient.login(email, password);
-      const userData = response?.user;
-      const access = getAccessToken(response);
-      const refresh = getRefreshToken(response);
-      if (userData && access) {
-        setSessionFromLogin({ user: userData, access, refresh });
-      }
+      const { user, access, refresh } = await apiClient.loginWithSession(trimmed, password);
+      setSessionFromLogin({ user, access, refresh });
     } catch (e: any) {
       Alert.alert('Sign in failed', e?.message || 'Invalid credentials');
     } finally {
@@ -59,9 +46,9 @@ export default function AdminAuthScreen({ navigation }: any) {
         <Text style={styles.subtitle}>Sign in</Text>
         <TextInput
           style={styles.input}
-          placeholder="Email"
-          value={email}
-          onChangeText={setEmail}
+          placeholder="Username or email"
+          value={usernameOrEmail}
+          onChangeText={setUsernameOrEmail}
           keyboardType="email-address"
           autoCapitalize="none"
         />

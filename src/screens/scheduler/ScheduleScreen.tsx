@@ -1,169 +1,2016 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef, Fragment } from 'react';
 import {
   View,
   Text,
   StyleSheet,
-  FlatList,
+  ScrollView,
   TouchableOpacity,
+  Pressable,
   RefreshControl,
   ActivityIndicator,
-  ScrollView,
+  Modal,
+  FlatList,
+  Platform,
+  useWindowDimensions,
+  TextInput,
+  Alert,
+  KeyboardAvoidingView,
+  Keyboard,
 } from 'react-native';
+
+
+const KeyedView = View as React.ComponentType<React.ComponentProps<typeof View> & { key?: React.Key }>;
+const KeyedFragment = Fragment as React.ComponentType<{ children?: React.ReactNode; key?: React.Key }>;
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
 import * as api from '../../api';
 
-type Company = { id: string; name: string; company_manager_id?: string; [k: string]: any };
+type Organization = { id: string; name: string; [k: string]: any };
+type Company = { id: string; name: string; organization_id?: string; company_manager_id?: string; [k: string]: any };
 
-function getWeekRange(): { start: Date; end: Date } {
-  const now = new Date();
-  const day = now.getDay();
+function companyOrganizationId(c: Company): string {
+  const v = c.organization_id ?? (c as any).organization;
+  return v != null ? String(v) : '';
+}
+type Employee = {
+  id: string;
+  first_name?: string;
+  last_name?: string;
+  email?: string;
+  company_id?: string;
+  role?: string;
+  [k: string]: any;
+};
+
+type SavedWeekTemplate = {
+  id: string;
+  companyId: string;
+  orgName: string;
+  companyName: string;
+  weekStartISO: string;
+  weekEndISO: string;
+  weekLabel: string;
+  shiftCount: number;
+  savedAtISO: string;
+  published: boolean;
+  shifts: Array<{
+    employee: string;
+    start_time: string;
+    end_time?: string;
+    break_duration_minutes?: number;
+    notes?: string;
+    shift_type?: string;
+    hourly_rate?: string;
+    status?: string;
+  }>;
+};
+
+function startOfWeekMonday(d: Date): Date {
+  const x = new Date(d);
+  const day = x.getDay();
   const diff = day === 0 ? -6 : 1 - day;
-  const start = new Date(now);
-  start.setDate(now.getDate() + diff);
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(start);
-  end.setDate(start.getDate() + 6);
+  x.setDate(x.getDate() + diff);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function addDays(d: Date, n: number): Date {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
+}
+
+function weekRangeFromStart(weekStart: Date): { start: Date; end: Date } {
+  const start = startOfWeekMonday(weekStart);
+  const end = addDays(start, 6);
   end.setHours(23, 59, 59, 999);
   return { start, end };
 }
 
+function formatWeekToolbar(start: Date, end: Date): string {
+  const o: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
+  return `${start.toLocaleDateString(undefined, o)} – ${end.toLocaleDateString(undefined, o)}`;
+}
+
+function employeeDisplayName(e: Employee): string {
+  const fn = (e.first_name || '').trim();
+  const ln = (e.last_name || '').trim();
+  if (fn || ln) return `${fn} ${ln}`.trim();
+  return e.email || 'Employee';
+}
+
+function employeeRoleLabel(emp: Employee): string {
+  const r = String(emp.role || '').toLowerCase();
+  if (!r || ['employee', 'house_keeping', 'maintenance', 'user'].includes(r)) return 'Employee';
+  return emp.role || 'Employee';
+}
+
+function initials(e: Employee): string {
+  const fn = (e.first_name || '').trim();
+  const ln = (e.last_name || '').trim();
+  if (fn && ln) return `${fn[0]}${ln[0]}`.toUpperCase();
+  if (fn) return fn.slice(0, 2).toUpperCase();
+  const em = (e.email || '?').slice(0, 2).toUpperCase();
+  return em;
+}
+
+function sameCalendarDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
+function cellContentForDay(employee: Employee, day: Date, shifts: any[]): string {
+  const empId = String(employee.id);
+  const relevant = shifts.filter((s) => {
+    const sid = String(s.employee_id ?? s.employee ?? '');
+    if (sid !== empId) return false;
+    const st = s.start_time ? new Date(s.start_time) : null;
+    if (!st || Number.isNaN(st.getTime())) return false;
+    return sameCalendarDay(st, day);
+  });
+  if (relevant.length === 0) return '-';
+  return relevant
+    .map((s) => {
+      const st = new Date(s.start_time);
+      const et = s.end_time ? new Date(s.end_time) : null;
+      const t1 = st.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+      if (!et) return t1;
+      const t2 = et.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+      return `${t1}–${t2}`;
+    })
+    .join('\n');
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+function parseTimeInput(v: string): { hh: number; mm: number } | null {
+  const m = v.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+  return { hh, mm };
+}
+
+function setTimeOnDate(day: Date, time: string): Date | null {
+  const p = parseTimeInput(time);
+  if (!p) return null;
+  const d = new Date(day);
+  d.setHours(p.hh, p.mm, 0, 0);
+  return d;
+}
+
+function toTime24(d: Date): string {
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+function formatDateInput(d: Date): string {
+  return `${pad2(d.getDate())}-${pad2(d.getMonth() + 1)}-${d.getFullYear()}`;
+}
+
+function parseDateInput(v: string): Date | null {
+  const m = String(v || '').trim().match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+  if (!m) return null;
+  const dd = Number(m[1]);
+  const mm = Number(m[2]);
+  const yyyy = Number(m[3]);
+  const d = new Date(yyyy, mm - 1, dd);
+  if (d.getFullYear() !== yyyy || d.getMonth() !== mm - 1 || d.getDate() !== dd) return null;
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+const SHIFT_TYPE_OPTIONS = ['Morning (6am - 2pm)', 'Evening (2pm - 10pm)', 'Night (10pm - 6am)'];
+
+const SHIFT_TYPE_DEFAULT_TIMES: Record<string, { start: string; end: string }> = {
+  'Morning (6am - 2pm)': { start: '06:00', end: '14:00' },
+  'Evening (2pm - 10pm)': { start: '14:00', end: '22:00' },
+  'Night (10pm - 6am)': { start: '22:00', end: '06:00' },
+};
+
+const TIME_PICKER_HOURS = Array.from({ length: 24 }, (_, i) => i);
+const TIME_PICKER_MINUTES = Array.from({ length: 60 }, (_, i) => i);
+
+/** If end time is earlier than start (e.g. night shift), end is stored as the next calendar day. */
+function computeStartEndForDay(day: Date, startTime: string, endTime: string): { startAt: Date; endAt: Date } | null {
+  const startAt = setTimeOnDate(day, startTime);
+  if (!startAt) return null;
+  let endAt = setTimeOnDate(day, endTime);
+  if (!endAt) return null;
+  if (endAt.getTime() <= startAt.getTime()) {
+    endAt = new Date(endAt);
+    endAt.setDate(endAt.getDate() + 1);
+  }
+  return { startAt, endAt };
+}
+
+const BREAK_OPTIONS = ['No break', '15 minutes', '30 minutes', '45 minutes', '60 minutes'];
+const STATUS_OPTIONS = ['Scheduled', 'Published', 'Completed', 'Missed'];
+
+const SHIFT_TYPE_PICKER_OPTIONS = SHIFT_TYPE_OPTIONS.map((label) => ({ id: label, label }));
+const BREAK_PICKER_OPTIONS = BREAK_OPTIONS.map((label) => ({ id: label, label }));
+const STATUS_PICKER_OPTIONS = STATUS_OPTIONS.map((label) => ({ id: label, label }));
+
+type PickerModalProps = {
+  visible: boolean;
+  title: string;
+  options: { id: string; label: string }[];
+  onSelect: (id: string) => void;
+  onClose: () => void;
+};
+
+function PickerModal({ visible, title, options, onSelect, onClose }: PickerModalProps) {
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+        <View style={styles.modalBox}>
+          <Text style={styles.modalTitle}>{title}</Text>
+          <FlatList
+            data={options}
+            keyExtractor={(i) => i.id}
+            keyboardShouldPersistTaps="handled"
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                style={styles.modalRow}
+                onPress={() => {
+                  onSelect(item.id);
+                  onClose();
+                }}
+              >
+                <Text style={styles.modalRowText}>{item.label}</Text>
+              </TouchableOpacity>
+            )}
+          />
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 export default function ScheduleScreen() {
   const { user, role } = useAuth();
+  const { width, height } = useWindowDimensions();
+  const isWide = width >= 900;
+
+  const [weekAnchor, setWeekAnchor] = useState(() => new Date());
+  const weekStart = useMemo(() => startOfWeekMonday(weekAnchor), [weekAnchor]);
+  const { start: rangeStart, end: rangeEnd } = useMemo(() => weekRangeFromStart(weekStart), [weekStart]);
+  const weekDays = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(rangeStart, i)), [rangeStart]);
+
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
+  const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
+  const [employees, setEmployees] = useState<Employee[]>([]);
   const [shifts, setShifts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [orgModal, setOrgModal] = useState(false);
+  const [companyModal, setCompanyModal] = useState(false);
+  const [shiftModalOpen, setShiftModalOpen] = useState(false);
+  const [shiftSaving, setShiftSaving] = useState(false);
+  const [publishWeekLoading, setPublishWeekLoading] = useState(false);
+  const [shiftEmployee, setShiftEmployee] = useState<Employee | null>(null);
+  const [shiftDay, setShiftDay] = useState<Date | null>(null);
+  const [shiftType, setShiftType] = useState('Morning (6am - 2pm)');
+  const [shiftStart, setShiftStart] = useState('06:00');
+  const [shiftEnd, setShiftEnd] = useState('14:00');
+  const [shiftBreakMin, setShiftBreakMin] = useState('30 minutes');
+  const [shiftCopyWeek, setShiftCopyWeek] = useState(false);
+  const [shiftNotes, setShiftNotes] = useState('');
+  const [shiftTypePickerOpen, setShiftTypePickerOpen] = useState(false);
+  const [shiftBreakPickerOpen, setShiftBreakPickerOpen] = useState(false);
+  const [shiftStatusPickerOpen, setShiftStatusPickerOpen] = useState(false);
+  const [editingShiftId, setEditingShiftId] = useState<string | null>(null);
+  const [shiftDateInput, setShiftDateInput] = useState('');
+  const [shiftDepartment, setShiftDepartment] = useState('');
+  const [shiftHourlyRate, setShiftHourlyRate] = useState('');
+  const [shiftStatus, setShiftStatus] = useState('Scheduled');
+  const [scheduleEditMode, setScheduleEditMode] = useState(false);
+  const [savedTemplates, setSavedTemplates] = useState<SavedWeekTemplate[]>([]);
+  const initialScheduleLoadDone = useRef(false);
+  const [timePickerField, setTimePickerField] = useState<'start' | 'end' | null>(null);
+  const [timePickerHour, setTimePickerHour] = useState(6);
+  const [timePickerMinute, setTimePickerMinute] = useState(0);
 
-  const filteredCompanies = React.useMemo(() => {
+  const needsOrg = role === 'super_admin' || role === 'admin' || role === 'operations_manager';
+
+  useEffect(() => {
+    if (!shiftModalOpen) setTimePickerField(null);
+  }, [shiftModalOpen]);
+
+  const isOrgManager = role === 'operations_manager' && user?.id;
+
+  const companiesFiltered = useMemo(() => {
+    if (needsOrg && !selectedOrgId) return [];
+    let list = companies;
     if (role === 'manager' && user?.id) {
-      return companies.filter((c) => c.company_manager_id === user.id);
+      list = list.filter((c) => c.company_manager_id === user.id);
     }
-    return companies;
-  }, [companies, role, user?.id]);
+    if (selectedOrgId) {
+      const oid = String(selectedOrgId);
+      list = list.filter((c) => companyOrganizationId(c) === oid);
+    }
+    return list;
+  }, [companies, role, user?.id, selectedOrgId, needsOrg]);
 
-  const loadCompanies = useCallback(async () => {
+  const selectedOrgName = organizations.find((o) => o.id === selectedOrgId)?.name;
+  const selectedCompanyName = companies.find((c) => c.id === selectedCompanyId)?.name;
+
+  const loadMeta = useCallback(async () => {
     try {
-      const list = await api.getCompanies(
-        role === 'operations_manager' && user?.id ? { organization_manager: user.id } : undefined
-      );
-      setCompanies(Array.isArray(list) ? list : []);
+      const orgsRaw = await api.getOrganizations(isOrgManager ? { operations_manager: user?.id } : undefined);
+      setOrganizations(Array.isArray(orgsRaw) ? orgsRaw : []);
+
+      let compRaw: any[] = [];
+      if (isOrgManager) {
+        compRaw = await api.getCompanies({ organization_manager: user?.id });
+      } else if (role === 'manager' && user?.id) {
+        compRaw = await api.getCompanies({ company_manager: user.id });
+      } else if (needsOrg) {
+        if (selectedOrgId) {
+          const oid = String(selectedOrgId);
+          try {
+            compRaw = await api.getCompanies({ organization: oid });
+          } catch {
+            compRaw = [];
+          }
+          if (!Array.isArray(compRaw)) compRaw = [];
+          if (compRaw.length === 0) {
+            try {
+              const byId = await api.getCompanies({ organization_id: oid });
+              compRaw = Array.isArray(byId) ? byId : [];
+            } catch {
+              compRaw = [];
+            }
+          }
+          if (compRaw.length === 0) {
+            const all = await api.getCompanies();
+            const rows = Array.isArray(all) ? all : [];
+            compRaw = rows.filter((c: Company) => companyOrganizationId(c) === oid);
+          }
+        } else {
+          compRaw = [];
+        }
+      } else {
+        compRaw = await api.getCompanies();
+      }
+      setCompanies(Array.isArray(compRaw) ? compRaw : []);
     } catch (e) {
       console.warn(e);
     }
-  }, [role, user?.id]);
+  }, [isOrgManager, role, user?.id, needsOrg, selectedOrgId]);
 
-  const loadShifts = useCallback(async () => {
+  const loadEmployeesAndShifts = useCallback(async () => {
     if (!selectedCompanyId) {
+      setEmployees([]);
       setShifts([]);
       return;
     }
-    const { start, end } = getWeekRange();
     try {
-      const raw = await api.getShifts({
-        company: selectedCompanyId,
-        start_date: start.toISOString(),
-        end_date: end.toISOString(),
-      });
-      setShifts(Array.isArray(raw) ? raw : []);
+      const cid = String(selectedCompanyId);
+      let empRaw: any[] = [];
+      let shiftRaw: any[] = [];
+
+      try {
+        empRaw = await api.getEmployees({ company: cid });
+      } catch {
+        empRaw = [];
+      }
+      if (!Array.isArray(empRaw) || empRaw.length === 0) {
+        try {
+          const byId = await api.getEmployees({ company_id: cid });
+          empRaw = Array.isArray(byId) ? byId : [];
+        } catch {
+          empRaw = [];
+        }
+      }
+      if (empRaw.length === 0) {
+        try {
+          const all = await api.getEmployees();
+          const rows = Array.isArray(all) ? all : [];
+          empRaw = rows.filter((e: any) => String(e.company_id ?? e.company ?? '') === cid);
+        } catch {
+          empRaw = [];
+        }
+      }
+
+      try {
+        shiftRaw = await api.getShifts({
+          company: cid,
+          start_date: rangeStart.toISOString(),
+          end_date: rangeEnd.toISOString(),
+        });
+      } catch {
+        shiftRaw = [];
+      }
+      if (!Array.isArray(shiftRaw) || shiftRaw.length === 0) {
+        try {
+          const byId = await api.getShifts({
+            company_id: cid,
+            start_date: rangeStart.toISOString(),
+            end_date: rangeEnd.toISOString(),
+          });
+          shiftRaw = Array.isArray(byId) ? byId : [];
+        } catch {
+          shiftRaw = [];
+        }
+      }
+
+      const normalizedEmployees = (Array.isArray(empRaw) ? empRaw : [])
+        .map((e: any) => ({
+          ...e,
+          id: String(e.id ?? e.pk ?? e.uuid ?? e.employee_id ?? e.user_id ?? ''),
+        }))
+        .filter((e: any) => String(e.id || '').trim() !== '');
+
+      setEmployees(normalizedEmployees);
+      setShifts(Array.isArray(shiftRaw) ? shiftRaw : []);
     } catch (e) {
       console.warn(e);
+      setEmployees([]);
       setShifts([]);
     }
-  }, [selectedCompanyId]);
+  }, [selectedCompanyId, rangeStart, rangeEnd]);
 
   const load = useCallback(async () => {
-    setLoading(true);
-    await loadCompanies();
+    if (!initialScheduleLoadDone.current) setLoading(true);
+    await loadMeta();
+    initialScheduleLoadDone.current = true;
     setLoading(false);
-  }, [loadCompanies]);
+  }, [loadMeta]);
 
   useEffect(() => {
     load();
   }, [load]);
 
   useEffect(() => {
-    if (filteredCompanies.length > 0 && !selectedCompanyId) {
-      setSelectedCompanyId(filteredCompanies[0].id);
-    }
-  }, [filteredCompanies, selectedCompanyId]);
+    if (!needsOrg || selectedOrgId || organizations.length !== 1) return;
+    setSelectedOrgId(organizations[0].id);
+  }, [needsOrg, selectedOrgId, organizations]);
 
   useEffect(() => {
-    if (selectedCompanyId) loadShifts();
-    else setShifts([]);
-  }, [selectedCompanyId, loadShifts]);
+    if (!needsOrg && companiesFiltered.length > 0 && !selectedCompanyId) {
+      setSelectedCompanyId(companiesFiltered[0].id);
+    }
+  }, [needsOrg, companiesFiltered, selectedCompanyId]);
+
+  useEffect(() => {
+    if (needsOrg && selectedOrgId && companiesFiltered.length > 0 && !selectedCompanyId) {
+      setSelectedCompanyId(companiesFiltered[0].id);
+    }
+  }, [needsOrg, selectedOrgId, companiesFiltered, selectedCompanyId]);
+
+  useEffect(() => {
+    if (needsOrg && !selectedOrgId) {
+      setSelectedCompanyId(null);
+      return;
+    }
+    if (!selectedCompanyId || companiesFiltered.length === 0) return;
+    const stillValid = companiesFiltered.some((c) => c.id === selectedCompanyId);
+    if (!stillValid) setSelectedCompanyId(null);
+  }, [needsOrg, selectedOrgId, selectedCompanyId, companiesFiltered]);
+
+  useEffect(() => {
+    loadEmployeesAndShifts();
+  }, [loadEmployeesAndShifts]);
 
   const onRefresh = () => {
     setRefreshing(true);
-    loadCompanies().then(() => loadShifts()).finally(() => setRefreshing(false));
+    loadMeta()
+      .then(() => loadEmployeesAndShifts())
+      .finally(() => setRefreshing(false));
   };
 
-  const { start } = getWeekRange();
-  const weekLabel = `Week of ${start.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}`;
+  const goPrevWeek = () => {
+    const d = new Date(weekAnchor);
+    d.setDate(d.getDate() - 7);
+    setWeekAnchor(d);
+  };
+  const goNextWeek = () => {
+    const d = new Date(weekAnchor);
+    d.setDate(d.getDate() + 7);
+    setWeekAnchor(d);
+  };
+  const goThisWeek = () => setWeekAnchor(new Date());
+
+  const openAddShift = (emp: Employee, day: Date) => {
+    setShiftEmployee(emp);
+    setShiftDay(day);
+    setEditingShiftId(null);
+    setShiftType('Morning (6am - 2pm)');
+    const morning = SHIFT_TYPE_DEFAULT_TIMES['Morning (6am - 2pm)'];
+    setShiftStart(morning.start);
+    setShiftEnd(morning.end);
+    setShiftBreakMin('30 minutes');
+    setShiftCopyWeek(false);
+    setShiftNotes('');
+    setShiftDateInput(formatDateInput(day));
+    setShiftDepartment(String((emp as any).department_name ?? (emp as any).department?.name ?? emp.department ?? ''));
+    setShiftHourlyRate(String((emp as any).hourly_rate ?? ''));
+    setShiftStatus('Scheduled');
+    setShiftModalOpen(true);
+  };
+
+  const openEditShift = (emp: Employee, shift: any) => {
+    const st = shift?.start_time ? new Date(shift.start_time) : new Date();
+    const et = shift?.end_time ? new Date(shift.end_time) : new Date(st.getTime() + 8 * 60 * 60 * 1000);
+    const breakMin = Number(shift?.break_duration_minutes ?? shift?.break_minutes ?? 0);
+    setShiftEmployee(emp);
+    setShiftDay(st);
+    setEditingShiftId(String(shift?.id ?? shift?.pk ?? shift?.uuid ?? ''));
+    setShiftType(String(shift?.shift_type ?? 'Morning (6am - 2pm)'));
+    setShiftStart(toTime24(st));
+    setShiftEnd(toTime24(et));
+    setShiftBreakMin(breakMin > 0 ? `${breakMin} minutes` : 'No break');
+    setShiftCopyWeek(false);
+    setShiftNotes(String(shift?.notes ?? ''));
+    setShiftDateInput(formatDateInput(st));
+    setShiftDepartment(String((emp as any).department_name ?? (emp as any).department?.name ?? emp.department ?? ''));
+    setShiftHourlyRate(String(shift?.hourly_rate ?? (emp as any).hourly_rate ?? ''));
+    setShiftStatus(String(shift?.status ?? 'Scheduled'));
+    setShiftModalOpen(true);
+  };
+
+  const openShiftTimePicker = (field: 'start' | 'end') => {
+    Keyboard.dismiss();
+    const raw = field === 'start' ? shiftStart : shiftEnd;
+    const p = parseTimeInput(raw);
+    setTimePickerHour(p?.hh ?? 0);
+    setTimePickerMinute(p?.mm ?? 0);
+    setTimePickerField(field);
+  };
+
+  const confirmShiftTimePicker = () => {
+    const s = `${pad2(timePickerHour)}:${pad2(timePickerMinute)}`;
+    if (timePickerField === 'start') setShiftStart(s);
+    else if (timePickerField === 'end') setShiftEnd(s);
+    setTimePickerField(null);
+  };
+
+  const submitShift = async () => {
+    if (!shiftEmployee || !shiftDay || !selectedCompanyId) return;
+    const baseDay = parseDateInput(shiftDateInput) || shiftDay;
+    const range = computeStartEndForDay(baseDay, shiftStart, shiftEnd);
+    if (!range) {
+      Alert.alert('Validation', 'Use time format HH:mm for start and end.');
+      return;
+    }
+    const { startAt, endAt } = range;
+    const breakMin = parseFloat(String(shiftBreakMin).replace(/[^\d.]/g, '')) || 0;
+    setShiftSaving(true);
+    try {
+      const clean = (obj: Record<string, any>) => {
+        const out: Record<string, any> = {};
+        Object.entries(obj).forEach(([k, v]) => {
+          if (v != null && v !== '') out[k] = v;
+        });
+        return out;
+      };
+      const baseWrite = clean({
+        company: selectedCompanyId,
+        company_id: selectedCompanyId,
+        employee: shiftEmployee.id,
+        employee_id: shiftEmployee.id,
+        start_time: startAt.toISOString(),
+        end_time: endAt.toISOString(),
+        break_duration_minutes: Number.isFinite(breakMin) ? breakMin : 0,
+        break_duration: Number.isFinite(breakMin) ? breakMin : 0,
+        notes: shiftNotes.trim() || undefined,
+        shift_type: shiftType,
+        hourly_rate: shiftHourlyRate.trim() || undefined,
+      });
+      const statusRaw = String(shiftStatus || '').trim();
+      const statusVariants = Array.from(
+        new Set([statusRaw, statusRaw.toLowerCase(), statusRaw.toUpperCase()].filter((x) => x))
+      );
+      const payloadAttempts = statusVariants.map((s) => clean({ ...baseWrite, status: s }));
+      payloadAttempts.push(baseWrite);
+
+      const runCreateWithFallbacks = async (day: Date) => {
+        const dayRange = computeStartEndForDay(day, shiftStart, shiftEnd);
+        if (!dayRange) return;
+        const { startAt: st, endAt: et } = dayRange;
+        const writeBaseForDay = payloadAttempts.map((p) =>
+          clean({
+            ...p,
+            start_time: st.toISOString(),
+            end_time: et.toISOString(),
+          })
+        );
+        let lastErr: any = null;
+        for (const payload of writeBaseForDay) {
+          try {
+            await api.createShift(payload);
+            return;
+          } catch (e: any) {
+            lastErr = e;
+          }
+        }
+        throw lastErr || new Error('Failed to create shift');
+      };
+
+      const runUpdateWithFallbacks = async () => {
+        if (!editingShiftId) return;
+        let lastErr: any = null;
+        for (const payload of payloadAttempts) {
+          try {
+            await api.updateShift(editingShiftId, payload);
+            return;
+          } catch (e: any) {
+            lastErr = e;
+          }
+        }
+        throw lastErr || new Error('Failed to update shift');
+      };
+
+      if (editingShiftId) {
+        await runUpdateWithFallbacks();
+      } else {
+        const targets = shiftCopyWeek ? weekDays : [baseDay];
+        for (const day of targets) {
+          await runCreateWithFallbacks(day);
+        }
+      }
+      setShiftModalOpen(false);
+      await loadEmployeesAndShifts();
+    } catch (e: any) {
+      const body = e?.body ?? e?.response?.data ?? e?.errors;
+      const detail = body && typeof body === 'object' ? `\n${JSON.stringify(body).slice(0, 500)}` : '';
+      Alert.alert('Error', `${e?.message || (editingShiftId ? 'Failed to update shift' : 'Failed to create shift')}${detail}`);
+    } finally {
+      setShiftSaving(false);
+    }
+  };
+
+  const deleteEditingShift = () => {
+    if (!editingShiftId) return;
+    const run = async () => {
+      setShiftSaving(true);
+      try {
+        await api.deleteShift(editingShiftId);
+        setShiftModalOpen(false);
+        await loadEmployeesAndShifts();
+      } catch (e: any) {
+        Alert.alert('Error', e?.message || 'Failed to delete shift');
+      } finally {
+        setShiftSaving(false);
+      }
+    };
+    if (Platform.OS === 'web' && typeof (globalThis as any).confirm === 'function') {
+      if ((globalThis as any).confirm('Delete this shift?')) void run();
+      return;
+    }
+    Alert.alert('Delete shift', 'Delete this shift?', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => void run() },
+    ]);
+  };
+
+  const today = new Date();
+  const orgOptions = useMemo(
+    () => organizations.map((o) => ({ id: o.id, label: o.name })),
+    [organizations]
+  );
+  const companyOptions = useMemo(
+    () => companiesFiltered.map((c) => ({ id: c.id, label: c.name })),
+    [companiesFiltered]
+  );
+
+  const colWidth = isWide ? 112 : 96;
+  const empColWidth = isWide ? 200 : 160;
+  const currentWeekShifts = useMemo(() => {
+    return shifts.filter((s) => {
+      const st = s.start_time ? new Date(s.start_time) : null;
+      if (!st || Number.isNaN(st.getTime())) return false;
+      return st >= rangeStart && st <= rangeEnd;
+    });
+  }, [shifts, rangeStart, rangeEnd]);
+  const activeWeekTemplate = useMemo(() => {
+    if (!selectedCompanyId) return null;
+    const key = String(selectedCompanyId);
+    const startISO = rangeStart.toISOString().slice(0, 10);
+    return (
+      savedTemplates.find((t) => t.companyId === key && t.weekStartISO.slice(0, 10) === startISO) || null
+    );
+  }, [savedTemplates, selectedCompanyId, rangeStart]);
+
+  const handleSaveTemplate = (opts?: { silent?: boolean }) => {
+    if (!selectedCompanyId) return;
+    const item: SavedWeekTemplate = {
+      id: activeWeekTemplate?.id || `${selectedCompanyId}:${rangeStart.toISOString()}`,
+      companyId: String(selectedCompanyId),
+      orgName: selectedOrgName || 'Organization',
+      companyName: selectedCompanyName || 'Company',
+      weekStartISO: rangeStart.toISOString(),
+      weekEndISO: rangeEnd.toISOString(),
+      weekLabel: formatWeekToolbar(rangeStart, rangeEnd).replace(' – ', ' - '),
+      shiftCount: currentWeekShifts.length,
+      savedAtISO: new Date().toISOString(),
+      published: activeWeekTemplate?.published || false,
+      shifts: currentWeekShifts.map((s) => ({
+        employee: String(s.employee_id ?? s.employee ?? ''),
+        start_time: String(s.start_time),
+        end_time: s.end_time ? String(s.end_time) : undefined,
+        break_duration_minutes: Number(s.break_duration_minutes ?? 0),
+        notes: s.notes ? String(s.notes) : undefined,
+        shift_type: s.shift_type ? String(s.shift_type) : undefined,
+        hourly_rate: s.hourly_rate != null ? String(s.hourly_rate) : undefined,
+        status: s.status ? String(s.status) : undefined,
+      })),
+    };
+    setSavedTemplates((prev) => {
+      const next = prev.filter((t) => t.id !== item.id);
+      return [item, ...next];
+    });
+    if (!opts?.silent) Alert.alert('Saved', 'Schedule template saved');
+  };
+
+  const handlePublishTemplate = async () => {
+    if (!selectedCompanyId || publishWeekLoading) return;
+    if (currentWeekShifts.length === 0) {
+      Alert.alert('Nothing to publish', 'Add shifts to this week before publishing.');
+      return;
+    }
+    handleSaveTemplate({ silent: true });
+
+    const cid = String(selectedCompanyId);
+    const rs = rangeStart.toISOString();
+    const re = rangeEnd.toISOString();
+    const rsDate = rs.slice(0, 10);
+    const reDate = re.slice(0, 10);
+    const shiftIds = currentWeekShifts
+      .map((s) => String(s.id ?? s.pk ?? s.uuid ?? '').trim())
+      .filter(Boolean);
+
+    const clean = (obj: Record<string, any>) => {
+      const out: Record<string, any> = {};
+      Object.entries(obj).forEach(([k, v]) => {
+        if (v != null && v !== '') out[k] = v;
+      });
+      return out;
+    };
+
+    const attempts: Record<string, any>[] = [
+      clean({
+        company: cid,
+        company_id: cid,
+        start_date: rs,
+        end_date: re,
+      }),
+      clean({
+        company: cid,
+        company_id: cid,
+        start_date: rsDate,
+        end_date: reDate,
+      }),
+      clean({
+        company: cid,
+        company_id: cid,
+        week_start: rs,
+        week_end: re,
+      }),
+      clean({
+        company: cid,
+        company_id: cid,
+        start_time__gte: rs,
+        start_time__lte: re,
+      }),
+    ];
+    if (shiftIds.length) {
+      attempts.push(
+        clean({ company: cid, company_id: cid, shift_ids: shiftIds }),
+        clean({ company: cid, company_id: cid, shifts: shiftIds })
+      );
+    }
+
+    setPublishWeekLoading(true);
+    let lastErr: any = null;
+    try {
+      for (const body of attempts) {
+        if (Object.keys(body).length === 0) continue;
+        try {
+          await api.publishShiftsWeek(body);
+          lastErr = null;
+          break;
+        } catch (e: any) {
+          lastErr = e;
+        }
+      }
+      if (lastErr) throw lastErr;
+
+      setSavedTemplates((prev) =>
+        prev.map((t) =>
+          t.companyId === cid && t.weekStartISO.slice(0, 10) === rsDate
+            ? { ...t, published: true }
+            : t
+        )
+      );
+      await loadEmployeesAndShifts();
+      Alert.alert(
+        'Published',
+        'Schedule published. Employees will see these shifts on their dashboard and calendar.'
+      );
+    } catch (e: any) {
+      const body = e?.body ?? e?.response?.data ?? e?.errors;
+      const detail = body && typeof body === 'object' ? `\n${JSON.stringify(body).slice(0, 500)}` : '';
+      Alert.alert('Publish failed', `${e?.message || 'Could not publish this week.'}${detail}`);
+    } finally {
+      setPublishWeekLoading(false);
+    }
+  };
+
+  const handleClearWeek = async () => {
+    if (!selectedCompanyId || currentWeekShifts.length === 0) return;
+    const run = async () => {
+      setLoading(true);
+      try {
+        for (const s of currentWeekShifts) {
+          const id = String(s.id ?? s.pk ?? s.uuid ?? '');
+          if (!id) continue;
+          await api.deleteShift(id);
+        }
+        await loadEmployeesAndShifts();
+        Alert.alert('Cleared', 'Week schedule cleared');
+      } catch (e: any) {
+        Alert.alert('Error', e?.message || 'Failed to clear schedule');
+      } finally {
+        setLoading(false);
+      }
+    };
+    if (Platform.OS === 'web' && typeof (globalThis as any).confirm === 'function') {
+      if ((globalThis as any).confirm('Clear all shifts for this week?')) void run();
+      return;
+    }
+    Alert.alert('Clear schedule', 'Clear all shifts for this week?', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Clear', style: 'destructive', onPress: () => void run() },
+    ]);
+  };
+
+  const handlePrint = () => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof window.print === 'function') {
+      window.print();
+    }
+  };
+
+  const handleDownload = () => {
+    const lines = ['Employee,Start,End,Type,Status'];
+    for (const s of currentWeekShifts) {
+      lines.push(
+        [
+          String(s.employee_id ?? s.employee ?? ''),
+          String(s.start_time ?? ''),
+          String(s.end_time ?? ''),
+          String(s.shift_type ?? ''),
+          String(s.status ?? ''),
+        ].join(',')
+      );
+    }
+    const csv = lines.join('\n');
+    if (Platform.OS === 'web' && typeof document !== 'undefined') {
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `schedule_${rangeStart.toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  const handleCopyTemplateToCurrentWeek = async (template: SavedWeekTemplate) => {
+    if (!selectedCompanyId) return;
+    const src = new Date(template.weekStartISO);
+    const dst = new Date(rangeStart);
+    const deltaMs = dst.getTime() - src.getTime();
+    setLoading(true);
+    try {
+      for (const s of template.shifts) {
+        const st = new Date(s.start_time);
+        const et = s.end_time ? new Date(s.end_time) : null;
+        const shiftedStart = new Date(st.getTime() + deltaMs);
+        const shiftedEnd = et ? new Date(et.getTime() + deltaMs) : undefined;
+        await api.createShift({
+          company: selectedCompanyId,
+          employee: s.employee,
+          start_time: shiftedStart.toISOString(),
+          end_time: shiftedEnd ? shiftedEnd.toISOString() : undefined,
+          break_duration_minutes: s.break_duration_minutes ?? 0,
+          notes: s.notes,
+          shift_type: s.shift_type,
+          hourly_rate: s.hourly_rate,
+          status: s.status,
+        });
+      }
+      await loadEmployeesAndShifts();
+      Alert.alert('Copied', `Template copied to ${formatWeekToolbar(rangeStart, rangeEnd)}`);
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to copy template');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   if (loading) {
     return (
       <View style={styles.centered}>
-        <ActivityIndicator size="large" color="#3b82f6" />
+        <ActivityIndicator size="large" color="#2563eb" />
       </View>
     );
   }
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Schedule</Text>
-        <Text style={styles.weekLabel}>{weekLabel}</Text>
-      </View>
-      {filteredCompanies.length > 0 && (
-        <ScrollView horizontal style={styles.tabs} contentContainerStyle={styles.tabsContent} showsHorizontalScrollIndicator={false}>
-          {filteredCompanies.map((c) => (
+    <ScrollView
+      style={styles.page}
+      contentContainerStyle={styles.pageContent}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+    >
+      <View style={styles.mainCard}>
+        <View style={styles.titleRow}>
+          <View style={styles.titleLeft}>
+            <MaterialCommunityIcons name="calendar-month" size={26} color="#2563eb" />
+            <Text style={styles.pageTitle}>Schedule</Text>
+          </View>
+          <View style={styles.filtersRow}>
+            {needsOrg && (
+              <TouchableOpacity style={styles.selectBtn} onPress={() => setOrgModal(true)} activeOpacity={0.8}>
+                <Text style={styles.selectBtnText} numberOfLines={1}>
+                  {selectedOrgId ? selectedOrgName || 'Organization' : 'Select organization'}
+                </Text>
+                <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
+              </TouchableOpacity>
+            )}
             <TouchableOpacity
-              key={c.id}
-              style={[styles.tab, selectedCompanyId === c.id && styles.tabActive]}
-              onPress={() => setSelectedCompanyId(c.id)}
+              style={[styles.selectBtn, needsOrg && !selectedOrgId && styles.selectBtnMuted]}
+              onPress={() => {
+                if (needsOrg && !selectedOrgId) return;
+                if (companiesFiltered.length === 0) return;
+                setCompanyModal(true);
+              }}
+              activeOpacity={0.8}
+              disabled={needsOrg && !selectedOrgId}
             >
-              <Text style={[styles.tabText, selectedCompanyId === c.id && styles.tabTextActive]} numberOfLines={1}>{c.name}</Text>
+              <Text style={[styles.selectBtnText, needsOrg && !selectedOrgId && styles.mutedText]} numberOfLines={1}>
+                {needsOrg && !selectedOrgId
+                  ? 'Select organization first'
+                  : companiesFiltered.length === 0 && selectedOrgId
+                    ? 'No companies in this organization'
+                    : selectedCompanyId
+                      ? selectedCompanyName || 'Company'
+                      : 'Select company'}
+              </Text>
+              <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
             </TouchableOpacity>
-          ))}
-        </ScrollView>
-      )}
-      <FlatList
-        data={shifts}
-        keyExtractor={(item) => item.id}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-        contentContainerStyle={styles.listContent}
-        ListEmptyComponent={<Text style={styles.empty}>{selectedCompanyId ? 'No shifts this week' : 'Select a company'}</Text>}
-        renderItem={({ item }) => (
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>
-              {new Date(item.start_time).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+          </View>
+        </View>
+
+        <View style={styles.toolbarInner}>
+          <View style={styles.toolbarTop}>
+            <View style={styles.dateNav}>
+              <TouchableOpacity onPress={goPrevWeek} style={styles.iconBtn} hitSlop={8}>
+                <MaterialCommunityIcons name="chevron-left" size={22} color="#0f172a" />
+              </TouchableOpacity>
+              <Text style={styles.dateRangeText}>
+                {'< '}
+                {formatWeekToolbar(rangeStart, rangeEnd)}
+                {' >'}
+              </Text>
+              <TouchableOpacity onPress={goNextWeek} style={styles.iconBtn} hitSlop={8}>
+                <MaterialCommunityIcons name="chevron-right" size={22} color="#0f172a" />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={goThisWeek} style={styles.iconBtn} hitSlop={8}>
+                <MaterialCommunityIcons name="calendar" size={22} color="#2563eb" />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.actionBtns}>
+              <TouchableOpacity style={styles.actionChip} onPress={() => setScheduleEditMode((v) => !v)}>
+                <MaterialCommunityIcons name="pencil-outline" size={18} color="#0f172a" />
+                <Text style={styles.actionChipText}>{scheduleEditMode ? 'Exit Edit' : 'Edit'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.actionChipPrimary} onPress={() => {}}>
+                <Text style={styles.actionChipPrimaryText}>+ Duplicate</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.actionPlain} onPress={handlePrint}>
+                <Text style={styles.actionPlainText}>Print</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.actionPlain} onPress={handleDownload}>
+                <Text style={styles.actionPlainText}>Download</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.actionPlain} onPress={() => void handleClearWeek()}>
+                <MaterialCommunityIcons name="trash-can-outline" size={15} color="#ef4444" />
+                <Text style={styles.actionDangerText}>Clear</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.actionSaveChip} onPress={() => handleSaveTemplate()}>
+                <MaterialCommunityIcons name="check" size={15} color="#0f172a" />
+                <Text style={styles.actionSaveChipText}>Save</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.actionPublishChip, publishWeekLoading && { opacity: 0.6 }]}
+                onPress={() => void handlePublishTemplate()}
+                disabled={publishWeekLoading}
+              >
+                <Text style={styles.actionPublishChipText}>
+                  {publishWeekLoading ? 'Publishing…' : 'Publish'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.iconBtn} hitSlop={8}>
+                <MaterialCommunityIcons name="bell-outline" size={22} color="#0f172a" />
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+
+        {!selectedCompanyId ? (
+          <View style={styles.emptyInner}>
+            <Text style={styles.emptyText}>
+              {needsOrg && !selectedOrgId
+                ? 'Select an organization, then a company, to view and build employee schedules.'
+                : 'Select a company to view the schedule.'}
             </Text>
-            <Text style={styles.cardSub}>End: {item.end_time ? new Date(item.end_time).toLocaleTimeString([], { timeStyle: 'short' }) : '-'}</Text>
-            {item.employee_name && <Text style={styles.cardMeta}>{item.employee_name}</Text>}
+          </View>
+        ) : (
+          <View style={styles.tableWrap}>
+            <ScrollView horizontal showsHorizontalScrollIndicator style={styles.tableScroll}>
+              <View style={styles.table}>
+                <View style={[styles.tr, styles.trHeader]}>
+                  <View style={[styles.thEmp, { width: empColWidth }]}>
+                    <Text style={styles.thText}>Employee</Text>
+                  </View>
+                  {weekDays.map((day, idx) => {
+                    const isToday = sameCalendarDay(day, today);
+                    return (
+                      <KeyedFragment key={`h-${idx}`}>
+                        <View style={[styles.thDay, { width: colWidth }, ...(isToday ? [styles.colToday] : [])]}>
+                          <Text style={[styles.thDayMain, ...(isToday ? [styles.thDayMainToday] : [])]}>
+                            {day.toLocaleDateString(undefined, { weekday: 'short' })} {day.getDate()}
+                          </Text>
+                        </View>
+                      </KeyedFragment>
+                    );
+                  })}
+                </View>
+
+                {employees.length === 0 ? (
+                  <View style={styles.emptyRow}>
+                    <Text style={styles.emptyTextBold}>No employees found.</Text>
+                    <Text style={styles.emptySubtext}>Add employees to this company to start scheduling shifts.</Text>
+                  </View>
+                ) : (
+                  employees.map((emp) => (
+                    <KeyedView key={emp.id} style={styles.tr}>
+                      <View style={[styles.tdEmp, { width: empColWidth }]}>
+                        <View style={styles.avatar}>
+                          <Text style={styles.avatarText}>{initials(emp)}</Text>
+                        </View>
+                        <View style={styles.empMeta}>
+                          <Text style={styles.empName} numberOfLines={1}>
+                            {employeeDisplayName(emp)}
+                          </Text>
+                          <Text style={styles.empRole} numberOfLines={1}>
+                            {employeeRoleLabel(emp)}
+                          </Text>
+                        </View>
+                      </View>
+                      {weekDays.map((day, idx) => {
+                        const isToday = sameCalendarDay(day, today);
+                        const cellShifts = shifts.filter((s) => {
+                          const sid = String(s.employee_id ?? s.employee ?? '');
+                          if (sid !== String(emp.id)) return false;
+                          const st = s.start_time ? new Date(s.start_time) : null;
+                          return !!st && !Number.isNaN(st.getTime()) && sameCalendarDay(st, day);
+                        });
+                        return (
+                          <KeyedFragment key={`${emp.id}-${idx}`}>
+                            <View
+                              style={[styles.tdCell, { width: colWidth }, ...(isToday ? [styles.colToday] : [])]}
+                            >
+                              {cellShifts.length === 0 ? (
+                                scheduleEditMode ? (
+                                  <TouchableOpacity style={styles.addShiftCellBtn} onPress={() => openAddShift(emp, day)}>
+                                    <MaterialCommunityIcons name="plus" size={14} color="#0f172a" />
+                                    <Text style={styles.addShiftCellText}>Add Shift</Text>
+                                  </TouchableOpacity>
+                                ) : (
+                                  <Text style={styles.cellText}>-</Text>
+                                )
+                              ) : (
+                                <View style={styles.shiftCellStack}>
+                                  {cellShifts.map((s, i) => {
+                                    const st = s.start_time ? new Date(s.start_time) : null;
+                                    const et = s.end_time ? new Date(s.end_time) : null;
+                                    const t1 = st
+                                      ? st.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+                                      : '—';
+                                    const t2 = et
+                                      ? et.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+                                      : '';
+                                    return (
+                                      <TouchableOpacity
+                                        key={`${emp.id}-${idx}-${i}`}
+                                        style={styles.shiftCellCard}
+                                        activeOpacity={scheduleEditMode ? 0.88 : 1}
+                                        onPress={() => scheduleEditMode && openEditShift(emp, s)}
+                                      >
+                                        <Text style={styles.shiftCellTime}>
+                                          {t2 ? `${t1} - ${t2}` : t1}
+                                        </Text>
+                                        <TouchableOpacity style={styles.shiftAddTaskRow}>
+                                          <MaterialCommunityIcons name="format-list-checks" size={12} color="#64748b" />
+                                          <Text style={styles.shiftAddTaskText}>Add Task</Text>
+                                        </TouchableOpacity>
+                                      </TouchableOpacity>
+                                    );
+                                  })}
+                                </View>
+                              )}
+                            </View>
+                          </KeyedFragment>
+                        );
+                      })}
+                    </KeyedView>
+                  ))
+                )}
+              </View>
+            </ScrollView>
           </View>
         )}
+      </View>
+
+      {selectedOrgId && selectedCompanyId ? (
+        <View style={styles.savedCard}>
+          <Text style={styles.savedTitle}>
+            All Schedules — {selectedOrgName || 'Organization'} · {selectedCompanyName || 'Company'}
+          </Text>
+          <Text style={styles.savedSubtitle}>Saved schedules for {selectedCompanyName || 'this company'}.</Text>
+          {savedTemplates.filter((t) => t.companyId === String(selectedCompanyId)).length === 0 ? (
+            <View style={styles.savedEmpty}>
+              <MaterialCommunityIcons name="calendar-blank-outline" size={48} color="#cbd5e1" />
+              <Text style={styles.savedEmptyText}>No saved schedules yet.</Text>
+              <Text style={styles.savedEmptyHint}>Click Save to create a schedule template card here.</Text>
+            </View>
+          ) : (
+            <View style={styles.savedList}>
+              {savedTemplates
+                .filter((t) => t.companyId === String(selectedCompanyId))
+                .map((t) => (
+                  <View key={t.id} style={styles.savedItemCard}>
+                    <Text style={styles.savedItemTitle}>{t.weekLabel}</Text>
+                    <Text style={styles.savedItemMeta}>{t.published ? 'Published schedule' : 'Saved schedule'}</Text>
+                    <Text style={styles.savedItemMeta2}>
+                      Saved: {new Date(t.savedAtISO).toLocaleDateString()} · {t.shiftCount} shifts
+                    </Text>
+                    <View style={styles.savedItemActions}>
+                      <TouchableOpacity
+                        style={styles.savedEditBtn}
+                        onPress={() => {
+                          setWeekAnchor(new Date(t.weekStartISO));
+                          setScheduleEditMode(true);
+                        }}
+                      >
+                        <MaterialCommunityIcons name="pencil-outline" size={14} color="#fff" />
+                        <Text style={styles.savedEditBtnText}>Edit</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.savedCopyBtn}
+                        onPress={() => void handleCopyTemplateToCurrentWeek(t)}
+                      >
+                        <MaterialCommunityIcons name="content-copy" size={14} color="#334155" />
+                        <Text style={styles.savedCopyBtnText}>
+                          Copy to {formatWeekToolbar(rangeStart, rangeEnd).replace(' – ', ' - ')}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ))}
+            </View>
+          )}
+        </View>
+      ) : null}
+
+      <PickerModal
+        visible={orgModal}
+        title="Select organization"
+        options={orgOptions}
+        onSelect={(id) => {
+          setSelectedOrgId(id);
+          setSelectedCompanyId(null);
+        }}
+        onClose={() => setOrgModal(false)}
       />
-    </View>
+      <PickerModal
+        visible={companyModal}
+        title="Select company"
+        options={companyOptions}
+        onSelect={(id) => setSelectedCompanyId(id)}
+        onClose={() => setCompanyModal(false)}
+      />
+
+      <Modal visible={shiftModalOpen} transparent animationType="fade" onRequestClose={() => !shiftSaving && setShiftModalOpen(false)}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.shiftModalOverlay}
+        >
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => !shiftSaving && setShiftModalOpen(false)} />
+          <View
+            style={[
+              styles.shiftModalCard,
+              {
+                maxHeight: Math.min(640, height * 0.9),
+                width: Math.min(width - 32, 480),
+              },
+            ]}
+          >
+            <View style={styles.shiftModalHead}>
+              <Text style={styles.modalTitleNoBorder}>{editingShiftId ? 'Edit Shift' : 'Add Shift'}</Text>
+              <TouchableOpacity onPress={() => !shiftSaving && setShiftModalOpen(false)} hitSlop={10}>
+                <MaterialCommunityIcons name="close" size={22} color="#64748b" />
+              </TouchableOpacity>
+            </View>
+            <ScrollView
+              style={styles.shiftModalScroll}
+              contentContainerStyle={styles.shiftModalScrollContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              <View style={styles.shiftMetaBox}>
+                <Text style={styles.shiftMetaName}>
+                  {shiftEmployee ? `${employeeDisplayName(shiftEmployee)} —` : 'Employee —'}
+                </Text>
+                <Text style={styles.shiftMetaDate}>
+                  {shiftDay
+                    ? shiftDay.toLocaleDateString(undefined, {
+                        weekday: 'long',
+                        month: 'long',
+                        day: 'numeric',
+                        year: 'numeric',
+                      })
+                    : ''}
+                </Text>
+              </View>
+              <View style={styles.shiftRow2}>
+                <View style={styles.shiftCol}>
+                  <Text style={styles.shiftLbl}>Employee *</Text>
+                  <View style={styles.shiftSelectStatic}>
+                    <Text style={styles.shiftSelectText} numberOfLines={1}>
+                      {shiftEmployee ? employeeDisplayName(shiftEmployee) : 'Select employee'}
+                    </Text>
+                    <MaterialCommunityIcons name="chevron-down" size={20} color="#94a3b8" />
+                  </View>
+                </View>
+                <View style={styles.shiftCol}>
+                  <Text style={styles.shiftLbl}>Department</Text>
+                  <View style={styles.shiftSelectStatic}>
+                    <Text style={[styles.shiftSelectText, !shiftDepartment && styles.mutedText]} numberOfLines={1}>
+                      {shiftDepartment || 'Select department'}
+                    </Text>
+                    <MaterialCommunityIcons name="chevron-down" size={20} color="#94a3b8" />
+                  </View>
+                </View>
+              </View>
+
+              <Text style={styles.shiftLbl}>Date *</Text>
+              <View style={styles.timeInputWrap}>
+                <TextInput
+                  style={styles.timeInput}
+                  value={shiftDateInput}
+                  onChangeText={setShiftDateInput}
+                  placeholder="dd-mm-yyyy"
+                />
+                <MaterialCommunityIcons name="calendar-month-outline" size={18} color="#94a3b8" />
+              </View>
+
+              <Text style={styles.shiftLbl}>Shift Type</Text>
+              <TouchableOpacity
+                style={styles.shiftSelect}
+                onPress={() => !shiftSaving && setShiftTypePickerOpen(true)}
+                activeOpacity={0.85}
+                disabled={shiftSaving}
+              >
+                <Text style={styles.shiftSelectText} numberOfLines={1}>
+                  {shiftType}
+                </Text>
+                <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
+              </TouchableOpacity>
+              <View style={styles.shiftRow2}>
+                <View style={styles.shiftCol}>
+                  <Text style={styles.shiftLbl}>Start Time</Text>
+                  <View style={styles.timeInputWrap}>
+                    <TextInput
+                      style={styles.timeInput}
+                      value={shiftStart}
+                      onChangeText={setShiftStart}
+                      placeholder="06:00"
+                    />
+                    <TouchableOpacity
+                      onPress={() => !shiftSaving && openShiftTimePicker('start')}
+                      disabled={shiftSaving}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      accessibilityLabel="Open start time picker"
+                    >
+                      <MaterialCommunityIcons name="clock-outline" size={18} color="#64748b" />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+                <View style={styles.shiftCol}>
+                  <Text style={styles.shiftLbl}>End Time</Text>
+                  <View style={styles.timeInputWrap}>
+                    <TextInput
+                      style={styles.timeInput}
+                      value={shiftEnd}
+                      onChangeText={setShiftEnd}
+                      placeholder="14:00"
+                    />
+                    <TouchableOpacity
+                      onPress={() => !shiftSaving && openShiftTimePicker('end')}
+                      disabled={shiftSaving}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      accessibilityLabel="Open end time picker"
+                    >
+                      <MaterialCommunityIcons name="clock-outline" size={18} color="#64748b" />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+              <Text style={styles.shiftLbl}>Break Duration (minutes)</Text>
+              <TouchableOpacity
+                style={styles.shiftSelect}
+                onPress={() => !shiftSaving && setShiftBreakPickerOpen(true)}
+                activeOpacity={0.85}
+                disabled={shiftSaving}
+              >
+                <Text style={styles.shiftSelectText} numberOfLines={1}>
+                  {shiftBreakMin}
+                </Text>
+                <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
+              </TouchableOpacity>
+              {!editingShiftId ? (
+                <TouchableOpacity
+                  style={styles.copyShiftCard}
+                  onPress={() => setShiftCopyWeek((v) => !v)}
+                  activeOpacity={0.85}
+                  disabled={shiftSaving}
+                >
+                  <View style={[styles.copyBox, shiftCopyWeek && styles.copyBoxOn]}>
+                    {shiftCopyWeek ? <MaterialCommunityIcons name="check" size={12} color="#fff" /> : null}
+                  </View>
+                  <MaterialCommunityIcons name="content-copy" size={16} color="#64748b" />
+                  <Text style={styles.copyShiftText}>Copy this shift to other days</Text>
+                </TouchableOpacity>
+              ) : null}
+
+              <Text style={styles.shiftLbl}>Hourly Rate</Text>
+              <TextInput
+                style={styles.shiftInput}
+                value={shiftHourlyRate}
+                onChangeText={setShiftHourlyRate}
+                keyboardType="decimal-pad"
+                placeholder="15.00"
+              />
+
+              <Text style={styles.shiftLbl}>Status</Text>
+              <TouchableOpacity
+                style={styles.shiftSelect}
+                onPress={() => !shiftSaving && setShiftStatusPickerOpen(true)}
+                activeOpacity={0.85}
+                disabled={shiftSaving}
+              >
+                <Text style={styles.shiftSelectText} numberOfLines={1}>
+                  {shiftStatus}
+                </Text>
+                <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
+              </TouchableOpacity>
+              <Text style={styles.shiftLbl}>Notes (optional)</Text>
+              <TextInput
+                style={styles.shiftNotesInput}
+                value={shiftNotes}
+                onChangeText={setShiftNotes}
+                placeholder="Any special instructions..."
+                placeholderTextColor="#94a3b8"
+                multiline
+              />
+            </ScrollView>
+            <View style={styles.shiftModalFooter}>
+              {editingShiftId ? (
+                <TouchableOpacity style={styles.shiftDeleteBtn} onPress={deleteEditingShift} disabled={shiftSaving}>
+                  <MaterialCommunityIcons name="trash-can-outline" size={16} color="#fff" />
+                  <Text style={styles.shiftDeleteText}>Delete</Text>
+                </TouchableOpacity>
+              ) : null}
+              <TouchableOpacity
+                style={styles.shiftCancelBtn}
+                onPress={() => !shiftSaving && setShiftModalOpen(false)}
+                disabled={shiftSaving}
+              >
+                <Text style={styles.shiftCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.shiftSaveBtn, shiftSaving && styles.shiftBtnDisabled]}
+                onPress={() => void submitShift()}
+                disabled={shiftSaving}
+              >
+                <Text style={styles.shiftSaveText}>
+                  {shiftSaving ? 'Saving…' : editingShiftId ? 'Update Shift' : 'Add Shift'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal
+        visible={timePickerField !== null && shiftModalOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setTimePickerField(null)}
+      >
+        <View style={styles.timePickerOverlay}>
+          <Pressable style={styles.timePickerBackdrop} onPress={() => setTimePickerField(null)} />
+          <View style={styles.timePickerCenter} pointerEvents="box-none">
+            <View style={styles.timePickerSheet} pointerEvents="auto">
+              <Text style={styles.timePickerSheetTitle}>
+                {timePickerField === 'start' ? 'Start time' : 'End time'}
+              </Text>
+              <View style={styles.timePickerColumns}>
+                <ScrollView style={styles.timePickerColumn} showsVerticalScrollIndicator keyboardShouldPersistTaps="handled">
+                  {TIME_PICKER_HOURS.map((h) => (
+                    <TouchableOpacity
+                      key={`h-${h}`}
+                      style={[styles.timePickerOption, timePickerHour === h && styles.timePickerOptionSelected]}
+                      onPress={() => setTimePickerHour(h)}
+                    >
+                      <Text
+                        style={[
+                          styles.timePickerOptionText,
+                          timePickerHour === h && styles.timePickerOptionTextSelected,
+                        ]}
+                      >
+                        {pad2(h)}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+                <ScrollView
+                  style={[styles.timePickerColumn, styles.timePickerColumnRight]}
+                  showsVerticalScrollIndicator
+                  keyboardShouldPersistTaps="handled"
+                >
+                  {TIME_PICKER_MINUTES.map((m) => (
+                    <TouchableOpacity
+                      key={`m-${m}`}
+                      style={[styles.timePickerOption, timePickerMinute === m && styles.timePickerOptionSelected]}
+                      onPress={() => setTimePickerMinute(m)}
+                    >
+                      <Text
+                        style={[
+                          styles.timePickerOptionText,
+                          timePickerMinute === m && styles.timePickerOptionTextSelected,
+                        ]}
+                      >
+                        {pad2(m)}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+              <View style={styles.timePickerFooter}>
+                <TouchableOpacity style={styles.timePickerBtnGhost} onPress={() => setTimePickerField(null)}>
+                  <Text style={styles.timePickerBtnGhostText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.timePickerBtnPrimary} onPress={confirmShiftTimePicker}>
+                  <Text style={styles.timePickerBtnPrimaryText}>Done</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <PickerModal
+        visible={shiftTypePickerOpen}
+        title="Shift Type"
+        options={SHIFT_TYPE_PICKER_OPTIONS}
+        onSelect={(id) => {
+          setShiftType(id);
+          const def = SHIFT_TYPE_DEFAULT_TIMES[id];
+          if (def) {
+            setShiftStart(def.start);
+            setShiftEnd(def.end);
+          }
+        }}
+        onClose={() => setShiftTypePickerOpen(false)}
+      />
+      <PickerModal
+        visible={shiftBreakPickerOpen}
+        title="Break Duration"
+        options={BREAK_PICKER_OPTIONS}
+        onSelect={(id) => setShiftBreakMin(id)}
+        onClose={() => setShiftBreakPickerOpen(false)}
+      />
+      <PickerModal
+        visible={shiftStatusPickerOpen}
+        title="Status"
+        options={STATUS_PICKER_OPTIONS}
+        onSelect={(id) => setShiftStatus(id)}
+        onClose={() => setShiftStatusPickerOpen(false)}
+      />
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f8fafc' },
-  centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  header: { padding: 20, backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#e2e8f0' },
-  title: { fontSize: 20, fontWeight: '700', color: '#0f172a' },
-  weekLabel: { fontSize: 13, color: '#64748b', marginTop: 4 },
-  tabs: { maxHeight: 48, backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#e2e8f0' },
-  tabsContent: { paddingHorizontal: 12, paddingVertical: 8, flexDirection: 'row', alignItems: 'center' },
-  tab: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 8, marginRight: 8 },
-  tabActive: { backgroundColor: '#3b82f6' },
-  tabText: { fontSize: 14, color: '#64748b' },
-  tabTextActive: { color: '#fff', fontWeight: '600' },
-  listContent: { padding: 16, paddingBottom: 48 },
-  card: { backgroundColor: '#fff', borderRadius: 10, padding: 14, marginBottom: 8, borderWidth: 1, borderColor: '#e2e8f0' },
-  cardTitle: { fontSize: 15, fontWeight: '600', color: '#0f172a' },
-  cardSub: { fontSize: 13, color: '#64748b', marginTop: 4 },
-  cardMeta: { fontSize: 12, color: '#94a3b8', marginTop: 2 },
-  empty: { padding: 24, textAlign: 'center', color: '#64748b' },
+  page: { flex: 1, backgroundColor: '#f1f5f9' },
+  pageContent: { paddingBottom: 48, paddingTop: 16 },
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#f1f5f9' },
+  mainCard: {
+    marginHorizontal: 16,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    overflow: 'hidden',
+    ...Platform.select({
+      web: { boxShadow: '0 1px 3px rgba(15, 23, 42, 0.08)' },
+      default: {
+        elevation: 2,
+        shadowColor: '#0f172a',
+        shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.08,
+        shadowRadius: 4,
+      },
+    }),
+  },
+  titleRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 18,
+    paddingTop: 18,
+    paddingBottom: 14,
+    gap: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  titleLeft: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  pageTitle: { fontSize: 22, fontWeight: '700', color: '#0f172a', letterSpacing: -0.3 },
+  filtersRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
+  selectBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    minWidth: 140,
+    maxWidth: 220,
+  },
+  selectBtnMuted: { opacity: 0.7 },
+  selectBtnText: { flex: 1, fontSize: 13, color: '#0f172a', fontWeight: '500' },
+  mutedText: { color: '#94a3b8' },
+  toolbarInner: { paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
+  toolbarTop: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  dateNav: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  dateRangeText: { fontSize: 15, fontWeight: '600', color: '#0f172a', marginHorizontal: 4 },
+  iconBtn: { padding: 4 },
+  actionBtns: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
+  actionChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#f1f5f9',
+  },
+  actionChipText: { fontSize: 13, fontWeight: '500', color: '#0f172a' },
+  actionChipPrimary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#2563eb',
+  },
+  actionChipPrimaryText: { fontSize: 13, fontWeight: '600', color: '#fff' },
+  actionPlain: { paddingHorizontal: 8, paddingVertical: 6 },
+  actionPlainText: { fontSize: 13, fontWeight: '500', color: '#475569' },
+  actionDangerText: { fontSize: 13, fontWeight: '500', color: '#ef4444' },
+  actionSaveChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    backgroundColor: '#fff',
+  },
+  actionSaveChipText: { fontSize: 13, fontWeight: '600', color: '#0f172a' },
+  actionPublishChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#2563eb',
+  },
+  actionPublishChipText: { fontSize: 13, fontWeight: '700', color: '#fff' },
+  tableWrap: { backgroundColor: '#fff' },
+  tableScroll: { marginHorizontal: 0 },
+  table: { borderTopWidth: 1, borderLeftWidth: 1, borderColor: '#e2e8f0' },
+  tr: { flexDirection: 'row', borderBottomWidth: 1, borderColor: '#e2e8f0', backgroundColor: '#fff' },
+  trHeader: { backgroundColor: '#f8fafc' },
+  thEmp: { padding: 12, justifyContent: 'center', borderRightWidth: 1, borderColor: '#e2e8f0' },
+  thText: { fontSize: 11, fontWeight: '700', color: '#64748b', textTransform: 'uppercase', letterSpacing: 0.5 },
+  thDay: { padding: 12, alignItems: 'center', justifyContent: 'center', borderRightWidth: 1, borderColor: '#e2e8f0' },
+  colToday: { backgroundColor: '#eff6ff' },
+  thDayMain: { fontSize: 13, fontWeight: '600', color: '#0f172a', textAlign: 'center' },
+  thDayMainToday: { color: '#1d4ed8', fontWeight: '700' },
+  tdEmp: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    gap: 10,
+    borderRightWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  avatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#e2e8f0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarText: { fontSize: 13, fontWeight: '700', color: '#475569' },
+  empMeta: { flex: 1, minWidth: 0 },
+  empName: { fontSize: 14, fontWeight: '600', color: '#0f172a' },
+  empRole: { fontSize: 12, color: '#64748b', marginTop: 2 },
+  tdCell: {
+    padding: 10,
+    borderRightWidth: 1,
+    borderColor: '#e2e8f0',
+    justifyContent: 'center',
+    minHeight: 64,
+  },
+  cellText: { fontSize: 13, color: '#64748b', textAlign: 'center' },
+  emptyInner: { paddingVertical: 48, paddingHorizontal: 24, alignItems: 'center', minHeight: 200, justifyContent: 'center' },
+  emptyRow: { padding: 28, width: '100%', alignItems: 'center' },
+  emptyText: { fontSize: 15, color: '#64748b', textAlign: 'center', lineHeight: 22 },
+  emptyTextBold: { fontSize: 15, fontWeight: '600', color: '#475569', textAlign: 'center' },
+  emptySubtext: { fontSize: 14, color: '#94a3b8', textAlign: 'center', marginTop: 6, paddingHorizontal: 16 },
+  savedCard: {
+    marginHorizontal: 16,
+    marginTop: 16,
+    padding: 20,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    ...Platform.select({
+      web: { boxShadow: '0 1px 2px rgba(15, 23, 42, 0.05)' },
+      default: { elevation: 1 },
+    }),
+  },
+  savedTitle: { fontSize: 16, fontWeight: '700', color: '#0f172a' },
+  savedSubtitle: { fontSize: 13, color: '#64748b', marginTop: 4, marginBottom: 16 },
+  savedEmpty: { alignItems: 'center', paddingVertical: 28 },
+  savedEmptyText: { fontSize: 15, fontWeight: '500', color: '#64748b', marginTop: 12 },
+  savedEmptyHint: { fontSize: 13, color: '#94a3b8', textAlign: 'center', marginTop: 6, paddingHorizontal: 12 },
+  savedList: { gap: 10, marginTop: 4 },
+  savedItemCard: {
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 10,
+    padding: 12,
+    backgroundColor: '#fff',
+    maxWidth: 320,
+  },
+  savedItemTitle: { fontSize: 18, fontWeight: '700', color: '#0f172a' },
+  savedItemMeta: { marginTop: 4, fontSize: 13, color: '#64748b' },
+  savedItemMeta2: { marginTop: 4, fontSize: 12, color: '#94a3b8' },
+  savedItemActions: { marginTop: 10, gap: 8 },
+  savedEditBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#3b5bdb',
+    borderRadius: 8,
+    paddingVertical: 8,
+  },
+  savedEditBtnText: { color: '#fff', fontWeight: '600', fontSize: 13 },
+  savedCopyBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 8,
+    paddingVertical: 8,
+    backgroundColor: '#f8fafc',
+  },
+  savedCopyBtnText: { color: '#334155', fontWeight: '600', fontSize: 13 },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  modalBox: {
+    width: '100%',
+    maxWidth: 400,
+    maxHeight: '70%',
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    paddingVertical: 8,
+    zIndex: 2,
+  },
+  shiftModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+  },
+  shiftModalCard: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    overflow: 'hidden',
+    zIndex: 2,
+    flexDirection: 'column',
+    ...Platform.select({
+      web: { boxShadow: '0 12px 40px rgba(15, 23, 42, 0.18)' },
+      default: {
+        elevation: 12,
+        shadowColor: '#0f172a',
+        shadowOffset: { width: 0, height: 8 },
+        shadowOpacity: 0.15,
+        shadowRadius: 16,
+      },
+    }),
+  },
+  shiftModalScroll: { flexGrow: 1, flexShrink: 1, minHeight: 80 },
+  shiftModalScrollContent: { paddingBottom: 8 },
+  shiftCol: { flex: 1, minWidth: 0 },
+  modalTitle: { fontSize: 16, fontWeight: '700', padding: 16, borderBottomWidth: 1, borderColor: '#e2e8f0' },
+  modalRow: { paddingVertical: 14, paddingHorizontal: 16, borderBottomWidth: 1, borderColor: '#f1f5f9' },
+  modalRowText: { fontSize: 15, color: '#0f172a' },
+
+  shiftCellStack: { width: '100%', gap: 6 },
+  shiftCellCard: {
+    borderWidth: 1,
+    borderColor: '#dbe3f2',
+    backgroundColor: '#f5f7ff',
+    borderRadius: 6,
+    paddingVertical: 6,
+    paddingHorizontal: 6,
+    alignItems: 'center',
+    gap: 4,
+  },
+  shiftCellTime: { fontSize: 11, color: '#334155', textAlign: 'center' },
+  shiftAddTaskRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  shiftAddTaskText: { fontSize: 11, color: '#64748b' },
+  addShiftCellBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 4 },
+  addShiftCellText: { fontSize: 12, color: '#0f172a', fontWeight: '500' },
+
+  modalTitleNoBorder: { fontSize: 18, fontWeight: '700', color: '#0f172a' },
+  shiftModalHead: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e2e8f0',
+  },
+  shiftMetaBox: {
+    marginHorizontal: 16,
+    marginTop: 14,
+    marginBottom: 4,
+    backgroundColor: '#f1f5f9',
+    borderRadius: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+  },
+  shiftMetaName: { fontSize: 16, fontWeight: '700', color: '#0f172a' },
+  shiftMetaDate: { fontSize: 14, color: '#64748b', marginTop: 4 },
+  shiftLbl: { marginHorizontal: 16, marginTop: 14, marginBottom: 8, fontSize: 14, fontWeight: '600', color: '#0f172a' },
+  shiftSelect: {
+    marginHorizontal: 16,
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    borderRadius: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    backgroundColor: '#fff',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  shiftSelectStatic: {
+    marginHorizontal: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    backgroundColor: '#f8fafc',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  shiftSelectText: { flex: 1, fontSize: 14, color: '#0f172a', marginRight: 8 },
+  shiftInput: {
+    marginHorizontal: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    fontSize: 14,
+    color: '#0f172a',
+    backgroundColor: '#fff',
+  },
+  shiftRow2: { flexDirection: 'row', gap: 12, marginHorizontal: 16 },
+  timeInputWrap: {
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+  },
+  timeInput: { flex: 1, fontSize: 14, color: '#0f172a', paddingVertical: Platform.OS === 'web' ? 8 : 10 },
+  copyShiftCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginHorizontal: 16,
+    marginTop: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 8,
+    backgroundColor: '#fafafa',
+  },
+  copyBox: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: '#94a3b8',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+  },
+  copyBoxOn: { backgroundColor: '#2563eb', borderColor: '#2563eb' },
+  copyShiftText: { flex: 1, fontSize: 14, color: '#334155' },
+  shiftNotesInput: {
+    marginHorizontal: 16,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    borderRadius: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    minHeight: 88,
+    fontSize: 14,
+    color: '#0f172a',
+    backgroundColor: '#fff',
+    textAlignVertical: 'top',
+    ...Platform.select({
+      web: { outlineStyle: 'none' } as any,
+      default: {},
+    }),
+  },
+  shiftModalFooter: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+    backgroundColor: '#fff',
+  },
+  shiftCancelBtn: {
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    backgroundColor: '#fff',
+  },
+  shiftCancelText: { fontSize: 14, color: '#0f172a', fontWeight: '500' },
+  shiftSaveBtn: { backgroundColor: '#2563eb', borderRadius: 8, paddingVertical: 10, paddingHorizontal: 20 },
+  shiftSaveText: { color: '#fff', fontWeight: '600', fontSize: 14 },
+  shiftDeleteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+    backgroundColor: '#ef4444',
+  },
+  shiftDeleteText: { color: '#fff', fontWeight: '600', fontSize: 14 },
+  shiftBtnDisabled: { opacity: 0.6 },
+
+  timePickerOverlay: { flex: 1 },
+  timePickerBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(15, 23, 42, 0.45)',
+  },
+  timePickerCenter: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  timePickerSheet: {
+    width: '100%',
+    maxWidth: 300,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+    ...Platform.select({
+      web: { boxShadow: '0 12px 40px rgba(15, 23, 42, 0.18)' },
+      default: {
+        elevation: 12,
+        shadowColor: '#0f172a',
+        shadowOffset: { width: 0, height: 8 },
+        shadowOpacity: 0.15,
+        shadowRadius: 16,
+      },
+    }),
+  },
+  timePickerSheetTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#0f172a',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  timePickerColumns: {
+    flexDirection: 'row',
+    height: 220,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  timePickerColumn: { flex: 1 },
+  timePickerColumnRight: { borderLeftWidth: 1, borderLeftColor: '#e2e8f0' },
+  timePickerOption: {
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  timePickerOptionSelected: { backgroundColor: '#e2e8f0' },
+  timePickerOptionText: { fontSize: 15, color: '#334155' },
+  timePickerOptionTextSelected: { fontWeight: '700', color: '#0f172a' },
+  timePickerFooter: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+    marginTop: 16,
+    alignItems: 'center',
+  },
+  timePickerBtnGhost: {
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    backgroundColor: '#fff',
+  },
+  timePickerBtnGhostText: { fontSize: 14, color: '#0f172a', fontWeight: '500' },
+  timePickerBtnPrimary: { backgroundColor: '#2563eb', borderRadius: 8, paddingVertical: 10, paddingHorizontal: 18 },
+  timePickerBtnPrimaryText: { color: '#fff', fontWeight: '600', fontSize: 14 },
 });

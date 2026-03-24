@@ -13,13 +13,6 @@ import {
 import apiClient from '../lib/api-client';
 import { useAuth } from '../context/AuthContext';
 
-function getAccessToken(data: any): string | undefined {
-  return data?.access ?? data?.access_token;
-}
-function getRefreshToken(data: any): string | undefined {
-  return data?.refresh ?? data?.refresh_token;
-}
-
 export default function AuthScreen({ navigation }: any) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -34,17 +27,12 @@ export default function AuthScreen({ navigation }: any) {
     }
     setLoading(true);
     try {
-      const response = await apiClient.login(trimmed, password);
-      const userData = response?.user;
-      const access = getAccessToken(response);
-      const refresh = getRefreshToken(response);
-      if (userData && access) {
-        setSessionFromLogin({
-          user: userData,
-          access,
-          refresh,
-        });
-      }
+      const { user, access, refresh } = await apiClient.loginWithSession(trimmed, password);
+      setSessionFromLogin({
+        user,
+        access,
+        refresh,
+      });
     } catch (e: any) {
       Alert.alert('Sign in failed', e?.message || 'Invalid username or password.');
     } finally {

@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import apiClient from '../lib/api-client';
-import { getPrimaryRole, type UserRole } from '../types/auth';
+import { getPrimaryRoleFromUser, type UserRole } from '../types/auth';
 
 export interface User {
   id: string;
@@ -41,7 +41,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const userData = await apiClient.getCurrentUser();
           if (mounted && userData) {
             setUser(userData as User);
-            setRole(getPrimaryRole((userData as any)?.roles));
+            setRole(getPrimaryRoleFromUser(userData));
           }
         } else if (mounted) {
           setUser(null);
@@ -67,7 +67,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const setSessionFromLogin = useCallback((payload: { user: User; access: string; refresh?: string }) => {
     setUser(payload.user);
-    setRole(getPrimaryRole(payload.user?.roles));
+    setRole(getPrimaryRoleFromUser(payload.user));
     apiClient.setToken(payload.access);
   }, []);
 

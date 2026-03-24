@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import { useNavigation } from '@react-navigation/native';
+import { getMainDrawerInitialRoute } from '../navigation/mainDrawerInitialRoute';
 
 export default function HomeScreen() {
   const { user, role } = useAuth();
@@ -9,17 +10,8 @@ export default function HomeScreen() {
 
   useEffect(() => {
     if (!role) return;
-    if (role === 'super_admin' || role === 'admin') {
-      navigation.replace('SuperAdminDashboard');
-    } else if (role === 'operations_manager') {
-      navigation.replace('OrganizationDashboard');
-    } else if (role === 'manager') {
-      navigation.replace('CompanyDashboard');
-    } else if (role === 'employee' || role === 'house_keeping' || role === 'maintenance') {
-      navigation.replace('EmployeeDashboard');
-    } else {
-      navigation.replace('Calendar');
-    }
+    const target = getMainDrawerInitialRoute(role);
+    if (target !== 'Home') navigation.replace(target);
   }, [role, navigation]);
 
   return (
