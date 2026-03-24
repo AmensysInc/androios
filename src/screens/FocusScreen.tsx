@@ -77,9 +77,11 @@ function sessionId(s: any): string {
 }
 
 function inferStatus(s: any): 'completed' | 'planned' | 'active' {
-  const st = String(s.status ?? s.session_status ?? '').toLowerCase();
+  const st = String(s.status ?? s.session_status ?? '').toLowerCase().replace(/-/g, '_');
+  if (st === 'planned') return 'planned';
+  if (st === 'in_progress') return 'active';
+  if (st === 'completed' || st.includes('complete') || st.includes('done')) return 'completed';
   if (st.includes('plan')) return 'planned';
-  if (st.includes('complete') || st.includes('done')) return 'completed';
   if (st.includes('active') || st.includes('progress') || st.includes('running')) return 'active';
   if (sessionEnd(s)) return 'completed';
   if (sessionStart(s)) {
@@ -93,13 +95,13 @@ function inferStatus(s: any): 'completed' | 'planned' | 'active' {
 /** Matches web filters: task-based vs free-form vs planned */
 function sessionKind(s: any): 'task' | 'freeform' | 'planned' {
   if (inferStatus(s) === 'planned') return 'planned';
+  if (s.task_id != null && String(s.task_id).trim() !== '') return 'task';
   const st = String(s.session_type ?? s.type ?? '').toLowerCase();
   if (st.includes('task')) return 'task';
   if (st.includes('free')) return 'freeform';
   const hasTaskLink =
     s.calendar_event != null ||
     s.event != null ||
-    s.task_id != null ||
     (typeof s.calendar_event === 'object' && s.calendar_event != null);
   if (hasTaskLink) return 'task';
   const title = String(s.title || '').toLowerCase();
@@ -378,23 +380,29 @@ export default function FocusScreen() {
     adminUserId === 'self' ? 'My Sessions' : adminUsers.find((u) => u.id === adminUserId)?.label ?? 'Select user';
 
   const endRunningSession = async () => {
-    if (!runningSince || !user?.id) return;
+    if (!runningSince) return;
     const endIso = new Date().toISOString();
     const startIso = new Date(runningSince).toISOString();
+    const minutes = Math.max(1, Math.floor(elapsedSec / 60));
     setSaving(true);
     try {
       if (activeSessionId) {
         await api.updateFocusSession(activeSessionId, {
           end_time: endIso,
+          actual_duration: minutes,
           status: 'completed',
+          distractions: 0,
         });
       } else {
         await api.createFocusSession({
-          user: user.id,
+          title: 'Productive session',
           start_time: startIso,
           end_time: endIso,
-          title: 'Productive session',
+          planned_duration: minutes,
+          actual_duration: minutes,
           status: 'completed',
+          distractions: 0,
+          notes: '',
         });
       }
       setRunningSince(null);
@@ -420,34 +428,25 @@ export default function FocusScreen() {
       ]);
       return;
     }
-    if (!user?.id) return;
     setSaving(true);
     const startIso = new Date().toISOString();
     try {
       const created = await api.createFocusSession({
-        user: user.id,
-        start_time: startIso,
         title: 'Productive session',
+        start_time: startIso,
+        end_time: null,
+        planned_duration: 25,
         status: 'in_progress',
+        distractions: 0,
+        notes: '',
       });
       const sid = sessionId(created);
       setActiveSessionId(sid || null);
       setRunningSince(Date.now());
-    } catch {
-      try {
-        const created = await api.createFocusSession({
-          user: user.id,
-          start_time: startIso,
-          title: 'Productive session',
-        });
-        const sid = sessionId(created);
-        setActiveSessionId(sid || null);
-        setRunningSince(Date.now());
-      } catch (e2: any) {
-        Alert.alert('Error', e2?.message || 'Could not start session');
-        setRunningSince(null);
-        setActiveSessionId(null);
-      }
+    } catch (e2: any) {
+      Alert.alert('Error', e2?.message || 'Could not start session');
+      setRunningSince(null);
+      setActiveSessionId(null);
     } finally {
       setSaving(false);
     }
@@ -472,7 +471,7 @@ export default function FocusScreen() {
   };
 
   const startSessionForTask = async (ev: any) => {
-    if (!user?.id || !ev) return;
+    if (!ev) return;
     const eid = ev?.id ?? ev?.pk;
     const title = String(ev?.title || ev?.name || 'Task focus').slice(0, 200);
     setTaskModal(false);
@@ -480,58 +479,55 @@ export default function FocusScreen() {
     setSaving(true);
     const startIso = new Date().toISOString();
     const body: Record<string, any> = {
-      user: user.id,
+      title: `Focus: ${title}`,
       start_time: startIso,
-      title,
+      end_time: null,
+      planned_duration: 25,
       status: 'in_progress',
+      distractions: 0,
+      notes: '',
     };
-    if (eid != null) {
-      body.calendar_event = String(eid);
-      body.event = String(eid);
-      body.task_id = String(eid);
-    }
+    if (eid != null) body.task_id = String(eid);
     try {
       const created = await api.createFocusSession(body);
       setActiveSessionId(sessionId(created) || null);
       setRunningSince(Date.now());
-    } catch {
-      delete body.calendar_event;
-      delete body.event;
-      delete body.task_id;
-      try {
-        const created = await api.createFocusSession(body);
-        setActiveSessionId(sessionId(created) || null);
-        setRunningSince(Date.now());
-      } catch (e2: any) {
-        Alert.alert('Error', e2?.message || 'Could not start task session');
-      }
+    } catch (e2: any) {
+      Alert.alert('Error', e2?.message || 'Could not start task session');
     } finally {
       setSaving(false);
     }
   };
 
   const submitPlan = async () => {
-    if (!user?.id) return;
     const start = planStartStr.trim() ? new Date(planStartStr.trim()) : null;
     if (!start || Number.isNaN(start.getTime())) {
       Alert.alert('Validation', 'Enter a valid planned date and time.');
       return;
     }
-    setSaving(true);
-    const body: Record<string, any> = {
-      user: user.id,
-      start_time: start.toISOString(),
-      title: planTitle.trim() || 'Planned session',
-      description: planDescription.trim() || undefined,
-      status: 'planned',
-      planned_duration_minutes: parseInt(planDurationMin, 10) || 25,
-      duration_minutes: parseInt(planDurationMin, 10) || 25,
-    };
-    if (planLinkedEventId) {
-      body.calendar_event = planLinkedEventId;
-      body.event = planLinkedEventId;
-      body.task_id = planLinkedEventId;
+    const durationMins = parseInt(planDurationMin, 10) || 25;
+    if (durationMins < 1) {
+      Alert.alert('Validation', 'Choose a valid duration in minutes.');
+      return;
     }
+    const title = planTitle.trim();
+    if (!title) {
+      Alert.alert('Validation', 'Enter a session title.');
+      return;
+    }
+    setSaving(true);
+    const end = new Date(start.getTime() + durationMins * 60 * 1000);
+    const body: Record<string, any> = {
+      title,
+      description: planDescription.trim() || null,
+      start_time: start.toISOString(),
+      end_time: end.toISOString(),
+      planned_duration: durationMins,
+      status: 'planned',
+      distractions: 0,
+      notes: 'Planned session - not yet started',
+    };
+    if (planLinkedEventId) body.task_id = planLinkedEventId;
     try {
       await api.createFocusSession(body);
       setPlanModal(false);
@@ -543,24 +539,7 @@ export default function FocusScreen() {
       await loadMySessions();
       Alert.alert('Planned', 'Session added to your plan.');
     } catch (e: any) {
-      try {
-        const minimal = {
-          user: user.id,
-          start_time: start.toISOString(),
-          title: planTitle.trim() || 'Planned session',
-          status: 'planned',
-        };
-        await api.createFocusSession(minimal);
-        setPlanModal(false);
-        setPlanTitle('');
-        setPlanDescription('');
-        setPlanStartStr('');
-        setPlanLinkedEventId(null);
-        await loadMySessions();
-        Alert.alert('Planned', 'Session added (basic fields only).');
-      } catch (e2: any) {
-        Alert.alert('Error', e2?.message || e?.message || 'Could not plan session');
-      }
+      Alert.alert('Error', e?.message || 'Could not plan session');
     } finally {
       setSaving(false);
     }

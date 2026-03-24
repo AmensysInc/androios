@@ -343,13 +343,7 @@ export default function TemplateScreen() {
         );
         return;
       }
-      const companies = await api.getCompanies(
-        role === 'operations_manager' && user?.id
-          ? { organization_manager: user.id }
-          : role === 'manager' && user?.id
-            ? { company_manager: user.id }
-            : undefined
-      );
+      const companies = await api.getCompanies();
       const list = Array.isArray(companies) ? companies : [];
       const companyIds = list.map((c: any) => c?.id).filter(Boolean);
       const seen = new Set<string>();

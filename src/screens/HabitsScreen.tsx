@@ -99,6 +99,15 @@ const CATEGORY_OPTIONS: PickerOption[] = [
   { id: 'other', label: 'Other' },
 ];
 
+/** Web app uses shorter slugs stored in `icon` — map for display */
+const WEB_ICON_LABELS: Record<string, string> = {
+  health: 'Health & Fitness',
+  productivity: 'Productivity',
+  learning: 'Learning',
+  mindfulness: 'Mindfulness',
+  creative: 'Creative',
+};
+
 const FREQUENCY_OPTIONS: PickerOption[] = [
   { id: 'daily', label: 'Daily' },
   { id: 'weekly', label: 'Weekly' },
@@ -130,7 +139,11 @@ function habitDisplayName(h: any): string {
 }
 
 function categoryLabel(id: string): string {
-  return CATEGORY_OPTIONS.find((c) => c.id === id)?.label ?? id;
+  return (
+    CATEGORY_OPTIONS.find((c) => c.id === id)?.label ??
+    WEB_ICON_LABELS[id] ??
+    id.replace(/_/g, ' ')
+  );
 }
 
 function frequencyLabel(id: string): string {
@@ -386,15 +399,15 @@ export default function HabitsScreen() {
     const body: Record<string, any> = {
       name,
       description: formDescription.trim() || undefined,
-      category: formCategory,
+      icon: formCategory,
       frequency: formFrequency,
+      target_count: 1,
       start_date: start,
       color: formColor,
     };
     if (endIso) body.end_date = endIso;
     const notes = formNotes.trim();
     if (notes) body.notes = notes;
-    if (user?.id) body.user = user.id;
 
     Object.keys(body).forEach((k) => body[k] === undefined && delete body[k]);
     return body;
@@ -499,7 +512,8 @@ export default function HabitsScreen() {
         }
         renderItem={({ item }) => {
           const c = item.color || item.colour || COLOR_SWATCHES[0].hex;
-          const cat = item.category || item.category_display;
+          const catSlug = item.icon ?? item.category;
+          const catChip = catSlug ? categoryLabel(String(catSlug)) : null;
           const freq = item.frequency || item.recurrence;
           return (
             <View style={styles.habitCard}>
@@ -512,8 +526,8 @@ export default function HabitsScreen() {
                   </Text>
                 ) : null}
                 <View style={styles.habitMetaRow}>
-                  {cat ? (
-                    <Text style={styles.habitMetaChip}>{typeof cat === 'string' ? cat.replace(/_/g, ' ') : String(cat)}</Text>
+                  {catChip ? (
+                    <Text style={styles.habitMetaChip}>{catChip}</Text>
                   ) : null}
                   {freq ? <Text style={styles.habitMetaChip}>{String(freq)}</Text> : null}
                 </View>

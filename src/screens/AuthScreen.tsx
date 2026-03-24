@@ -28,7 +28,7 @@ export default function AuthScreen({ navigation }: any) {
     setLoading(true);
     try {
       const { user, access, refresh } = await apiClient.loginWithSession(trimmed, password);
-      setSessionFromLogin({
+      await setSessionFromLogin({
         user,
         access,
         refresh,

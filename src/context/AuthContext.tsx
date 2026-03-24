@@ -1,6 +1,13 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import apiClient from '../lib/api-client';
+import { Platform } from 'react-native';
+import apiClient, { HttpError } from '../lib/api-client';
 import { getPrimaryRoleFromUser, type UserRole } from '../types/auth';
+import {
+  isBiometricLoginEnabled,
+  authenticateWithBiometrics,
+  loadAccessTokenAfterBiometric,
+  clearBiometricLogin,
+} from '../lib/biometricAuth';
 
 export interface User {
   id: string;
@@ -22,10 +29,25 @@ type AuthState = {
 
 type AuthContextType = AuthState & {
   signOut: () => Promise<void>;
-  setSessionFromLogin: (payload: { user: User; access: string; refresh?: string }) => void;
+  setSessionFromLogin: (payload: { user: User; access: string; refresh?: string }) => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+async function loadUserWithTokenRefresh(): Promise<User | null> {
+  try {
+    const userData = await apiClient.getCurrentUser();
+    return userData as User | null;
+  } catch (e) {
+    if (e instanceof HttpError && e.status === 401) {
+      const ok = await apiClient.refreshAccessToken();
+      if (!ok) return null;
+      const userData = await apiClient.getCurrentUser();
+      return userData as User | null;
+    }
+    return null;
+  }
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -36,12 +58,49 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let mounted = true;
     (async () => {
       try {
+        const bioOn = Platform.OS !== 'web' && (await isBiometricLoginEnabled());
+
+        if (bioOn) {
+          const unlocked = await authenticateWithBiometrics('Unlock Zeno Time Flow');
+          if (!mounted) return;
+          if (!unlocked) {
+            setUser(null);
+            setRole(null);
+            setIsLoading(false);
+            return;
+          }
+          const access = await loadAccessTokenAfterBiometric();
+          if (!mounted) return;
+          if (!access) {
+            await clearBiometricLogin();
+            setUser(null);
+            setRole(null);
+            setIsLoading(false);
+            return;
+          }
+          await apiClient.setToken(access);
+          const userData = await loadUserWithTokenRefresh();
+          if (!mounted) return;
+          if (userData) {
+            setUser(userData);
+            setRole(getPrimaryRoleFromUser(userData));
+          } else {
+            setUser(null);
+            setRole(null);
+          }
+          setIsLoading(false);
+          return;
+        }
+
         const token = await apiClient.getToken();
         if (token) {
-          const userData = await apiClient.getCurrentUser();
+          const userData = await loadUserWithTokenRefresh();
           if (mounted && userData) {
-            setUser(userData as User);
+            setUser(userData);
             setRole(getPrimaryRoleFromUser(userData));
+          } else if (mounted) {
+            setUser(null);
+            setRole(null);
           }
         } else if (mounted) {
           setUser(null);
@@ -56,19 +115,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (mounted) setIsLoading(false);
       }
     })();
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const signOut = useCallback(async () => {
+    await clearBiometricLogin();
     await apiClient.logout();
     setUser(null);
     setRole(null);
   }, []);
 
-  const setSessionFromLogin = useCallback((payload: { user: User; access: string; refresh?: string }) => {
+  const setSessionFromLogin = useCallback(async (payload: { user: User; access: string; refresh?: string }) => {
     setUser(payload.user);
     setRole(getPrimaryRoleFromUser(payload.user));
-    apiClient.setToken(payload.access);
+    await apiClient.setToken(payload.access);
   }, []);
 
   const value: AuthContextType = {

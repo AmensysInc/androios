@@ -28,7 +28,7 @@ export default function AdminAuthScreen({ navigation }: any) {
     setLoading(true);
     try {
       const { user, access, refresh } = await apiClient.loginWithSession(trimmed, password);
-      setSessionFromLogin({ user, access, refresh });
+      await setSessionFromLogin({ user, access, refresh });
     } catch (e: any) {
       Alert.alert('Sign in failed', e?.message || 'Invalid credentials');
     } finally {

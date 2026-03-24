@@ -189,15 +189,15 @@ export default function EmployeesScreen() {
   const [saving, setSaving] = useState(false);
 
   const isManager = role === 'manager';
-  const managerCompanyId =
-    companies.find((c) => c.company_manager_id === user?.id)?.id || companies[0]?.id;
+  const scopedCompanies = api.filterCompaniesForCompanyManagerRole(companies, role, user?.id);
+  const managerCompanyId = isManager
+    ? scopedCompanies[0]?.id ?? companies[0]?.id
+    : undefined;
   const effectiveCompanyId = isManager ? managerCompanyId : selectedCompanyId === 'all' ? undefined : selectedCompanyId;
 
   const load = useCallback(async () => {
     try {
-      const compPromise = api.getCompanies(
-        role === 'manager' && user?.id ? { company_manager: user.id } : undefined
-      );
+      const compPromise = api.getCompanies();
       const empPromise = api.getEmployees(effectiveCompanyId ? { company: effectiveCompanyId } : undefined);
       const deptPromise = api.getDepartments(
         effectiveCompanyId ? { company: effectiveCompanyId } : undefined

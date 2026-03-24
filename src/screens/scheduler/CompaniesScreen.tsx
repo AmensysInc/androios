@@ -177,12 +177,10 @@ export default function CompaniesScreen() {
   const canCreateCompany = role === 'super_admin' || role === 'operations_manager';
   const canEditCompany = role === 'super_admin' || role === 'operations_manager';
 
-  const filteredCompanies = React.useMemo(() => {
-    if (role === 'manager' && user?.id) {
-      return companies.filter((c) => c.company_manager_id === user.id);
-    }
-    return companies;
-  }, [companies, role, user?.id]);
+  const filteredCompanies = React.useMemo(
+    () => api.filterCompaniesForCompanyManagerRole(companies, role, user?.id),
+    [companies, role, user?.id]
+  );
 
   const filteredOrgs = React.useMemo(() => {
     if (role === 'manager' && filteredCompanies.length > 0) {
@@ -195,8 +193,8 @@ export default function CompaniesScreen() {
   const load = useCallback(async () => {
     try {
       const [orgsRaw, compRaw] = await Promise.all([
-        api.getOrganizations(isOrgManager ? { operations_manager: user?.id } : undefined),
-        api.getCompanies(isOrgManager ? { organization_manager: user?.id } : undefined),
+        api.getOrganizations(isOrgManager ? { organization_manager: user?.id } : undefined),
+        api.getCompanies(),
       ]);
       setOrganizations(orgsRaw);
       setCompanies(compRaw);

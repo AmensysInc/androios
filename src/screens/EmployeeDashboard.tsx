@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
+import { confirmClockBiometricOrAlert } from '../lib/biometricAuth';
 
 function formatTime(ms: number) {
   const d = new Date(ms);
@@ -163,6 +164,7 @@ export default function EmployeeDashboard() {
 
   const handleClockIn = async () => {
     if (!employee?.id) return;
+    if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {
       await api.clockIn({ employee_id: employee.id, shift_id: todayShift?.id });
@@ -179,6 +181,7 @@ export default function EmployeeDashboard() {
       Alert.alert('Error', 'No active time entry to clock out.');
       return;
     }
+    if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {
       await api.clockOut({ time_clock_entry_id: entryId, employee_id: employee.id });
@@ -192,6 +195,7 @@ export default function EmployeeDashboard() {
   const handleStartBreak = async () => {
     const entryId = api.timeClockEntryId(activeEntry);
     if (!entryId) return;
+    if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {
       await api.startBreak(entryId);
@@ -205,6 +209,7 @@ export default function EmployeeDashboard() {
   const handleEndBreak = async () => {
     const entryId = api.timeClockEntryId(activeEntry);
     if (!entryId) return;
+    if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {
       await api.endBreak(entryId);

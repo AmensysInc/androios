@@ -601,8 +601,10 @@ export default function TimeClockScreen() {
 
   const isManager = role === 'manager';
   const canSeeAllTasks = ['super_admin', 'admin', 'operations_manager', 'manager'].includes(role || '');
-  const managerCompanyId =
-    companies.find((c: any) => String(c.company_manager_id) === String(user?.id))?.id || companies[0]?.id;
+  const scopedCompanies = api.filterCompaniesForCompanyManagerRole(companies, role, user?.id);
+  const managerCompanyId = isManager
+    ? scopedCompanies[0]?.id ?? companies[0]?.id
+    : undefined;
 
   const effectiveCompanyId = isManager
     ? managerCompanyId
@@ -612,8 +614,7 @@ export default function TimeClockScreen() {
 
   const load = useCallback(async () => {
     try {
-      const compParams = role === 'manager' && user?.id ? { company_manager: user.id } : undefined;
-      const compRaw = await api.getCompanies(compParams);
+      const compRaw = await api.getCompanies();
       const compList = Array.isArray(compRaw) ? compRaw : [];
       setCompanies(compList);
 

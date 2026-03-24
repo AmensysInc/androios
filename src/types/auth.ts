@@ -51,6 +51,7 @@ export function getPrimaryRole(roles: { role?: string; name?: string }[] | undef
   return resolvePrimaryRoleFromNames(roles as any);
 }
 
+/** Maps Django `user_roles.role` to UI `UserRole` (same rules as web `getPrimaryRole`). */
 function resolvePrimaryRoleFromNames(roles: any[] | undefined): UserRole {
   if (!roles?.length) return 'user';
   const roleNames = roles.map((r) => tokenFromRoleEntry(r)).filter(Boolean);

@@ -87,6 +87,40 @@ function weekRangeFromStart(weekStart: Date): { start: Date; end: Date } {
   return { start, end };
 }
 
+function startOfDayLocal(d: Date): Date {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function endOfDayLocal(d: Date): Date {
+  const x = new Date(d);
+  x.setHours(23, 59, 59, 999);
+  return x;
+}
+
+function buildInclusiveDays(start: Date, end: Date): Date[] {
+  const s = startOfDayLocal(start);
+  const e = startOfDayLocal(end);
+  if (e.getTime() < s.getTime()) return [new Date(s)];
+  const out: Date[] = [];
+  const cur = new Date(s);
+  while (cur.getTime() <= e.getTime()) {
+    out.push(new Date(cur));
+    cur.setDate(cur.getDate() + 1);
+  }
+  return out;
+}
+
+/** True when the range is exactly Mon–Sun (same ISO week as start). */
+function isStandardMondaySundayWeek(start: Date, end: Date): boolean {
+  const s = startOfDayLocal(start);
+  const e = startOfDayLocal(end);
+  const mon = startOfWeekMonday(s);
+  const sun = addDays(mon, 6);
+  return mon.getTime() === s.getTime() && sun.getTime() === e.getTime();
+}
+
 function formatWeekToolbar(start: Date, end: Date): string {
   const o: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
   return `${start.toLocaleDateString(undefined, o)} – ${end.toLocaleDateString(undefined, o)}`;
@@ -119,6 +153,131 @@ function sameCalendarDay(a: Date, b: Date): boolean {
     a.getFullYear() === b.getFullYear() &&
     a.getMonth() === b.getMonth() &&
     a.getDate() === b.getDate()
+  );
+}
+
+const RANGE_WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+function ScheduleDateRangeModal({
+  visible,
+  onClose,
+  onApply,
+  onUseStandardWeek,
+  initialCursorMonth,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  onApply: (start: Date, end: Date) => void;
+  onUseStandardWeek: () => void;
+  initialCursorMonth: Date;
+}) {
+  const [cursor, setCursor] = useState(() => new Date());
+  const [from, setFrom] = useState<Date | null>(null);
+
+  useEffect(() => {
+    if (visible) {
+      setFrom(null);
+      setCursor(new Date(initialCursorMonth.getFullYear(), initialCursorMonth.getMonth(), 1));
+    }
+  }, [visible, initialCursorMonth]);
+
+  const y = cursor.getFullYear();
+  const mo = cursor.getMonth();
+  const firstWd = (new Date(y, mo, 1).getDay() + 6) % 7;
+  const dim = new Date(y, mo + 1, 0).getDate();
+  const cells: (number | null)[] = [];
+  for (let i = 0; i < firstWd; i++) cells.push(null);
+  for (let day = 1; day <= dim; day++) cells.push(day);
+  while (cells.length % 7 !== 0) cells.push(null);
+  while (cells.length < 42) cells.push(null);
+
+  const now = new Date();
+  const monthTitle = cursor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+
+  const onDayPress = (day: number) => {
+    const d = startOfDayLocal(new Date(y, mo, day));
+    if (!from) {
+      setFrom(d);
+      return;
+    }
+    let a = from;
+    let b = d;
+    if (b.getTime() < a.getTime()) {
+      const t = a;
+      a = b;
+      b = t;
+    }
+    onApply(a, b);
+    onClose();
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+        <View style={styles.rangePickModalBox}>
+          <Text style={styles.rangePickTitle}>Date range</Text>
+          <Text style={styles.rangePickHint}>{from ? 'Tap end date' : 'Tap start date, then end date'}</Text>
+          <View style={styles.rangePickMonthRow}>
+            <TouchableOpacity onPress={() => setCursor(new Date(y, mo - 1, 1))} hitSlop={8}>
+              <MaterialCommunityIcons name="chevron-left" size={22} color="#0f172a" />
+            </TouchableOpacity>
+            <Text style={styles.rangePickMonthTitle}>{monthTitle}</Text>
+            <TouchableOpacity onPress={() => setCursor(new Date(y, mo + 1, 1))} hitSlop={8}>
+              <MaterialCommunityIcons name="chevron-right" size={22} color="#0f172a" />
+            </TouchableOpacity>
+          </View>
+          <View style={styles.rangePickWeekHead}>
+            {RANGE_WEEKDAYS.map((w) => (
+              <Text key={w} style={styles.rangePickWeekHeadCell}>
+                {w}
+              </Text>
+            ))}
+          </View>
+          <View style={styles.rangePickGrid}>
+            {cells.map((cell, idx) => {
+              if (cell == null) return <View key={`e-${idx}`} style={styles.rangePickCell} />;
+              const cellDate = new Date(y, mo, cell);
+              const selStart = from && sameCalendarDay(cellDate, from);
+              const isToday = sameCalendarDay(cellDate, now);
+              return (
+                <TouchableOpacity
+                  key={idx}
+                  style={[
+                    styles.rangePickCell,
+                    selStart && styles.rangePickCellSel,
+                    isToday && !selStart && styles.rangePickCellToday,
+                  ]}
+                  onPress={() => onDayPress(cell)}
+                >
+                  <Text style={[styles.rangePickCellTxt, selStart && styles.rangePickCellTxtSel]}>{cell}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+          <View style={styles.rangePickFooter}>
+            {from ? (
+              <TouchableOpacity onPress={() => setFrom(null)}>
+                <Text style={styles.rangePickLink}>Reselect start</Text>
+              </TouchableOpacity>
+            ) : (
+              <View style={{ minWidth: 8 }} />
+            )}
+            <TouchableOpacity
+              onPress={() => {
+                onUseStandardWeek();
+                onClose();
+              }}
+            >
+              <Text style={styles.rangePickLink}>This week (Mon–Sun)</Text>
+            </TouchableOpacity>
+          </View>
+          <TouchableOpacity style={styles.rangePickCloseBtn} onPress={onClose}>
+            <Text style={styles.rangePickCloseBtnText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -259,9 +418,25 @@ export default function ScheduleScreen() {
   const isWide = width >= 900;
 
   const [weekAnchor, setWeekAnchor] = useState(() => new Date());
-  const weekStart = useMemo(() => startOfWeekMonday(weekAnchor), [weekAnchor]);
-  const { start: rangeStart, end: rangeEnd } = useMemo(() => weekRangeFromStart(weekStart), [weekStart]);
-  const weekDays = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(rangeStart, i)), [rangeStart]);
+  /** When set, grid spans from start of `weekAnchor` through this day (inclusive); otherwise Mon–Sun week. */
+  const [customRangeEnd, setCustomRangeEnd] = useState<Date | null>(null);
+  const [rangePickerOpen, setRangePickerOpen] = useState(false);
+
+  const rangeStart = useMemo(() => {
+    if (customRangeEnd) return startOfDayLocal(weekAnchor);
+    return startOfWeekMonday(weekAnchor);
+  }, [weekAnchor, customRangeEnd]);
+
+  const rangeEnd = useMemo(() => {
+    if (customRangeEnd) return endOfDayLocal(customRangeEnd);
+    return weekRangeFromStart(startOfWeekMonday(weekAnchor)).end;
+  }, [weekAnchor, customRangeEnd]);
+
+  const weekDays = useMemo(() => {
+    if (customRangeEnd) return buildInclusiveDays(weekAnchor, customRangeEnd);
+    const ws = startOfWeekMonday(weekAnchor);
+    return Array.from({ length: 7 }, (_, i) => addDays(ws, i));
+  }, [weekAnchor, customRangeEnd]);
 
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -310,9 +485,7 @@ export default function ScheduleScreen() {
   const companiesFiltered = useMemo(() => {
     if (needsOrg && !selectedOrgId) return [];
     let list = companies;
-    if (role === 'manager' && user?.id) {
-      list = list.filter((c) => c.company_manager_id === user.id);
-    }
+    list = api.filterCompaniesForCompanyManagerRole(list, role, user?.id);
     if (selectedOrgId) {
       const oid = String(selectedOrgId);
       list = list.filter((c) => companyOrganizationId(c) === oid);
@@ -325,14 +498,12 @@ export default function ScheduleScreen() {
 
   const loadMeta = useCallback(async () => {
     try {
-      const orgsRaw = await api.getOrganizations(isOrgManager ? { operations_manager: user?.id } : undefined);
+      const orgsRaw = await api.getOrganizations(isOrgManager ? { organization_manager: user?.id } : undefined);
       setOrganizations(Array.isArray(orgsRaw) ? orgsRaw : []);
 
       let compRaw: any[] = [];
-      if (isOrgManager) {
-        compRaw = await api.getCompanies({ organization_manager: user?.id });
-      } else if (role === 'manager' && user?.id) {
-        compRaw = await api.getCompanies({ company_manager: user.id });
+      if (isOrgManager || role === 'manager') {
+        compRaw = await api.getCompanies();
       } else if (needsOrg) {
         if (selectedOrgId) {
           const oid = String(selectedOrgId);
@@ -489,16 +660,41 @@ export default function ScheduleScreen() {
   };
 
   const goPrevWeek = () => {
+    const dayCount = customRangeEnd ? weekDays.length : 7;
     const d = new Date(weekAnchor);
-    d.setDate(d.getDate() - 7);
+    d.setDate(d.getDate() - dayCount);
     setWeekAnchor(d);
+    if (customRangeEnd) {
+      const ne = new Date(customRangeEnd);
+      ne.setDate(ne.getDate() - dayCount);
+      setCustomRangeEnd(ne);
+    }
   };
   const goNextWeek = () => {
+    const dayCount = customRangeEnd ? weekDays.length : 7;
     const d = new Date(weekAnchor);
-    d.setDate(d.getDate() + 7);
+    d.setDate(d.getDate() + dayCount);
     setWeekAnchor(d);
+    if (customRangeEnd) {
+      const ne = new Date(customRangeEnd);
+      ne.setDate(ne.getDate() + dayCount);
+      setCustomRangeEnd(ne);
+    }
   };
-  const goThisWeek = () => setWeekAnchor(new Date());
+  const goThisWeek = () => {
+    setWeekAnchor(new Date());
+    setCustomRangeEnd(null);
+  };
+
+  const applyDateRange = (start: Date, end: Date) => {
+    setWeekAnchor(startOfDayLocal(start));
+    setCustomRangeEnd(startOfDayLocal(end));
+  };
+
+  const useStandardWeekFromPicker = () => {
+    setWeekAnchor(new Date());
+    setCustomRangeEnd(null);
+  };
 
   const openAddShift = (emp: Employee, day: Date) => {
     setShiftEmployee(emp);
@@ -845,10 +1041,11 @@ export default function ScheduleScreen() {
       }
     };
     if (Platform.OS === 'web' && typeof (globalThis as any).confirm === 'function') {
-      if ((globalThis as any).confirm('Clear all shifts for this week?')) void run();
+      if ((globalThis as any).confirm(`Clear all shifts for ${customRangeEnd ? 'this date range' : 'this week'}?`)) void run();
       return;
     }
-    Alert.alert('Clear schedule', 'Clear all shifts for this week?', [
+    const period = customRangeEnd ? 'this date range' : 'this week';
+    Alert.alert('Clear schedule', `Clear all shifts for ${period}?`, [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Clear', style: 'destructive', onPress: () => void run() },
     ]);
@@ -979,16 +1176,19 @@ export default function ScheduleScreen() {
               <TouchableOpacity onPress={goPrevWeek} style={styles.iconBtn} hitSlop={8}>
                 <MaterialCommunityIcons name="chevron-left" size={22} color="#0f172a" />
               </TouchableOpacity>
-              <Text style={styles.dateRangeText}>
-                {'< '}
-                {formatWeekToolbar(rangeStart, rangeEnd)}
-                {' >'}
-              </Text>
+              <TouchableOpacity
+                style={styles.dateRangePressable}
+                onPress={() => setRangePickerOpen(true)}
+                activeOpacity={0.7}
+              >
+                <MaterialCommunityIcons name="calendar-range" size={18} color="#2563eb" />
+                <Text style={styles.dateRangeText}>{formatWeekToolbar(rangeStart, rangeEnd)}</Text>
+              </TouchableOpacity>
               <TouchableOpacity onPress={goNextWeek} style={styles.iconBtn} hitSlop={8}>
                 <MaterialCommunityIcons name="chevron-right" size={22} color="#0f172a" />
               </TouchableOpacity>
               <TouchableOpacity onPress={goThisWeek} style={styles.iconBtn} hitSlop={8}>
-                <MaterialCommunityIcons name="calendar" size={22} color="#2563eb" />
+                <MaterialCommunityIcons name="calendar-today" size={22} color="#2563eb" />
               </TouchableOpacity>
             </View>
             <View style={styles.actionBtns}>
@@ -1005,23 +1205,27 @@ export default function ScheduleScreen() {
               <TouchableOpacity style={styles.actionPlain} onPress={handleDownload}>
                 <Text style={styles.actionPlainText}>Download</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.actionPlain} onPress={() => void handleClearWeek()}>
-                <MaterialCommunityIcons name="trash-can-outline" size={15} color="#ef4444" />
-                <Text style={styles.actionDangerText}>Clear</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.actionSaveChip} onPress={() => handleSaveTemplate()}>
-                <MaterialCommunityIcons name="check" size={15} color="#0f172a" />
-                <Text style={styles.actionSaveChipText}>Save</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.actionPublishChip, publishWeekLoading && { opacity: 0.6 }]}
-                onPress={() => void handlePublishTemplate()}
-                disabled={publishWeekLoading}
-              >
-                <Text style={styles.actionPublishChipText}>
-                  {publishWeekLoading ? 'Publishing…' : 'Publish'}
-                </Text>
-              </TouchableOpacity>
+              {scheduleEditMode && (
+                <>
+                  <TouchableOpacity style={styles.actionPlain} onPress={() => void handleClearWeek()}>
+                    <MaterialCommunityIcons name="trash-can-outline" size={15} color="#ef4444" />
+                    <Text style={styles.actionDangerText}>Clear</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.actionSaveChip} onPress={() => handleSaveTemplate()}>
+                    <MaterialCommunityIcons name="check" size={15} color="#0f172a" />
+                    <Text style={styles.actionSaveChipText}>Save</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.actionPublishChip, publishWeekLoading && { opacity: 0.6 }]}
+                    onPress={() => void handlePublishTemplate()}
+                    disabled={publishWeekLoading}
+                  >
+                    <Text style={styles.actionPublishChipText}>
+                      {publishWeekLoading ? 'Publishing…' : 'Publish'}
+                    </Text>
+                  </TouchableOpacity>
+                </>
+              )}
               <TouchableOpacity style={styles.iconBtn} hitSlop={8}>
                 <MaterialCommunityIcons name="bell-outline" size={22} color="#0f172a" />
               </TouchableOpacity>
@@ -1172,7 +1376,12 @@ export default function ScheduleScreen() {
                       <TouchableOpacity
                         style={styles.savedEditBtn}
                         onPress={() => {
-                          setWeekAnchor(new Date(t.weekStartISO));
+                          const ws = new Date(t.weekStartISO);
+                          const we = new Date(t.weekEndISO);
+                          ws.setHours(0, 0, 0, 0);
+                          we.setHours(0, 0, 0, 0);
+                          setWeekAnchor(ws);
+                          setCustomRangeEnd(isStandardMondaySundayWeek(ws, we) ? null : we);
                           setScheduleEditMode(true);
                         }}
                       >
@@ -1522,6 +1731,14 @@ export default function ScheduleScreen() {
         onSelect={(id) => setShiftStatus(id)}
         onClose={() => setShiftStatusPickerOpen(false)}
       />
+
+      <ScheduleDateRangeModal
+        visible={rangePickerOpen}
+        onClose={() => setRangePickerOpen(false)}
+        onApply={(s, e) => applyDateRange(s, e)}
+        onUseStandardWeek={useStandardWeekFromPicker}
+        initialCursorMonth={rangeStart}
+      />
     </ScrollView>
   );
 }
@@ -1587,7 +1804,68 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   dateNav: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  dateRangeText: { fontSize: 15, fontWeight: '600', color: '#0f172a', marginHorizontal: 4 },
+  dateRangePressable: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    maxWidth: 220,
+  },
+  dateRangeText: { fontSize: 15, fontWeight: '600', color: '#0f172a', flexShrink: 1 },
+  rangePickModalBox: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  rangePickTitle: { fontSize: 17, fontWeight: '700', color: '#0f172a' },
+  rangePickHint: { fontSize: 13, color: '#64748b', marginTop: 6, marginBottom: 12 },
+  rangePickMonthRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  rangePickMonthTitle: { fontSize: 15, fontWeight: '700', color: '#0f172a' },
+  rangePickWeekHead: { flexDirection: 'row', marginBottom: 6 },
+  rangePickWeekHeadCell: {
+    flex: 1,
+    textAlign: 'center',
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  rangePickGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+  rangePickCell: {
+    width: '14.28%',
+    height: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 2,
+  },
+  rangePickCellSel: { borderWidth: 2, borderColor: '#2563eb', borderRadius: 8 },
+  rangePickCellToday: { backgroundColor: '#e2e8f0', borderRadius: 999 },
+  rangePickCellTxt: { fontSize: 14, color: '#0f172a', fontWeight: '500' },
+  rangePickCellTxtSel: { fontWeight: '700' },
+  rangePickFooter: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 14,
+    gap: 8,
+  },
+  rangePickLink: { fontSize: 14, fontWeight: '600', color: '#2563eb' },
+  rangePickCloseBtn: {
+    marginTop: 12,
+    alignItems: 'center',
+    paddingVertical: 10,
+  },
+  rangePickCloseBtnText: { fontSize: 15, fontWeight: '600', color: '#475569' },
   iconBtn: { padding: 4 },
   actionBtns: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
   actionChip: {

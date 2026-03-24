@@ -151,9 +151,7 @@ export default function MissedShiftsScreen() {
 
   const companiesForOrg = useMemo(() => {
     let list = [...companies];
-    if (role === 'manager' && user?.id) {
-      list = list.filter((c) => c.company_manager_id === user.id);
-    }
+    list = api.filterCompaniesForCompanyManagerRole(list, role, user?.id);
     if (orgFilter !== 'all') {
       const oid = String(orgFilter);
       list = list.filter((c) => companyOrganizationId(c) === oid);
@@ -176,14 +174,12 @@ export default function MissedShiftsScreen() {
 
   const loadMeta = useCallback(async () => {
     try {
-      const orgsRaw = await api.getOrganizations(isOrgManager ? { operations_manager: user?.id } : undefined);
+      const orgsRaw = await api.getOrganizations(isOrgManager ? { organization_manager: user?.id } : undefined);
       setOrganizations(Array.isArray(orgsRaw) ? orgsRaw : []);
 
       let compRaw: any[] = [];
-      if (isOrgManager) {
-        compRaw = await api.getCompanies({ organization_manager: user?.id });
-      } else if (role === 'manager' && user?.id) {
-        compRaw = await api.getCompanies({ company_manager: user.id });
+      if (isOrgManager || role === 'manager') {
+        compRaw = await api.getCompanies();
       } else if (needsOrg) {
         try {
           compRaw = await api.getCompanies();
@@ -217,7 +213,7 @@ export default function MissedShiftsScreen() {
       }
       if (role === 'manager' && user?.id && companyFilter === 'all' && orgFilter === 'all') {
         const allowed = new Set(
-          companies.filter((c) => c.company_manager_id === user.id).map((c) => c.id)
+          api.filterCompaniesForCompanyManagerRole(companies, role, user.id).map((c) => c.id)
         );
         shifts = shifts.filter((s) => allowed.has(shiftCompanyId(s)));
       }
@@ -230,7 +226,7 @@ export default function MissedShiftsScreen() {
       }
       if (role === 'manager' && user?.id && companyFilter === 'all' && orgFilter === 'all') {
         const allowed = new Set(
-          companies.filter((c) => c.company_manager_id === user.id).map((c) => c.id)
+          api.filterCompaniesForCompanyManagerRole(companies, role, user.id).map((c) => c.id)
         );
         rr = rr.filter((r) => allowed.has(requestCompanyId(r)));
       }

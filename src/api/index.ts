@@ -75,6 +75,34 @@ export type SchedulerOrganization = { id: string; name: string; [k: string]: any
 export type SchedulerCompany = { id: string; name: string; [k: string]: any };
 export type SchedulerEmployee = { id: string; [k: string]: any };
 
+/** Django may return `company_manager` (PK) without `company_manager_id`; normalize for UI filters. */
+export function resolveCompanyManagerUserId(c: Record<string, any> | null | undefined): string {
+  if (!c || typeof c !== 'object') return '';
+  const raw = c.company_manager_id ?? c.company_manager;
+  if (raw != null && raw !== '') {
+    if (typeof raw === 'object' && (raw as any).id != null) return String((raw as any).id);
+    return String(raw);
+  }
+  const details = (c as any).company_manager_details;
+  if (details?.id != null) return String(details.id);
+  return '';
+}
+
+/**
+ * Optional client filter for company managers. Backend list is already RBAC-scoped; if FK shapes
+ * differ and nothing matches, keep the list so the UI still shows the assigned company(ies).
+ */
+export function filterCompaniesForCompanyManagerRole<T extends Record<string, any>>(
+  companies: T[],
+  role: string | null | undefined,
+  userId: string | null | undefined
+): T[] {
+  if (role !== 'manager' || userId == null || String(userId) === '') return companies;
+  const uid = String(userId);
+  const matched = companies.filter((c) => resolveCompanyManagerUserId(c) === uid);
+  return matched.length > 0 ? matched : companies;
+}
+
 // —— Auth / users ——
 export async function getCurrentUser() {
   return apiClient.get<any>('/auth/user/');
@@ -391,7 +419,13 @@ export async function deleteOrganization(id: string) {
 // —— Scheduler: companies ——
 export async function getCompanies(params?: Record<string, any>): Promise<SchedulerCompany[]> {
   const raw = await apiClient.get<any>('/scheduler/companies/', params);
-  return normalizePaginatedList<SchedulerCompany>(raw);
+  const list = normalizePaginatedList<SchedulerCompany>(raw);
+  return list.map((row) => {
+    const c = { ...row } as SchedulerCompany;
+    const mid = resolveCompanyManagerUserId(c);
+    if (mid) (c as any).company_manager_id = mid;
+    return c;
+  });
 }
 export async function getCompany(id: string) {
   return apiClient.get<any>(`/scheduler/companies/${id}/`);
@@ -898,79 +932,35 @@ export async function deleteFocusSession(id: string) {
 }
 
 // —— Habits (Daily Routines) ——
-/** Display labels for category slugs (match HabitsScreen `CATEGORY_OPTIONS`). */
-const HABIT_CATEGORY_DISPLAY: Record<string, string> = {
-  health_fitness: 'Health & Fitness',
-  personal_growth: 'Personal Growth',
-  work: 'Work',
-  social: 'Social',
-  other: 'Other',
-};
-
 /** List habits; optional query e.g. `{ user }` — scope may depend on role/JWT. */
 export async function getHabits(params?: Record<string, any>) {
   const raw = await apiClient.get<any>('/habits/habits/', params);
   return normalizePaginatedList(raw);
 }
 /**
- * Create habit. Sends `/habits/habits/` with fallbacks on 400: category slug vs label, `name` vs `title`,
- * `frequency` vs `recurrence`, with/without `user` (many backends set owner from JWT).
+ * Create habit — matches Zenotimeflow-backend `HabitSerializer` (name, icon, notes, user from JWT).
  */
 export async function createHabit(data: Record<string, any>) {
   const name = String(data.name ?? data.title ?? '').trim();
   if (!name) throw new Error('Habit name is required');
 
-  const catRaw = data.category;
-  const catSlug = typeof catRaw === 'string' ? catRaw : String(catRaw ?? '');
-  const catTitle =
-    HABIT_CATEGORY_DISPLAY[catSlug] ??
-    (catSlug && catSlug.includes('_')
-      ? catSlug
-          .split('_')
-          .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-          .join(' ')
-      : catSlug);
+  const freq = data.frequency ?? data.recurrence ?? 'daily';
+  const iconRaw = data.icon ?? data.category;
+  const icon = iconRaw != null && String(iconRaw).trim() ? String(iconRaw).trim() : undefined;
 
-  const freq = data.frequency ?? data.recurrence;
-  const stripUndefined = (o: Record<string, any>) =>
-    Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== ''));
+  const body: Record<string, any> = {
+    name,
+    frequency: freq,
+    target_count: data.target_count ?? 1,
+    start_date: data.start_date,
+  };
+  if (data.description) body.description = data.description;
+  if (data.end_date) body.end_date = data.end_date;
+  if (data.color) body.color = data.color;
+  if (data.notes) body.notes = data.notes;
+  if (icon) body.icon = icon;
 
-  const cores: Record<string, any>[] = [
-    { name, category: catSlug, frequency: freq },
-    { name, category: catTitle, frequency: freq },
-    { title: name, category: catSlug, frequency: freq },
-    { title: name, category: catTitle, frequency: freq },
-    { name, category: catSlug, recurrence: freq },
-    { name, category: catTitle, recurrence: freq },
-    { title: name, category: catSlug, recurrence: freq },
-  ];
-
-  const extras: Record<string, any> = {};
-  if (data.description) extras.description = data.description;
-  if (data.start_date) extras.start_date = data.start_date;
-  if (data.end_date) extras.end_date = data.end_date;
-  if (data.notes) extras.notes = data.notes;
-  if (data.color) extras.color = data.color;
-
-  const uid = data.user != null ? String(data.user) : '';
-  const bodies: Record<string, any>[] = [];
-  for (const c of cores) {
-    const base = stripUndefined({ ...extras, ...c });
-    bodies.push(base);
-    if (uid) bodies.push(stripUndefined({ ...base, user: uid }));
-  }
-
-  let last: unknown;
-  for (const body of bodies) {
-    try {
-      return await apiClient.post<any>('/habits/habits/', body);
-    } catch (e) {
-      last = e;
-      if (e instanceof HttpError && e.status === 400) continue;
-      throw e;
-    }
-  }
-  throw last;
+  return apiClient.post<any>('/habits/habits/', body);
 }
 export async function updateHabit(id: string, data: any) {
   return apiClient.patch<any>(`/habits/habits/${id}/`, data);

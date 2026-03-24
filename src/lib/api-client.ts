@@ -59,11 +59,10 @@ function applyAndroidEmulatorHostFix(url: string): string {
 }
 
 function getConfiguredApiOrigin(): string {
-  // Expo Web: call same-origin `/api/...` so Metro can proxy to Django (see metro.config.js).
-  // Hitting `http://127.0.0.1:8000` directly from the browser triggers CORS unless the backend allows the Expo origin.
+  // Expo Web: always same-origin `/api` so Metro proxies to Django (metro.config.js).
+  // If we used EXPO_PUBLIC_API_URL here (common for native dev), the browser would call :8000
+  // from localhost:808x and get CORS blocks — companies/user APIs then fail silently with [].
   if (Platform.OS === 'web') {
-    const fromEnv = process.env.EXPO_PUBLIC_API_URL?.trim();
-    if (fromEnv) return applyAndroidEmulatorHostFix(normalizeApiUrl(fromEnv));
     return '/api';
   }
   const extra = Constants.expoConfig?.extra as { apiUrl?: string } | undefined;
@@ -365,6 +364,46 @@ export class ApiClient {
     }
     await this.setToken(null);
     await AsyncStorage.removeItem(REFRESH_KEY);
+  }
+
+  /**
+   * Obtain a new access token using the stored refresh token (e.g. after biometric unlock).
+   * Does not send the (possibly expired) access token.
+   */
+  async refreshAccessToken(): Promise<boolean> {
+    const refreshToken = await AsyncStorage.getItem(REFRESH_KEY);
+    if (!refreshToken) return false;
+    const url = `${this.baseURL.replace(/\/$/, '')}/auth/token/refresh/`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh: refreshToken }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      const text = await response.text();
+      let parsed: any = {};
+      try {
+        parsed = text.trim() ? JSON.parse(text) : {};
+      } catch {
+        return false;
+      }
+      if (!response.ok) {
+        return false;
+      }
+      const access = getAccessToken(parsed);
+      const newRefresh = getRefreshToken(parsed);
+      if (!access) return false;
+      await this.setToken(access);
+      if (newRefresh) await AsyncStorage.setItem(REFRESH_KEY, newRefresh);
+      return true;
+    } catch {
+      clearTimeout(timeoutId);
+      return false;
+    }
   }
 
   async getCurrentUser() {

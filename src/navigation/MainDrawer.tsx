@@ -6,10 +6,8 @@ import { useAuth } from '../context/AuthContext';
 import { getRoleDisplayLabel } from '../types/auth';
 import { getMainDrawerInitialRoute } from './mainDrawerInitialRoute';
 
-import HomeScreen from '../screens/HomeScreen';
 import SuperAdminDashboard from '../screens/SuperAdminDashboard';
 import OrganizationDashboard from '../screens/OrganizationDashboard';
-import CompanyDashboard from '../screens/CompanyDashboard';
 import EmployeeDashboard from '../screens/EmployeeDashboard';
 import CalendarScreen from '../screens/CalendarScreen';
 import TasksScreen from '../screens/TasksScreen';
@@ -29,30 +27,45 @@ import MissedShiftsScreen from '../screens/scheduler/MissedShiftsScreen';
 
 const Drawer = createDrawerNavigator();
 
+/** Same order/labels as web `AppSidebar` `schedulerAdminItems`. */
+const SCHEDULER_DRAWER_ITEMS = [
+  { name: 'Companies', label: 'Companies' },
+  { name: 'Schedule', label: 'Schedule' },
+  { name: 'Employees', label: 'Employees' },
+  { name: 'EmployeeSchedule', label: 'Employee Schedule' },
+  { name: 'TimeClock', label: 'Time Clock' },
+  { name: 'MissedShifts', label: 'Missed Shifts' },
+] as const;
+
+type SchedulerDrawerItem = (typeof SCHEDULER_DRAWER_ITEMS)[number];
+
+/**
+ * Matches web `schedulerItemsForRole`: company manager has no Companies; org manager has no Schedule;
+ * super_admin and admin see everything.
+ */
+function getSchedulerItemsForRole(role: string | null | undefined): SchedulerDrawerItem[] {
+  const all = [...SCHEDULER_DRAWER_ITEMS];
+  if (role === 'super_admin' || role === 'admin') return all;
+  if (role === 'manager') return all.filter((i) => i.name !== 'Companies');
+  if (role === 'operations_manager') return all.filter((i) => i.name !== 'Schedule');
+  return all;
+}
+
 function CustomDrawerContent({ navigation }: any) {
   const { user, role, signOut } = useAuth();
 
   const mainItems = [
-    { name: 'Home', label: 'Home' },
     { name: 'Calendar', label: 'Calendar' },
     { name: 'Tasks', label: 'Tasks' },
     { name: 'Focus', label: 'Focus Hours' },
     { name: 'Habits', label: 'Daily Routines' },
   ];
 
-  const schedulerItems = [
-    { name: 'Companies', label: 'Companies' },
-    { name: 'Schedule', label: 'Schedule' },
-    { name: 'Employees', label: 'Employees' },
-    { name: 'EmployeeSchedule', label: 'Employee Schedule' },
-    { name: 'TimeClock', label: 'Time Clock' },
-    { name: 'MissedShifts', label: 'Missed Shifts' },
-  ];
+  const schedulerItemsForRole = getSchedulerItemsForRole(role);
 
-  const managementExtra = [
-    { name: 'CheckLists', label: 'Check Lists' },
-    { name: 'UserManagement', label: 'User Management' },
-  ];
+  /** Matches web `AppSidebar`: Check Lists for these roles only (not plain `admin`). */
+  const canSeeCheckLists =
+    role === 'super_admin' || role === 'manager' || role === 'operations_manager';
 
   const isAdmin = role && ['super_admin', 'admin', 'operations_manager', 'manager'].includes(role);
   const isEmployee = role && ['employee', 'house_keeping', 'maintenance'].includes(role);
@@ -70,27 +83,19 @@ function CustomDrawerContent({ navigation }: any) {
           </View>
           {role && <Text style={styles.roleBadge}>{getRoleDisplayLabel(role)}</Text>}
         </View>
-        <TouchableOpacity
-          style={styles.menuItem}
-          onPress={() =>
-            adminDashboard ? navigation.navigate('SuperAdminDashboard') : navigation.navigate('Home')
-          }
-        >
-          <Text style={styles.menuLabel}>{adminDashboard ? 'Dashboard' : 'Home'}</Text>
-        </TouchableOpacity>
-        {mainItems.slice(1).map((item) => (
+        {mainItems.map((item) => (
           <TouchableOpacity key={item.name} style={styles.menuItem} onPress={() => navigation.navigate(item.name)}>
             <Text style={styles.menuLabel}>{item.label}</Text>
           </TouchableOpacity>
         ))}
+        {adminDashboard && (
+          <TouchableOpacity style={styles.menuItem} onPress={() => navigation.navigate('SuperAdminDashboard')}>
+            <Text style={styles.menuLabel}>Super Admin Dashboard</Text>
+          </TouchableOpacity>
+        )}
         {role === 'operations_manager' && (
           <TouchableOpacity style={styles.menuItem} onPress={() => navigation.navigate('OrganizationDashboard')}>
             <Text style={styles.menuLabel}>Organization Dashboard</Text>
-          </TouchableOpacity>
-        )}
-        {role === 'manager' && (
-          <TouchableOpacity style={styles.menuItem} onPress={() => navigation.navigate('CompanyDashboard')}>
-            <Text style={styles.menuLabel}>Company Dashboard</Text>
           </TouchableOpacity>
         )}
         {isEmployee && (
@@ -101,7 +106,7 @@ function CustomDrawerContent({ navigation }: any) {
         {isAdmin && (
           <>
             <Text style={styles.sectionLabel}>Scheduler</Text>
-            {schedulerItems.map((item) => (
+            {schedulerItemsForRole.map((item) => (
               <TouchableOpacity key={item.name} style={styles.menuItem} onPress={() => navigation.navigate(item.name)}>
                 <Text style={styles.menuLabel}>{item.label}</Text>
               </TouchableOpacity>
@@ -112,12 +117,16 @@ function CustomDrawerContent({ navigation }: any) {
         <TouchableOpacity style={styles.menuItem} onPress={() => navigation.navigate('Account')}>
           <Text style={styles.menuLabel}>Account</Text>
         </TouchableOpacity>
-        {isAdmin &&
-          managementExtra.map((item) => (
-            <TouchableOpacity key={item.name} style={styles.menuItem} onPress={() => navigation.navigate(item.name)}>
-              <Text style={styles.menuLabel}>{item.label}</Text>
-            </TouchableOpacity>
-          ))}
+        {canSeeCheckLists && (
+          <TouchableOpacity style={styles.menuItem} onPress={() => navigation.navigate('CheckLists')}>
+            <Text style={styles.menuLabel}>Check Lists</Text>
+          </TouchableOpacity>
+        )}
+        {role === 'super_admin' && (
+          <TouchableOpacity style={styles.menuItem} onPress={() => navigation.navigate('UserManagement')}>
+            <Text style={styles.menuLabel}>User Management</Text>
+          </TouchableOpacity>
+        )}
       </ScrollView>
 
       <View style={styles.drawerFooter}>
@@ -168,10 +177,8 @@ export default function MainDrawer() {
       }}
       drawerContent={(props) => <CustomDrawerContent {...props} />}
     >
-      <Drawer.Screen name="Home" component={HomeScreen} options={{ title: 'Home' }} />
       <Drawer.Screen name="SuperAdminDashboard" component={SuperAdminDashboard} options={{ title: 'Super Admin Dashboard' }} />
       <Drawer.Screen name="OrganizationDashboard" component={OrganizationDashboard} options={{ title: 'Organization' }} />
-      <Drawer.Screen name="CompanyDashboard" component={CompanyDashboard} options={{ title: 'Company' }} />
       <Drawer.Screen name="EmployeeDashboard" component={EmployeeDashboard} options={{ title: 'My Dashboard' }} />
       <Drawer.Screen name="Calendar" component={CalendarScreen} options={{ title: 'Calendar' }} />
       <Drawer.Screen name="Tasks" component={TasksScreen} options={{ title: 'Tasks' }} />

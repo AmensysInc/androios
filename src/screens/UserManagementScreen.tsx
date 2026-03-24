@@ -45,17 +45,10 @@ function userIsAdminRole(roles: any[] | undefined): boolean {
   return roles.some((x) => adminTokens.has(normalizeRoleToken(x)));
 }
 
+/** Matches web sidebar: User Management is only for `super_admin`. */
 function canAccessUserManagement(roles: any[]): boolean {
   if (!Array.isArray(roles)) return false;
-  const allowed = new Set([
-    'super_admin',
-    'admin',
-    'operations_manager',
-    'organization_manager',
-    'manager',
-    'company_manager',
-  ]);
-  return roles.some((r) => allowed.has(normalizeRoleToken(r)));
+  return roles.some((r) => normalizeRoleToken(r) === 'super_admin');
 }
 
 type RowUser = {
@@ -967,6 +960,10 @@ export default function UserManagementScreen() {
       Alert.alert('Error', 'Organization and company are required for Company Manager');
       return;
     }
+    if (editForm.role === 'employee' && (!editForm.organization_id || !editForm.company_id)) {
+      Alert.alert('Error', 'Organization and company are required for employees');
+      return;
+    }
     setSaving(true);
     try {
       const fullName = editForm.full_name.trim();
@@ -1047,18 +1044,42 @@ export default function UserManagementScreen() {
         }
       }
 
-      // Also update scheduler employee details if linked.
-      const employeeId = String(editModal.raw?.employee?.id ?? editModal.raw?.employee_details?.id ?? '').trim();
-      if (employeeId) {
-        await api.updateEmployee(employeeId, clean({
+      // Scheduler employee row holds company assignment; resolve id if enrich missed it.
+      let employeeId = String(editModal.raw?.employee?.id ?? editModal.raw?.employee_details?.id ?? '').trim();
+      if (!employeeId && editForm.role === 'employee') {
+        const resolved = await api.resolveEmployeeForUser({
+          id: editModal.id,
+          email: editForm.email.trim(),
+        });
+        if (resolved?.id) employeeId = String(resolved.id).trim();
+      }
+      if (editForm.role === 'employee') {
+        if (!employeeId) {
+          throw new Error('No employee record for this user; company cannot be updated.');
+        }
+        const rawEmp = editModal.raw?.employee ?? editModal.raw?.employee_details ?? {};
+        const prevCompany = String(
+          rawEmp.company_id ?? (typeof rawEmp.company === 'object' ? rawEmp.company?.id : rawEmp.company) ?? ''
+        ).trim();
+        const nextCompany = String(editForm.company_id ?? '').trim();
+        const companyChanged = nextCompany !== '' && prevCompany !== nextCompany;
+
+        const empPayload: Record<string, any> = {
           email: editForm.email.trim(),
           first_name: firstName,
           last_name: lastName || undefined,
-          company_id: editForm.company_id || undefined,
+          company_id: nextCompany,
+          company: nextCompany,
           phone: editForm.phone.trim() || undefined,
           employee_pin: editForm.employee_pin.trim() || undefined,
           hourly_rate: editForm.hourly_rate.trim() || undefined,
-        })).catch(() => undefined);
+        };
+        const empBody = clean(empPayload);
+        if (companyChanged) {
+          empBody.department = null;
+          empBody.team = null;
+        }
+        await api.updateEmployee(employeeId, empBody);
       }
       setEditModal(null);
       await load();

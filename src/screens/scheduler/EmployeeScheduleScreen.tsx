@@ -322,9 +322,7 @@ export default function EmployeeScheduleScreen() {
   const companiesFiltered = useMemo(() => {
     if (needsOrg && !selectedOrgId) return [];
     let list = companies;
-    if (role === 'manager' && user?.id) {
-      list = list.filter((c) => c.company_manager_id === user.id);
-    }
+    list = api.filterCompaniesForCompanyManagerRole(list, role, user?.id);
     if (selectedOrgId) {
       const oid = String(selectedOrgId);
       list = list.filter((c) => companyOrganizationId(c) === oid);
@@ -337,14 +335,12 @@ export default function EmployeeScheduleScreen() {
 
   const loadMeta = useCallback(async () => {
     try {
-      const orgsRaw = await api.getOrganizations(isOrgManager ? { operations_manager: user?.id } : undefined);
+      const orgsRaw = await api.getOrganizations(isOrgManager ? { organization_manager: user?.id } : undefined);
       setOrganizations(Array.isArray(orgsRaw) ? orgsRaw : []);
 
       let compRaw: any[] = [];
-      if (isOrgManager) {
-        compRaw = await api.getCompanies({ organization_manager: user?.id });
-      } else if (role === 'manager' && user?.id) {
-        compRaw = await api.getCompanies({ company_manager: user.id });
+      if (isOrgManager || role === 'manager') {
+        compRaw = await api.getCompanies();
       } else if (needsOrg) {
         if (selectedOrgId) {
           const oid = String(selectedOrgId);

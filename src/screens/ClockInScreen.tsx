@@ -8,9 +8,15 @@ import {
   Alert,
   RefreshControl,
   ScrollView,
+  Switch,
 } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
+import {
+  isClockBiometricEnabled,
+  setClockBiometricEnabled,
+  confirmClockBiometricOrAlert,
+} from '../lib/biometricAuth';
 
 function parseMs(iso: string | null): number | null {
   if (!iso) return null;
@@ -28,6 +34,12 @@ export default function ClockInScreen() {
   const [actionLoading, setActionLoading] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [now, setNow] = useState(Date.now());
+  const [requireBioForClock, setRequireBioForClock] = useState(false);
+
+  useEffect(() => {
+    isClockBiometricEnabled().then(setRequireBioForClock);
+  }, []);
+
 
   const load = useCallback(async () => {
     if (!user?.id) {
@@ -85,6 +97,7 @@ export default function ClockInScreen() {
 
   const onClockIn = async () => {
     if (!employee) return;
+    if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {
       await api.clockIn({ employee_id: employee.id });
@@ -102,6 +115,7 @@ export default function ClockInScreen() {
       Alert.alert('Error', 'No active time entry to clock out.');
       return;
     }
+    if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {
       await api.clockOut({ time_clock_entry_id: entryId, employee_id: employee.id });
@@ -116,6 +130,7 @@ export default function ClockInScreen() {
   const onStartBreak = async () => {
     const entryId = api.timeClockEntryId(activeEntry);
     if (!entryId) return;
+    if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {
       await api.startBreak(entryId);
@@ -130,6 +145,7 @@ export default function ClockInScreen() {
   const onEndBreak = async () => {
     const entryId = api.timeClockEntryId(activeEntry);
     if (!entryId) return;
+    if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {
       await api.endBreak(entryId);
@@ -168,6 +184,19 @@ export default function ClockInScreen() {
         <Text style={styles.title}>Clock In</Text>
         <Text style={styles.sub}>{employee.first_name} {employee.last_name}</Text>
       </View>
+      <View style={styles.bioRow}>
+        <View style={styles.bioTextWrap}>
+          <Text style={styles.bioLabel}>Require Face ID / fingerprint for clock actions</Text>
+          <Text style={styles.bioHint}>Extra check before clock in, clock out, and breaks</Text>
+        </View>
+        <Switch
+          value={requireBioForClock}
+          onValueChange={async (v) => {
+            setRequireBioForClock(v);
+            await setClockBiometricEnabled(v);
+          }}
+        />
+      </View>
       {activeEntry ? (
         <>
           <View style={styles.card}>
@@ -204,9 +233,24 @@ const styles = StyleSheet.create({
   container: { flexGrow: 1, padding: 24, paddingBottom: 48 },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   msg: { color: '#64748b', padding: 24, textAlign: 'center' },
-  header: { marginBottom: 24 },
+  header: { marginBottom: 16 },
   title: { fontSize: 22, fontWeight: '700', color: '#0f172a' },
   sub: { fontSize: 14, color: '#64748b', marginTop: 4 },
+  bioRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  bioTextWrap: { flex: 1 },
+  bioLabel: { fontSize: 14, fontWeight: '600', color: '#0f172a' },
+  bioHint: { fontSize: 12, color: '#64748b', marginTop: 4 },
   card: { backgroundColor: '#fff', borderRadius: 12, padding: 24, marginBottom: 20, borderWidth: 1, borderColor: '#e2e8f0' },
   clockLabel: { fontSize: 14, color: '#64748b' },
   clockTime: { fontSize: 28, fontWeight: '700', color: '#0f172a', marginTop: 8 },
