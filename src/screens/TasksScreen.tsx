@@ -144,7 +144,56 @@ function eventId(ev: any): string {
 }
 
 function taskUserId(t: any): string {
-  return String(t.user ?? t.user_id ?? t.owner_id ?? (t.user && typeof t.user === 'object' ? t.user.id : '') ?? '');
+  const userLike =
+    t?.user_id ??
+    t?.assigned_user_id ??
+    t?.assignee_id ??
+    t?.owner_id ??
+    (typeof t?.user === 'object' ? t?.user?.id : t?.user) ??
+    (typeof t?.assigned_user === 'object' ? t?.assigned_user?.id : t?.assigned_user) ??
+    (typeof t?.assignee === 'object' ? t?.assignee?.id : t?.assignee) ??
+    (typeof t?.owner === 'object' ? t?.owner?.id : t?.owner);
+  return userLike == null ? '' : String(userLike);
+}
+
+/** Display name from task payload only (no email — email is resolved via member directory). */
+function taskAssignedNameOnly(t: any): string {
+  const candidates = [
+    t?.assigned_user?.full_name,
+    t?.assigned_user?.name,
+    t?.assignee?.full_name,
+    t?.assignee?.name,
+    t?.user?.full_name,
+    t?.user?.name,
+    t?.owner?.full_name,
+    t?.owner?.name,
+    t?.assigned_user_name,
+    t?.assignee_name,
+    t?.user_name,
+  ];
+  for (const v of candidates) {
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return '';
+}
+
+function taskAssigneeEmails(t: any): string[] {
+  const raw: string[] = [];
+  const push = (v: unknown) => {
+    if (typeof v === 'string' && v.includes('@')) raw.push(v.trim().toLowerCase());
+  };
+  push(t?.assigned_user_email);
+  push(t?.assignee_email);
+  push(t?.user_email);
+  push(t?.owner_email);
+  push(typeof t?.assigned_user === 'string' ? t.assigned_user : undefined);
+  push(typeof t?.assignee === 'string' ? t.assignee : undefined);
+  push(typeof t?.user === 'string' ? t.user : undefined);
+  if (typeof t?.assigned_user === 'object') push(t?.assigned_user?.email);
+  if (typeof t?.assignee === 'object') push(t?.assignee?.email);
+  if (typeof t?.user === 'object') push(t?.user?.email);
+  if (typeof t?.owner === 'object') push(t?.owner?.email);
+  return [...new Set(raw)];
 }
 
 function taskPriority(t: any): string {
@@ -459,6 +508,10 @@ export default function TasksScreen() {
   const [filterStatus, setFilterStatus] = useState('pending');
 
   const [memberOptions, setMemberOptions] = useState<PickerOption[]>([{ id: 'all', label: 'All Members' }]);
+  /** Resolve calendar assignee id/email to display name (from getUsers). */
+  const [memberDisplayById, setMemberDisplayById] = useState<Record<string, string>>({});
+  const [memberDisplayByEmail, setMemberDisplayByEmail] = useState<Record<string, string>>({});
+  const [memberIdByEmail, setMemberIdByEmail] = useState<Record<string, string>>({});
   const [picker, setPicker] = useState<'scope' | 'member' | 'priority' | 'date' | 'status' | null>(null);
 
   const canViewAllMembers = ['super_admin', 'admin', 'operations_manager', 'manager'].includes(role || '');
@@ -535,58 +588,99 @@ export default function TasksScreen() {
   const loadMembers = useCallback(async () => {
     if (!canViewAllMembers) {
       setMemberOptions([{ id: 'all', label: 'All Members' }]);
+      setMemberDisplayById({});
+      setMemberDisplayByEmail({});
+      setMemberIdByEmail({});
       return;
     }
     try {
       const raw = await api.getUsers();
       const list = Array.isArray(raw) ? raw : [];
       const opts: PickerOption[] = [{ id: 'all', label: 'All Members' }];
+      const byId: Record<string, string> = {};
+      const byEmail: Record<string, string> = {};
+      const idByEmail: Record<string, string> = {};
       for (const u of list) {
         const id = u.id != null ? String(u.id) : '';
         if (!id) continue;
-        const name =
+        const displayName = (
           u.profile?.full_name ||
           u.full_name ||
           [u.first_name, u.last_name].filter(Boolean).join(' ') ||
-          u.email ||
-          id;
-        opts.push({ id, label: String(name) });
+          ''
+        ).trim();
+        const label = displayName || u.email || id;
+        opts.push({ id, label: String(label) });
+        byId[id] = String(label);
+        if (typeof u.email === 'string' && u.email.trim()) {
+          const ek = u.email.trim().toLowerCase();
+          idByEmail[ek] = id;
+          byEmail[ek] = displayName || String(label);
+        }
       }
       setMemberOptions(opts);
+      setMemberDisplayById(byId);
+      setMemberDisplayByEmail(byEmail);
+      setMemberIdByEmail(idByEmail);
     } catch {
       setMemberOptions([{ id: 'all', label: 'All Members' }]);
+      setMemberDisplayById({});
+      setMemberDisplayByEmail({});
+      setMemberIdByEmail({});
     }
   }, [canViewAllMembers]);
 
   const load = useCallback(async () => {
     try {
       const { start, end } = getDateRangeForPreset(filterDate);
-      const params: Record<string, any> = {
+      const baseParams: Record<string, any> = {
         event_type: 'task',
         start_time__gte: start.toISOString(),
         end_time__lte: end.toISOString(),
       };
-
-      if (canViewAllMembers) {
-        if (filterMember !== 'all') {
-          params.user = filterMember;
+      const mergeUnique = (items: any[]) => {
+        const seen = new Set<string>();
+        const out: any[] = [];
+        for (const t of items) {
+          const key = eventId(t) || `${String(t?.title || t?.name || '')}|${String(t?.start_time || t?.created_at || '')}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push(t);
         }
-      } else {
-        params.user = user?.id;
-      }
+        return out;
+      };
+      const fetchBy = async (extra?: Record<string, any>) => {
+        const res = await api.getCalendarEvents({ ...baseParams, ...(extra || {}) });
+        return Array.isArray(res) ? res : [];
+      };
 
       let raw: any[] = [];
       try {
-        const res = await api.getCalendarEvents(params);
-        raw = Array.isArray(res) ? res : [];
+        if (canViewAllMembers && filterMember !== 'all') {
+          const [byUser, byAssigned, byAssignee] = await Promise.all([
+            fetchBy({ user: filterMember }),
+            fetchBy({ assigned_user: filterMember }),
+            fetchBy({ assignee: filterMember }),
+          ]);
+          raw = mergeUnique([...byUser, ...byAssigned, ...byAssignee]);
+        } else if (!canViewAllMembers) {
+          const uid = user?.id;
+          if (!uid) {
+            raw = [];
+          } else {
+            const [byUser, byAssigned, byAssignee] = await Promise.all([
+              fetchBy({ user: uid }),
+              fetchBy({ assigned_user: uid }),
+              fetchBy({ assignee: uid }),
+            ]);
+            raw = mergeUnique([...byUser, ...byAssigned, ...byAssignee]);
+          }
+        } else {
+          raw = await fetchBy();
+        }
       } catch {
-        const fallback = await api.getCalendarEvents({
-          event_type: 'task',
-          user: user?.id,
-          start_time__gte: start.toISOString(),
-          end_time__lte: end.toISOString(),
-        });
-        raw = Array.isArray(fallback) ? fallback : [];
+        const fallback = await fetchBy(user?.id ? { user: user.id } : undefined);
+        raw = mergeUnique(fallback);
       }
 
       setTasks(raw);
@@ -667,11 +761,11 @@ export default function TasksScreen() {
       return;
     }
     let start = parseUserDateTime(startStr);
-    let end = parseUserDateTime(endStr);
-    if (!start || !end) {
-      Alert.alert('Validation', 'Enter valid start and end date/time');
+    if (!start) {
+      Alert.alert('Validation', allDay ? 'Select a valid date' : 'Enter a valid start date/time');
       return;
     }
+    let end = parseUserDateTime(endStr);
     if (allDay) {
       const d = new Date(start);
       d.setHours(0, 0, 0, 0);
@@ -679,10 +773,15 @@ export default function TasksScreen() {
       e.setHours(23, 59, 59, 999);
       start = d;
       end = e;
-    }
-    if (end.getTime() < start.getTime()) {
-      Alert.alert('Validation', 'End time must be after start time');
-      return;
+    } else {
+      if (!end) {
+        Alert.alert('Validation', 'Enter valid start and end date/time');
+        return;
+      }
+      if (end.getTime() < start.getTime()) {
+        Alert.alert('Validation', 'End time must be after start time');
+        return;
+      }
     }
 
     const targetUser = createAssignKey === 'self' ? user?.id : createAssignKey;
@@ -724,7 +823,24 @@ export default function TasksScreen() {
       try {
         await api.updateTaskCompleted(id, next);
       } catch {
-        await api.updateCalendarEvent(id, { completed: next });
+        const fallbacks = [
+          { completed: next },
+          { is_completed: next },
+          { done: next },
+          { is_done: next },
+          { status: next ? 'completed' : 'pending' },
+        ];
+        let updated = false;
+        for (const body of fallbacks) {
+          try {
+            await api.updateCalendarEvent(id, body);
+            updated = true;
+            break;
+          } catch {
+            // try next body
+          }
+        }
+        if (!updated) throw new Error('Unable to update completion state');
       }
       load();
     } catch (e: unknown) {
@@ -760,11 +876,11 @@ export default function TasksScreen() {
       return;
     }
     let start = parseUserDateTime(editStartStr);
-    let end = parseUserDateTime(editEndStr);
-    if (!start || !end) {
-      Alert.alert('Validation', 'Enter valid start and end date/time');
+    if (!start) {
+      Alert.alert('Validation', editAllDay ? 'Select a valid date' : 'Enter a valid start date/time');
       return;
     }
+    let end = parseUserDateTime(editEndStr);
     if (editAllDay) {
       const d = new Date(start);
       d.setHours(0, 0, 0, 0);
@@ -772,10 +888,15 @@ export default function TasksScreen() {
       e.setHours(23, 59, 59, 999);
       start = d;
       end = e;
-    }
-    if (end.getTime() < start.getTime()) {
-      Alert.alert('Validation', 'End time must be after start time');
-      return;
+    } else {
+      if (!end) {
+        Alert.alert('Validation', 'Enter valid start and end date/time');
+        return;
+      }
+      if (end.getTime() < start.getTime()) {
+        Alert.alert('Validation', 'End time must be after start time');
+        return;
+      }
     }
     setEditSaving(true);
     try {
@@ -801,7 +922,23 @@ export default function TasksScreen() {
     setAssignUserPicker(false);
     setAssignTask(task);
     const cur = taskUserId(task);
-    setAssignToId(cur && assignMemberPickOptions.some((o) => o.id === cur) ? cur : '');
+    const pickIds = new Set(assignMemberPickOptions.map((o) => o.id));
+    let resolved = '';
+    if (cur && pickIds.has(cur)) resolved = cur;
+    else if (cur) {
+      const hit = assignMemberPickOptions.find((o) => String(o.id) === String(cur));
+      if (hit) resolved = hit.id;
+    }
+    if (!resolved) {
+      for (const em of taskAssigneeEmails(task)) {
+        const idMatch = memberIdByEmail[em];
+        if (idMatch && pickIds.has(idMatch)) {
+          resolved = idMatch;
+          break;
+        }
+      }
+    }
+    setAssignToId(resolved);
   };
 
   const submitAssign = async () => {
@@ -846,11 +983,11 @@ export default function TasksScreen() {
       return;
     }
     let start = parseUserDateTime(subStartStr);
-    let end = parseUserDateTime(subEndStr);
-    if (!start || !end) {
-      Alert.alert('Validation', 'Enter valid start and end date/time');
+    if (!start) {
+      Alert.alert('Validation', subAllDay ? 'Select a valid date' : 'Enter a valid start date/time');
       return;
     }
+    let end = parseUserDateTime(subEndStr);
     if (subAllDay) {
       const d = new Date(start);
       d.setHours(0, 0, 0, 0);
@@ -858,10 +995,15 @@ export default function TasksScreen() {
       e.setHours(23, 59, 59, 999);
       start = d;
       end = e;
-    }
-    if (end.getTime() < start.getTime()) {
-      Alert.alert('Validation', 'End time must be after start time');
-      return;
+    } else {
+      if (!end) {
+        Alert.alert('Validation', 'Enter valid start and end date/time');
+        return;
+      }
+      if (end.getTime() < start.getTime()) {
+        Alert.alert('Validation', 'End time must be after start time');
+        return;
+      }
     }
     const targetUser =
       subAssignKey === 'same_parent' ? taskUserId(subtaskParent) : subAssignKey;
@@ -965,10 +1107,22 @@ export default function TasksScreen() {
   );
 
   const currentAssigneeName = (task: any) => {
+    const named = taskAssignedNameOnly(task);
+    if (named) return named;
     const uid = taskUserId(task);
-    if (!uid) return '—';
-    const m = memberOptions.find((o) => o.id === uid);
-    return m?.label ?? uid;
+    if (uid) {
+      const fromMap = memberDisplayById[uid] || memberDisplayById[String(uid)];
+      if (fromMap) return fromMap;
+      const m = memberOptions.find((o) => String(o.id) === String(uid));
+      if (m?.label) return m.label;
+    }
+    for (const em of taskAssigneeEmails(task)) {
+      const fromEmail = memberDisplayByEmail[em];
+      if (fromEmail) return fromEmail;
+    }
+    const firstEmail = taskAssigneeEmails(task)[0];
+    if (firstEmail) return firstEmail;
+    return uid || '—';
   };
 
   return (
@@ -1233,21 +1387,35 @@ export default function TasksScreen() {
                   <Switch value={allDay} onValueChange={setAllDay} trackColor={{ false: '#e2e8f0', true: '#93c5fd' }} thumbColor={allDay ? '#2563eb' : '#f4f4f5'} />
                 </View>
 
-                <Text style={styles.fieldLabel}>Start Time</Text>
-                <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setCreatePicker('start')} activeOpacity={0.85}>
-                  <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(startStr) && styles.datetimeTriggerPh]}>
-                    {displayLocalFromStr(startStr) || 'dd-mm-yyyy --:--'}
-                  </Text>
-                  <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
-                </TouchableOpacity>
+                {allDay ? (
+                  <>
+                    <Text style={styles.fieldLabel}>Date</Text>
+                    <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setCreatePicker('start')} activeOpacity={0.85}>
+                      <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(startStr) && styles.datetimeTriggerPh]}>
+                        {displayLocalFromStr(startStr) || 'dd-mm-yyyy --:--'}
+                      </Text>
+                      <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.fieldLabel}>Start Time</Text>
+                    <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setCreatePicker('start')} activeOpacity={0.85}>
+                      <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(startStr) && styles.datetimeTriggerPh]}>
+                        {displayLocalFromStr(startStr) || 'dd-mm-yyyy --:--'}
+                      </Text>
+                      <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
+                    </TouchableOpacity>
 
-                <Text style={styles.fieldLabel}>End Time</Text>
-                <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setCreatePicker('end')} activeOpacity={0.85}>
-                  <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(endStr) && styles.datetimeTriggerPh]}>
-                    {displayLocalFromStr(endStr) || 'dd-mm-yyyy --:--'}
-                  </Text>
-                  <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
-                </TouchableOpacity>
+                    <Text style={styles.fieldLabel}>End Time</Text>
+                    <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setCreatePicker('end')} activeOpacity={0.85}>
+                      <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(endStr) && styles.datetimeTriggerPh]}>
+                        {displayLocalFromStr(endStr) || 'dd-mm-yyyy --:--'}
+                      </Text>
+                      <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
+                    </TouchableOpacity>
+                  </>
+                )}
 
                 <View style={styles.modalActions}>
                   <TouchableOpacity
@@ -1414,21 +1582,35 @@ export default function TasksScreen() {
                   />
                 </View>
 
-                <Text style={styles.fieldLabel}>Start Time</Text>
-                <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setEditPicker('start')} activeOpacity={0.85}>
-                  <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(editStartStr) && styles.datetimeTriggerPh]}>
-                    {displayLocalFromStr(editStartStr) || 'dd-mm-yyyy --:--'}
-                  </Text>
-                  <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
-                </TouchableOpacity>
+                {editAllDay ? (
+                  <>
+                    <Text style={styles.fieldLabel}>Date</Text>
+                    <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setEditPicker('start')} activeOpacity={0.85}>
+                      <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(editStartStr) && styles.datetimeTriggerPh]}>
+                        {displayLocalFromStr(editStartStr) || 'dd-mm-yyyy --:--'}
+                      </Text>
+                      <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.fieldLabel}>Start Time</Text>
+                    <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setEditPicker('start')} activeOpacity={0.85}>
+                      <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(editStartStr) && styles.datetimeTriggerPh]}>
+                        {displayLocalFromStr(editStartStr) || 'dd-mm-yyyy --:--'}
+                      </Text>
+                      <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
+                    </TouchableOpacity>
 
-                <Text style={styles.fieldLabel}>End Time</Text>
-                <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setEditPicker('end')} activeOpacity={0.85}>
-                  <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(editEndStr) && styles.datetimeTriggerPh]}>
-                    {displayLocalFromStr(editEndStr) || 'dd-mm-yyyy --:--'}
-                  </Text>
-                  <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
-                </TouchableOpacity>
+                    <Text style={styles.fieldLabel}>End Time</Text>
+                    <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setEditPicker('end')} activeOpacity={0.85}>
+                      <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(editEndStr) && styles.datetimeTriggerPh]}>
+                        {displayLocalFromStr(editEndStr) || 'dd-mm-yyyy --:--'}
+                      </Text>
+                      <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
+                    </TouchableOpacity>
+                  </>
+                )}
 
                 <View style={styles.modalActions}>
                   <TouchableOpacity
@@ -1720,21 +1902,35 @@ export default function TasksScreen() {
                   />
                 </View>
 
-                <Text style={styles.fieldLabel}>Start Time</Text>
-                <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setSubPicker('start')} activeOpacity={0.85}>
-                  <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(subStartStr) && styles.datetimeTriggerPh]}>
-                    {displayLocalFromStr(subStartStr) || 'dd-mm-yyyy --:--'}
-                  </Text>
-                  <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
-                </TouchableOpacity>
+                {subAllDay ? (
+                  <>
+                    <Text style={styles.fieldLabel}>Date</Text>
+                    <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setSubPicker('start')} activeOpacity={0.85}>
+                      <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(subStartStr) && styles.datetimeTriggerPh]}>
+                        {displayLocalFromStr(subStartStr) || 'dd-mm-yyyy --:--'}
+                      </Text>
+                      <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.fieldLabel}>Start Time</Text>
+                    <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setSubPicker('start')} activeOpacity={0.85}>
+                      <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(subStartStr) && styles.datetimeTriggerPh]}>
+                        {displayLocalFromStr(subStartStr) || 'dd-mm-yyyy --:--'}
+                      </Text>
+                      <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
+                    </TouchableOpacity>
 
-                <Text style={styles.fieldLabel}>End Time</Text>
-                <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setSubPicker('end')} activeOpacity={0.85}>
-                  <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(subEndStr) && styles.datetimeTriggerPh]}>
-                    {displayLocalFromStr(subEndStr) || 'dd-mm-yyyy --:--'}
-                  </Text>
-                  <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
-                </TouchableOpacity>
+                    <Text style={styles.fieldLabel}>End Time</Text>
+                    <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setSubPicker('end')} activeOpacity={0.85}>
+                      <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(subEndStr) && styles.datetimeTriggerPh]}>
+                        {displayLocalFromStr(subEndStr) || 'dd-mm-yyyy --:--'}
+                      </Text>
+                      <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
+                    </TouchableOpacity>
+                  </>
+                )}
 
                 <View style={styles.modalActions}>
                   <TouchableOpacity

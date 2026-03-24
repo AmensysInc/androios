@@ -259,7 +259,10 @@ export async function updateTaskCompleted(id: string, completed: boolean) {
   const bodies = [
     { completed },
     { is_completed: completed },
+    { done: completed },
+    { is_done: completed },
     { status: completed ? 'completed' : 'pending' },
+    { status: completed ? 'done' : 'pending' },
   ];
   let last: unknown;
   for (const path of CAL_EVENT_PATH(id)) {
