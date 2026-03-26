@@ -240,6 +240,9 @@ export class ApiClient {
         throw new HttpError(msg, response.status, err);
       }
 
+      const method = String(init.method || 'GET').toUpperCase();
+      const isMutation = method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
+
       const trimmed = text.trim();
       if (!trimmed) return {} as T;
 
@@ -255,9 +258,14 @@ export class ApiClient {
         try {
           return JSON.parse(trimmed) as T;
         } catch {
+          // Mutations often return 201/204 with empty or non-strict JSON; treat as success so callers don't retry.
+          if (isMutation) return {} as T;
           throw new Error(`Invalid JSON in response (${response.status}) from ${url}`);
         }
       }
+
+      // Successful POST/PUT/PATCH sometimes return non-JSON (e.g. text/plain). Retrying would duplicate creates.
+      if (isMutation) return {} as T;
 
       throw new Error(
         `Expected JSON from API but received ${contentType || 'non-JSON'} (HTTP ${response.status}). ` +
@@ -287,6 +295,9 @@ export class ApiClient {
   }
   async delete<T>(endpoint: string, params?: Record<string, any>): Promise<T> {
     return this.request<T>(endpoint, { method: 'DELETE', params });
+  }
+  async options<T>(endpoint: string, params?: Record<string, any>): Promise<T> {
+    return this.request<T>(endpoint, { method: 'OPTIONS', params });
   }
 
   async login(usernameOrEmail: string, password: string) {

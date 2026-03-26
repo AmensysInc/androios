@@ -138,6 +138,12 @@ function habitDisplayName(h: any): string {
   return String(h.name ?? h.title ?? 'Habit').trim() || 'Habit';
 }
 
+function habitIdForApi(h: any): string | number {
+  const id = habitId(h);
+  if (/^\d+$/.test(id)) return parseInt(id, 10);
+  return id;
+}
+
 function categoryLabel(id: string): string {
   return (
     CATEGORY_OPTIONS.find((c) => c.id === id)?.label ??
@@ -335,6 +341,11 @@ export default function HabitsScreen() {
   const [modalOpen, setModalOpen] = useState(false);
   const [picker, setPicker] = useState<'category' | 'frequency' | null>(null);
   const [datePickerFor, setDatePickerFor] = useState<'start' | 'end' | null>(null);
+  const [editingHabit, setEditingHabit] = useState<any | null>(null);
+  const [completionByHabitId, setCompletionByHabitId] = useState<Record<string, { id: string; date: string }>>({});
+  const [completionSavingIds, setCompletionSavingIds] = useState<Set<string>>(new Set());
+  const [completionPostFields, setCompletionPostFields] = useState<string[] | null>(null);
+  const [completionPostSpec, setCompletionPostSpec] = useState<Record<string, any> | null>(null);
 
   const [formTitle, setFormTitle] = useState('');
   const [formDescription, setFormDescription] = useState('');
@@ -360,9 +371,35 @@ export default function HabitsScreen() {
         raw = Array.isArray(res) ? res : [];
       }
       setHabits(raw);
+      try {
+        const today = todayIsoDate();
+        const compParams = canListAll ? { date: today } : user?.id ? { user: user.id, date: today } : { date: today };
+        let comps: any[] = [];
+        try {
+          const res = await api.getHabitCompletions(compParams);
+          comps = Array.isArray(res) ? res : [];
+        } catch {
+          // Some backends don't support filtering by date in query params.
+          const res = await api.getHabitCompletions(canListAll ? {} : user?.id ? { user: user.id } : undefined);
+          const list = Array.isArray(res) ? res : [];
+          comps = list.filter((c) => String(c?.date ?? c?.completed_date ?? '').slice(0, 10) === today);
+        }
+        const list = Array.isArray(comps) ? comps : [];
+        const map: Record<string, { id: string; date: string }> = {};
+        for (const c of list) {
+          const cid = String(c?.id ?? c?.pk ?? c?.uuid ?? '').trim();
+          const hid = String(c?.habit ?? c?.habit_id ?? c?.habitId ?? c?.habit_uuid ?? '').trim();
+          const d = String(c?.date ?? c?.completed_date ?? today).slice(0, 10);
+          if (cid && hid) map[hid] = { id: cid, date: d };
+        }
+        setCompletionByHabitId(map);
+      } catch {
+        setCompletionByHabitId({});
+      }
     } catch (e) {
       console.warn(e);
       setHabits([]);
+      setCompletionByHabitId({});
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -384,10 +421,34 @@ export default function HabitsScreen() {
     setFormColor(COLOR_SWATCHES[0].hex);
     setPicker(null);
     setDatePickerFor(null);
+    setEditingHabit(null);
   }, []);
 
   const openCreate = () => {
     resetForm();
+    setModalOpen(true);
+  };
+
+  const openEdit = (h: any) => {
+    const name = String(h?.name ?? h?.title ?? '').trim();
+    const desc = String(h?.description ?? '').trim();
+    const icon = String(h?.icon ?? h?.category ?? 'health_fitness').trim() || 'health_fitness';
+    const freq = String(h?.frequency ?? h?.recurrence ?? 'daily').trim() || 'daily';
+    const start = String(h?.start_date ?? h?.startDate ?? todayIsoDate()).slice(0, 10);
+    const end = String(h?.end_date ?? h?.endDate ?? '').slice(0, 10);
+    const notes = String(h?.notes ?? '').trim();
+    const color = String(h?.color ?? h?.colour ?? COLOR_SWATCHES[0].hex).trim() || COLOR_SWATCHES[0].hex;
+    setEditingHabit(h);
+    setFormTitle(name || habitDisplayName(h));
+    setFormDescription(desc);
+    setFormCategory(icon);
+    setFormFrequency(freq);
+    setFormStartDate(/^\d{4}-\d{2}-\d{2}/.test(start) ? start : todayIsoDate());
+    setFormEndDate(/^\d{4}-\d{2}-\d{2}/.test(end) ? end : '');
+    setFormNotes(notes);
+    setFormColor(color);
+    setPicker(null);
+    setDatePickerFor(null);
     setModalOpen(true);
   };
 
@@ -413,7 +474,7 @@ export default function HabitsScreen() {
     return body;
   };
 
-  const createHabit = async () => {
+  const submitHabit = async () => {
     if (!formTitle.trim()) {
       Alert.alert('Validation', 'Please enter a title');
       return;
@@ -425,14 +486,119 @@ export default function HabitsScreen() {
     setSaving(true);
     try {
       const body = buildCreatePayload();
-      await api.createHabit(body);
+      if (editingHabit) {
+        const id = habitId(editingHabit);
+        if (!id) throw new Error('Missing habit id');
+        await api.updateHabit(id, body);
+      } else {
+        await api.createHabit(body);
+      }
       setModalOpen(false);
       resetForm();
-      load();
+      await load();
     } catch (e: unknown) {
       Alert.alert('Error', formatHabitApiError(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const toggleComplete = async (h: any) => {
+    const hid = habitId(h);
+    if (!hid) return;
+    if (completionSavingIds.has(hid)) return;
+    const today = todayIsoDate();
+    const existing = completionByHabitId[hid];
+    setCompletionSavingIds((prev) => new Set(prev).add(hid));
+    // Optimistic UI
+    setCompletionByHabitId((prev) => {
+      const next = { ...prev };
+      if (existing) delete next[hid];
+      else next[hid] = { id: '__pending__', date: today };
+      return next;
+    });
+    try {
+      if (existing && existing.id && existing.id !== '__pending__') {
+        await api.deleteHabitCompletion(existing.id);
+      } else {
+        // Discover DRF serializer fields once; then build exactly one payload to avoid spamming POSTs.
+        let fields = completionPostFields;
+        let postSpec = completionPostSpec;
+        if (!fields) {
+          try {
+            const schema = await api.getHabitCompletionSchema();
+            const post = schema?.actions?.POST ?? schema?.actions?.post ?? schema?.actions?.create ?? null;
+            const keys = post && typeof post === 'object' ? Object.keys(post) : [];
+            fields = keys.length ? keys : null;
+            postSpec = post && typeof post === 'object' ? (post as Record<string, any>) : null;
+          } catch {
+            fields = null;
+            postSpec = null;
+          }
+          setCompletionPostFields(fields);
+          setCompletionPostSpec(postSpec);
+        }
+
+        const habitVal = habitIdForApi(h);
+        const uid = user?.id ? String(user.id) : undefined;
+        const prefers = (k: string) => fields?.includes(k);
+        const payload: Record<string, any> = {};
+
+        // Best-effort explicit mapping for common field names.
+        if (prefers('habit') || !fields) payload.habit = habitVal;
+        if (prefers('habit_id')) payload.habit_id = habitVal;
+        if (prefers('date')) payload.date = today;
+        if (prefers('completed_on')) payload.completed_on = today;
+        if (prefers('completed_date')) payload.completed_date = today;
+        if (prefers('completed_at')) payload.completed_at = new Date().toISOString();
+        if (prefers('completed_time')) payload.completed_time = new Date().toISOString();
+        if (prefers('created_at')) payload.created_at = new Date().toISOString();
+        if (prefers('is_completed')) payload.is_completed = true;
+        if (prefers('completed')) payload.completed = true;
+        if (uid) {
+          if (prefers('user')) payload.user = uid;
+          if (prefers('user_id')) payload.user_id = uid;
+        }
+
+        // If we have a DRF POST spec, fill any *required* fields we missed.
+        if (postSpec) {
+          for (const [k, spec] of Object.entries(postSpec)) {
+            if (payload[k] != null && payload[k] !== '') continue;
+            const required = !!(spec && typeof spec === 'object' && (spec as any).required === true);
+            if (!required) continue;
+            if (k === 'habit' || k === 'habit_id') payload[k] = habitVal;
+            else if ((k === 'user' || k === 'user_id') && uid) payload[k] = uid;
+            else if (k.includes('date') || k.endsWith('_on')) payload[k] = today;
+            else if (k.includes('time') || k.endsWith('_at')) payload[k] = new Date().toISOString();
+            else if (k.startsWith('is_') || k === 'completed') payload[k] = true;
+            else payload[k] = '';
+          }
+        }
+
+        // If schema is unavailable, use the most likely DRF default.
+        if (!fields) {
+          payload.habit = habitVal;
+          payload.date = today;
+        }
+
+        const created = await api.createHabitCompletion(payload);
+        const cid = String(created?.id ?? created?.pk ?? created?.uuid ?? '').trim();
+        if (cid) setCompletionByHabitId((prev) => ({ ...prev, [hid]: { id: cid, date: today } }));
+        else await load();
+      }
+    } catch (e: any) {
+      // rollback
+      await load();
+      const body = e?.body ?? e?.response?.data ?? e?.errors;
+      const detail = body && typeof body === 'object' ? `\n${JSON.stringify(body).slice(0, 600)}` : '';
+      const meta = completionPostFields ? `\nfields=${JSON.stringify(completionPostFields)}` : '';
+      Alert.alert('Error', `${e?.message || 'Could not update completion'}${detail}${meta}`);
+    } finally {
+      setCompletionSavingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(hid);
+        return next;
+      });
     }
   };
 
@@ -515,11 +681,21 @@ export default function HabitsScreen() {
           const catSlug = item.icon ?? item.category;
           const catChip = catSlug ? categoryLabel(String(catSlug)) : null;
           const freq = item.frequency || item.recurrence;
+          const hid = habitId(item);
+          const completed = !!(hid && completionByHabitId[hid]);
+          const createdAt = String(item.created_at ?? item.createdAt ?? item.created ?? '').trim();
+          const createdLabel = createdAt ? new Date(createdAt).toLocaleDateString() : '';
+          const startLabel = String(item.start_date ?? item.startDate ?? '').slice(0, 10);
           return (
             <View style={styles.habitCard}>
               <View style={[styles.habitColorDot, { backgroundColor: typeof c === 'string' ? c : formColor }]} />
               <View style={styles.habitCardBody}>
-                <Text style={styles.habitCardTitle}>{habitDisplayName(item)}</Text>
+                <Text style={[styles.habitCardTitle, completed && styles.habitCardTitleCompleted]}>
+                  {habitDisplayName(item)}
+                </Text>
+                <Text style={[styles.habitMetaSmall, completed && styles.habitMetaSmallCompleted]}>
+                  {createdLabel ? `Created ${createdLabel}` : 'Created —'} · {startLabel ? `Start: ${startLabel}` : 'Start: —'}
+                </Text>
                 {item.description ? (
                   <Text style={styles.habitCardDesc} numberOfLines={2}>
                     {item.description}
@@ -532,9 +708,31 @@ export default function HabitsScreen() {
                   {freq ? <Text style={styles.habitMetaChip}>{String(freq)}</Text> : null}
                 </View>
               </View>
-              <Pressable onPress={() => deleteHabit(item)} hitSlop={10} style={styles.deleteHit}>
-                <MaterialCommunityIcons name="delete-outline" size={22} color="#94a3b8" />
-              </Pressable>
+              <View style={styles.habitActions}>
+                <TouchableOpacity
+                  style={[styles.completeBtn, completed ? styles.undoBtn : null]}
+                  onPress={() => void toggleComplete(item)}
+                  disabled={completionSavingIds.has(hid)}
+                  activeOpacity={0.9}
+                >
+                  <MaterialCommunityIcons
+                    name={completed ? 'undo' : 'check'}
+                    size={16}
+                    color={completed ? '#0f172a' : '#fff'}
+                  />
+                  <Text style={[styles.completeBtnText, completed ? styles.undoBtnText : null]}>
+                    {completed ? 'Undo' : 'Complete'}
+                  </Text>
+                </TouchableOpacity>
+                <View style={styles.iconBtnRow}>
+                  <Pressable onPress={() => openEdit(item)} hitSlop={10} style={styles.iconBtn}>
+                    <MaterialCommunityIcons name="pencil-outline" size={20} color="#64748b" />
+                  </Pressable>
+                  <Pressable onPress={() => deleteHabit(item)} hitSlop={10} style={styles.iconBtn}>
+                    <MaterialCommunityIcons name="delete-outline" size={22} color="#64748b" />
+                  </Pressable>
+                </View>
+              </View>
             </View>
           );
         }}
@@ -569,7 +767,7 @@ export default function HabitsScreen() {
             >
               <Pressable style={styles.createBox} onPress={(e) => e.stopPropagation?.()}>
                 <View style={styles.createHeader}>
-                  <Text style={styles.createTitle}>Create New Habit</Text>
+                  <Text style={styles.createTitle}>{editingHabit ? 'Edit Habit' : 'Create New Habit'}</Text>
                   <TouchableOpacity
                     onPress={() => {
                       setPicker(null);
@@ -731,20 +929,18 @@ export default function HabitsScreen() {
                 ))}
               </View>
 
-              <TouchableOpacity
-                style={[styles.createHabitBtn, saving && styles.disabled]}
-                onPress={() => void createHabit()}
-                disabled={saving}
-              >
-                <Text style={styles.createHabitBtnText}>{saving ? 'Saving…' : 'Create Habit'}</Text>
+              <TouchableOpacity style={[styles.createHabitBtn, saving && styles.disabled]} onPress={() => void submitHabit()} disabled={saving}>
+                <Text style={styles.createHabitBtnText}>
+                  {saving ? 'Saving…' : editingHabit ? 'Update Habit' : 'Create Habit'}
+                </Text>
               </TouchableOpacity>
               </Pressable>
             </ScrollView>
 
             {picker ? (
-              <View style={styles.habitInlinePickerLayer} pointerEvents="box-none">
+              <View style={[styles.habitInlinePickerLayer, { pointerEvents: 'box-none' }]}>
                 <Pressable style={StyleSheet.absoluteFill} onPress={() => setPicker(null)} />
-                <View style={styles.habitInlinePickerBox} pointerEvents="auto">
+                <View style={[styles.habitInlinePickerBox, { pointerEvents: 'auto' }]}>
                   <Text style={pickerStyles.title}>{picker === 'category' ? 'Category' : 'Frequency'}</Text>
                   <FlatList
                     data={picker === 'category' ? CATEGORY_OPTIONS : FREQUENCY_OPTIONS}
@@ -777,9 +973,9 @@ export default function HabitsScreen() {
             ) : null}
 
             {datePickerFor ? (
-              <View style={styles.habitDateLayer} pointerEvents="box-none">
+              <View style={[styles.habitDateLayer, { pointerEvents: 'box-none' }]}>
                 <Pressable style={StyleSheet.absoluteFill} onPress={() => setDatePickerFor(null)} />
-                <View style={styles.habitDateBox} pointerEvents="auto">
+                <View style={[styles.habitDateBox, { pointerEvents: 'auto' }]}>
                   <Text style={styles.habitDateTitle}>
                     {datePickerFor === 'start' ? 'Start date' : 'End date (optional)'}
                   </Text>
@@ -880,6 +1076,9 @@ const styles = StyleSheet.create({
   },
   habitCardBody: { flex: 1, minWidth: 0 },
   habitCardTitle: { fontSize: 16, fontWeight: '600', color: '#0f172a' },
+  habitCardTitleCompleted: { textDecorationLine: 'line-through', color: '#94a3b8' },
+  habitMetaSmall: { fontSize: 11, color: '#94a3b8', marginTop: 4 },
+  habitMetaSmallCompleted: { textDecorationLine: 'line-through' },
   habitCardDesc: { fontSize: 13, color: '#64748b', marginTop: 4 },
   habitMetaRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
   habitMetaChip: {
@@ -893,7 +1092,27 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     textTransform: 'capitalize',
   },
-  deleteHit: { padding: 8 },
+  habitActions: { alignItems: 'flex-end', justifyContent: 'center', gap: 8, marginLeft: 10 },
+  completeBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 10,
+    backgroundColor: '#1e40af',
+    minWidth: 110,
+  },
+  completeBtnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
+  undoBtn: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  undoBtnText: { color: '#0f172a' },
+  iconBtnRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  iconBtn: { width: 34, height: 34, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
 
   modalOverlay: {
     flex: 1,

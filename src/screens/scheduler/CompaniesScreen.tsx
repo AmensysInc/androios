@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, type CSSProperties } from 'react';
 import {
   View,
   Text,
@@ -35,11 +35,45 @@ type PickerOption = { id: string; label: string };
 function normalizeHexColor(input: string | null | undefined, fallback = '#3b82f6'): string {
   const raw = String(input || '').trim();
   const s = raw.startsWith('#') ? raw : `#${raw}`;
-  if (/^#[0-9A-Fa-f]{6}$/.test(s)) return s;
+  if (/^#[0-9A-Fa-f]{6}$/.test(s)) return s.toLowerCase();
   if (/^#[0-9A-Fa-f]{3}$/.test(s)) {
-    return `#${s[1]}${s[1]}${s[2]}${s[2]}${s[3]}${s[3]}`;
+    return `#${s[1]}${s[1]}${s[2]}${s[2]}${s[3]}${s[3]}`.toLowerCase();
   }
   return fallback;
+}
+
+/** Icon color (dark or white) for contrast on a solid brand background. */
+function iconColorOnBrandBg(hex: string): string {
+  const s = normalizeHexColor(hex, '#3b82f6').slice(1);
+  const r = parseInt(s.slice(0, 2), 16);
+  const g = parseInt(s.slice(2, 4), 16);
+  const b = parseInt(s.slice(4, 6), 16);
+  const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+  return brightness > 165 ? '#0f172a' : '#ffffff';
+}
+
+function digitsOnly(s: string): string {
+  return String(s || '').replace(/\D/g, '');
+}
+
+/** US display format (XXX) XXX-XXXX, max 10 digits. */
+function formatUsPhoneDisplay(digits: string): string {
+  const d = digitsOnly(digits).slice(0, 10);
+  if (d.length === 0) return '';
+  if (d.length <= 3) return `(${d}`;
+  if (d.length <= 6) return `(${d.slice(0, 3)}) ${d.slice(3)}`;
+  return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+}
+
+function displayUsPhoneFromRaw(raw: string | null | undefined): string {
+  return formatUsPhoneDisplay(digitsOnly(String(raw ?? '')));
+}
+
+function orgIsArchived(o: Organization): boolean {
+  const a = (o as any).archived ?? (o as any).is_archived ?? (o as any).deleted;
+  if (a === true || a === 'true' || a === 1 || a === '1') return true;
+  const st = String((o as any).status ?? '').toLowerCase();
+  return st === 'archived' || st === 'inactive';
 }
 
 function normalizeRoleToken(r: any): string {
@@ -48,11 +82,53 @@ function normalizeRoleToken(r: any): string {
   return String(s).trim().toLowerCase().replace(/[\s-]+/g, '_');
 }
 
+function companyManagerUserId(c: Company | null | undefined): string {
+  if (!c) return '';
+  const v =
+    (c as any).company_manager_id ??
+    (c as any).company_manager ??
+    (c as any).manager_id ??
+    (c as any).manager ??
+    '';
+  return v != null ? String(v).trim() : '';
+}
+
+function isAssignedId(v: any): boolean {
+  if (v == null) return false;
+  const s = String(v).trim().toLowerCase();
+  if (!s) return false;
+  if (s === 'undefined' || s === 'null' || s === 'none') return false;
+  if (s === '0') return false;
+  return true;
+}
+
 function getUserLabel(u: any): string {
   const full = u?.profile?.full_name ?? u?.full_name;
   const name = full && String(full).trim() ? String(full).trim() : '';
   if (name) return name;
   return u?.username ?? u?.email ?? 'User';
+}
+
+function userEmail(u: any): string {
+  return String(u?.email ?? u?.username ?? '').trim();
+}
+
+function userStatusToken(u: any): string {
+  const raw = u?.profile?.status ?? u?.status ?? '';
+  const s = String(raw || '').trim().toLowerCase();
+  if (!s) return 'active';
+  if (['active', 'enabled', 'ok'].includes(s)) return 'active';
+  if (['inactive', 'disabled', 'blocked'].includes(s)) return 'inactive';
+  if (['deleted'].includes(s)) return 'deleted';
+  return s;
+}
+
+function initialsFromLabel(label: string): string {
+  const t = String(label || '').trim();
+  if (!t) return '—';
+  const parts = t.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+  return t.slice(0, 2).toUpperCase();
 }
 
 function userHasRole(u: any, roleToken: string): boolean {
@@ -118,23 +194,48 @@ function ColorControl({
   fallback?: string;
   onChange: (v: string) => void;
 }) {
-  const safe = normalizeHexColor(value, fallback || '#3b82f6');
+  const fb = fallback || '#3b82f6';
+  const safe = normalizeHexColor(value, fb);
+  const apply = (next: string) => onChange(normalizeHexColor(next, fb));
+
+  const webColorInputStyle: CSSProperties = {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    width: '100%',
+    height: '100%',
+    opacity: 0,
+    cursor: 'pointer',
+    border: 'none',
+    padding: 0,
+    margin: 0,
+  };
+
   return (
     <View style={styles.brandRow}>
-      <View style={[styles.brandPreview, { backgroundColor: safe }]} />
-      {Platform.OS === 'web'
-        ? React.createElement('input', {
-            type: 'color',
-            value: safe,
-            onChange: (e: any) => onChange(normalizeHexColor(e?.target?.value, fallback || '#3b82f6')),
-            style: styles.webColorInput,
-          })
-        : null}
+      <View style={[styles.brandPreviewTile, { backgroundColor: safe }]}>
+        <MaterialCommunityIcons
+          name="office-building-outline"
+          size={24}
+          color={iconColorOnBrandBg(safe)}
+          style={styles.brandPreviewIcon}
+        />
+        {Platform.OS === 'web'
+          ? React.createElement('input', {
+              type: 'color',
+              value: safe,
+              'aria-label': 'Pick brand color',
+              onChange: (e: any) => apply(e?.target?.value),
+              onInput: (e: any) => apply(e?.target?.value),
+              style: webColorInputStyle,
+            })
+          : null}
+      </View>
       <TextInput
         style={styles.brandInput}
         value={safe}
-        onChangeText={(t) => onChange(normalizeHexColor(t, fallback || '#3b82f6'))}
-        placeholder={fallback || '#3b82f6'}
+        onChangeText={(t) => apply(t)}
+        placeholder={fb}
         autoCapitalize="none"
       />
     </View>
@@ -155,6 +256,7 @@ export default function CompaniesScreen() {
   const [formCompanyType, setFormCompanyType] = useState<string>('IT');
   const [saving, setSaving] = useState(false);
   const [collapsedOrgIds, setCollapsedOrgIds] = useState<Set<string>>(new Set());
+  const [orgListFilter, setOrgListFilter] = useState<'active' | 'archived'>('active');
 
   // Create organization/company form state (UI-only; payload stays minimal for safety)
   const [brandColor, setBrandColor] = useState('#3b82f6');
@@ -163,6 +265,7 @@ export default function CompaniesScreen() {
   const [email, setEmail] = useState('');
   const [managerId, setManagerId] = useState<string | null>(null);
   const [managerOptions, setManagerOptions] = useState<PickerOption[]>([]);
+  const [usersById, setUsersById] = useState<Record<string, any>>({});
 
   const [companyOrgPicker, setCompanyOrgPicker] = useState(false);
   const [companyTypePicker, setCompanyTypePicker] = useState(false);
@@ -171,6 +274,10 @@ export default function CompaniesScreen() {
   const [companyDetails, setCompanyDetails] = useState<Company | null>(null);
   const [assignManagerCompany, setAssignManagerCompany] = useState<Company | null>(null);
   const [managerByCompany, setManagerByCompany] = useState<Record<string, string>>({});
+
+  const handlePhoneChange = useCallback((text: string) => {
+    setPhone(formatUsPhoneDisplay(digitsOnly(text)));
+  }, []);
 
   const isOrgManager = role === 'operations_manager' && user?.id;
   const canCreateOrg = role === 'super_admin';
@@ -189,6 +296,10 @@ export default function CompaniesScreen() {
     }
     return organizations;
   }, [organizations, filteredCompanies, role]);
+
+  const activeOrgList = React.useMemo(() => filteredOrgs.filter((o) => !orgIsArchived(o)), [filteredOrgs]);
+  const archivedOrgList = React.useMemo(() => filteredOrgs.filter(orgIsArchived), [filteredOrgs]);
+  const orgsForList = orgListFilter === 'active' ? activeOrgList : archivedOrgList;
 
   const load = useCallback(async () => {
     try {
@@ -224,12 +335,21 @@ export default function CompaniesScreen() {
     });
   };
 
-  const loadManagers = async (roleToken: string) => {
+  const loadManagers = async (roleTokens: string | string[]) => {
+    const tokens = (Array.isArray(roleTokens) ? roleTokens : [roleTokens])
+      .map((t) => normalizeRoleToken(t))
+      .filter(Boolean);
     try {
       const raw = await api.getUsers({}).catch(() => []);
       const list = Array.isArray(raw) ? raw : [];
+      const nextById: Record<string, any> = {};
+      for (const u of list) {
+        const id = String((u as any)?.id ?? (u as any)?.pk ?? (u as any)?.uuid ?? '').trim();
+        if (id) nextById[id] = u;
+      }
+      setUsersById(nextById);
       const options: PickerOption[] = list
-        .filter((u) => userHasRole(u, roleToken))
+        .filter((u) => tokens.length === 0 || tokens.some((t) => userHasRole(u, t)))
         .map((u: any) => ({
           id: String(u?.id ?? u?.pk ?? u?.uuid ?? ''),
           label: getUserLabel(u),
@@ -238,6 +358,7 @@ export default function CompaniesScreen() {
       setManagerOptions(options);
     } catch {
       setManagerOptions([]);
+      setUsersById({});
     }
   };
 
@@ -251,17 +372,17 @@ export default function CompaniesScreen() {
     setManagerId(null);
     setManagerOptions([]);
     setModal('org');
-    void loadManagers('organization_manager');
+    void loadManagers(['organization_manager', 'operations_manager']);
   };
   const handleEditOrg = (org: Organization) => {
     setEditOrg(org);
     setFormName(org.name);
     setBrandColor(normalizeHexColor((org as any).brand_color ?? (org as any).color, '#6366f1'));
     setAddress(String((org as any).address ?? '') || '');
-    setPhone(String((org as any).phone ?? '') || '');
+    setPhone(displayUsPhoneFromRaw((org as any).phone));
     setEmail(String((org as any).email ?? '') || '');
     setManagerId((org as any).organization_manager_id ? String((org as any).organization_manager_id) : null);
-    void loadManagers('organization_manager');
+    void loadManagers(['organization_manager', 'operations_manager']);
     setModal('org');
   };
   const saveOrg = async () => {
@@ -342,7 +463,7 @@ export default function CompaniesScreen() {
     setManagerId(null);
     setManagerOptions([]);
     setModal('company');
-    void loadManagers('company_manager');
+    void loadManagers(['company_manager', 'manager']);
   };
   const openEditCompany = (company: Company) => {
     setEditCompany(company);
@@ -351,10 +472,10 @@ export default function CompaniesScreen() {
     setFormCompanyType(String((company as any).type || 'IT').trim() || 'IT');
     setBrandColor(normalizeHexColor((company as any).brand_color ?? (company as any).color, '#3b82f6'));
     setAddress(String((company as any).address ?? '') || '');
-    setPhone(String((company as any).phone ?? '') || '');
+    setPhone(displayUsPhoneFromRaw((company as any).phone));
     setEmail(String((company as any).email ?? '') || '');
     setManagerId(company.company_manager_id ? String(company.company_manager_id) : null);
-    void loadManagers('company_manager');
+    void loadManagers(['company_manager', 'manager']);
     setModal('company');
   };
   const saveCompany = async () => {
@@ -437,12 +558,34 @@ export default function CompaniesScreen() {
     }
   };
 
-  const assignManager = () => {
+  const managerPickerOptions = React.useMemo<PickerOption[]>(
+    () => [{ id: '__none__', label: 'No company manager' }, ...managerOptions],
+    [managerOptions]
+  );
+
+  const assignManager = async () => {
     if (!assignManagerCompany) return;
-    const label = managerId ? managerOptions.find((o) => o.id === managerId)?.label || '' : '';
-    setManagerByCompany((prev) => ({ ...prev, [assignManagerCompany.id]: label || 'No company manager' }));
-    setAssignManagerCompany(null);
-    Alert.alert('Saved', 'Manager assignment updated in UI.');
+    const selected = managerId === '__none__' ? null : managerId;
+    const label = selected ? managerOptions.find((o) => o.id === selected)?.label || '' : '';
+    setSaving(true);
+    try {
+      try {
+        await api.updateCompany(assignManagerCompany.id, {
+          company_manager_id: selected || null,
+          company_manager: selected || null,
+        });
+      } catch {
+        await api.updateCompany(assignManagerCompany.id, { manager_id: selected || null, manager: selected || null });
+      }
+      setManagerByCompany((prev) => ({ ...prev, [assignManagerCompany.id]: label || 'No company manager' }));
+      setAssignManagerCompany(null);
+      Alert.alert('Saved', 'Company manager assigned.');
+      load();
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to assign manager');
+    } finally {
+      setSaving(false);
+    }
   };
 
   if (loading) {
@@ -530,9 +673,10 @@ export default function CompaniesScreen() {
                       <TextInput
                         style={[styles.input, styles.inputNoMargin]}
                         value={phone}
-                        onChangeText={setPhone}
+                        onChangeText={handlePhoneChange}
                         placeholder="(555) 123-4567"
                         keyboardType="phone-pad"
+                        maxLength={14}
                       />
                     </View>
                     <View style={{ flex: 1 }}>
@@ -609,43 +753,94 @@ export default function CompaniesScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.title}>Organizations & Companies</Text>
-        <Text style={styles.subtitle}>Manage organizations and companies</Text>
-        {canCreateOrg && (
-          <TouchableOpacity style={styles.primaryButton} onPress={handleCreateOrg}>
-            <Text style={styles.primaryButtonText}>+ New organization</Text>
-          </TouchableOpacity>
-        )}
+        <View style={styles.headerTopRow}>
+          <View style={styles.headerTitleBlock}>
+            <Text style={styles.title}>Organizations & Companies</Text>
+            <Text style={styles.subtitle}>Manage organizations and companies</Text>
+          </View>
+          <View style={styles.headerToolbar}>
+            <TouchableOpacity
+              style={[styles.statusPill, orgListFilter === 'active' && styles.statusPillSelected]}
+              onPress={() => setOrgListFilter('active')}
+              accessibilityRole="button"
+              accessibilityState={{ selected: orgListFilter === 'active' }}
+            >
+              <MaterialCommunityIcons
+                name="check"
+                size={16}
+                color={orgListFilter === 'active' ? '#0f172a' : '#94a3b8'}
+              />
+              <Text style={[styles.statusPillText, orgListFilter === 'active' && styles.statusPillTextSelected]}>
+                Active ({activeOrgList.length})
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.statusPill, orgListFilter === 'archived' && styles.statusPillSelected]}
+              onPress={() => setOrgListFilter('archived')}
+              accessibilityRole="button"
+              accessibilityState={{ selected: orgListFilter === 'archived' }}
+            >
+              <MaterialCommunityIcons
+                name="archive-outline"
+                size={16}
+                color={orgListFilter === 'archived' ? '#0f172a' : '#94a3b8'}
+              />
+              <Text style={[styles.statusPillText, orgListFilter === 'archived' && styles.statusPillTextSelected]}>
+                Archived ({archivedOrgList.length})
+              </Text>
+            </TouchableOpacity>
+            {canCreateOrg ? (
+              <TouchableOpacity style={styles.headerNewOrgButton} onPress={handleCreateOrg} accessibilityRole="button">
+                <Text style={styles.headerNewOrgButtonText}>+ New org</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        </View>
       </View>
       <FlatList
-        data={filteredOrgs}
+        data={orgsForList}
         keyExtractor={(item) => item.id}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         contentContainerStyle={styles.listContent}
         ListEmptyComponent={
           <View style={styles.empty}>
-            <Text style={styles.emptyText}>No organizations yet</Text>
-            {canCreateOrg && (
+            <Text style={styles.emptyText}>
+              {orgListFilter === 'archived'
+                ? 'No archived organizations'
+                : 'No organizations yet'}
+            </Text>
+            {canCreateOrg && orgListFilter === 'active' ? (
               <TouchableOpacity style={styles.primaryButton} onPress={handleCreateOrg}>
                 <Text style={styles.primaryButtonText}>Create organization</Text>
               </TouchableOpacity>
-            )}
+            ) : null}
           </View>
         }
         renderItem={({ item: org }) => {
           const orgCompanies = filteredCompanies.filter((c) => companyOrganizationId(c) === org.id);
           const isCollapsed = collapsedOrgIds.has(org.id);
+          const orgBubbleColor = normalizeHexColor((org as any).brand_color ?? (org as any).color, '#6366f1');
+          const orgManagerAssigned = isAssignedId((org as any).organization_manager_id ?? (org as any).organization_manager);
           return (
             <View style={styles.section}>
               <View style={styles.orgCard}>
                 <View style={styles.orgHeader}>
                   <View style={styles.orgTitleWrap}>
-                    <View style={styles.orgIconBubble}>
-                      <MaterialCommunityIcons name="office-building-outline" size={20} color="#2563eb" />
+                    <View style={[styles.orgIconBubble, { backgroundColor: orgBubbleColor }]}>
+                      <MaterialCommunityIcons name="office-building-outline" size={20} color={iconColorOnBrandBg(orgBubbleColor)} />
                     </View>
                     <View style={{ flex: 1, minWidth: 0 }}>
                       <Text style={styles.sectionTitle}>{org.name}</Text>
-                      <Text style={styles.orgSub}>{orgCompanies.length} compan{orgCompanies.length === 1 ? 'y' : 'ies'}</Text>
+                      <View style={styles.orgSubRow}>
+                        <Text style={styles.orgSub}>
+                          {orgCompanies.length} compan{orgCompanies.length === 1 ? 'y' : 'ies'}
+                        </Text>
+                        {orgManagerAssigned ? (
+                          <View style={styles.assignedBadge}>
+                            <Text style={styles.assignedBadgeText}>Organization Manager Assigned</Text>
+                          </View>
+                        ) : null}
+                      </View>
                     </View>
                   </View>
                   <View style={styles.orgHeaderActions}>
@@ -665,24 +860,44 @@ export default function CompaniesScreen() {
                 </View>
                 {!isCollapsed && (
                   <View style={styles.companyGrid}>
-                    {orgCompanies.map((c) => (
-                      <View key={c.id} style={styles.companyCard}>
+                    {orgCompanies.map((c) => {
+                      const companyBubbleColor = normalizeHexColor((c as any).brand_color ?? (c as any).color, '#3b82f6');
+                      const companyManagerAssigned = isAssignedId(
+                        (c as any).company_manager_id ??
+                          (c as any).company_manager ??
+                          (c as any).manager_id ??
+                          (c as any).manager
+                      );
+                      return (
+                      <Pressable key={c.id} style={styles.companyCard} onPress={() => setCompanyDetails(c)}>
                         <View style={styles.companyTitleRow}>
-                          <View style={styles.companyIconBubble}>
-                            <MaterialCommunityIcons name="domain" size={16} color="#2563eb" />
+                          <View style={[styles.companyIconBubble, { backgroundColor: companyBubbleColor }]}>
+                            <MaterialCommunityIcons name="domain" size={16} color={iconColorOnBrandBg(companyBubbleColor)} />
                           </View>
                           <Text style={styles.cardTitle} numberOfLines={1}>
                             {c.name}
                           </Text>
                         </View>
                         <Text style={styles.companyTypeText}>{String((c as any).type || 'general').toLowerCase()}</Text>
+                        {companyManagerAssigned ? (
+                          <View style={styles.companyAssignedBadge}>
+                            <Text style={styles.assignedBadgeText}>Manager Assigned</Text>
+                          </View>
+                        ) : null}
                         {canEditCompany && (
-                          <TouchableOpacity style={styles.companyEditBtn} onPress={() => setCompanyMenuForId(c.id)}>
+                          <TouchableOpacity
+                            style={styles.companyEditBtn}
+                            onPress={(e) => {
+                              (e as any)?.stopPropagation?.();
+                              setCompanyMenuForId(c.id);
+                            }}
+                          >
                             <MaterialCommunityIcons name="cog-outline" size={15} color="#0f172a" />
                           </TouchableOpacity>
                         )}
-                      </View>
-                    ))}
+                      </Pressable>
+                    );
+                    })}
                     {canCreateCompany && (
                       <TouchableOpacity style={styles.addCompanyGhost} onPress={() => handleCreateCompany(org.id)}>
                         <MaterialCommunityIcons name="plus" size={28} color="#64748b" />
@@ -719,9 +934,10 @@ export default function CompaniesScreen() {
                     <TextInput
                       style={[styles.input, styles.inputNoMargin]}
                       value={phone}
-                      onChangeText={setPhone}
+                      onChangeText={handlePhoneChange}
                       placeholder="(555) 123-4567"
                       keyboardType="phone-pad"
+                      maxLength={14}
                     />
                   </View>
                   <View style={{ flex: 1 }}>
@@ -779,9 +995,10 @@ export default function CompaniesScreen() {
                     <TextInput
                       style={[styles.input, styles.inputNoMargin]}
                       value={phone}
-                      onChangeText={setPhone}
+                      onChangeText={handlePhoneChange}
                       placeholder="(555) 123-4567"
                       keyboardType="phone-pad"
+                      maxLength={14}
                     />
                   </View>
                   <View style={{ flex: 1 }}>
@@ -857,9 +1074,10 @@ export default function CompaniesScreen() {
                     <TextInput
                       style={[styles.input, styles.inputNoMargin]}
                       value={phone}
-                      onChangeText={setPhone}
+                      onChangeText={handlePhoneChange}
                       placeholder="(555) 123-4567"
                       keyboardType="phone-pad"
+                      maxLength={14}
                     />
                   </View>
                   <View style={{ flex: 1 }}>
@@ -898,13 +1116,17 @@ export default function CompaniesScreen() {
 
                 <Text style={styles.label}>Brand Color</Text>
                 <View style={styles.colorSwatchRow}>
-                  {['#3b82f6', '#ec4899', '#10b981', '#f59e0b', '#8b5cf6', '#f97316'].map((c) => (
-                    <TouchableOpacity
-                      key={c}
-                      style={[styles.colorSwatch, { backgroundColor: c }, brandColor === c && styles.colorSwatchActive]}
-                      onPress={() => setBrandColor(c)}
-                    />
-                  ))}
+                  {['#3b82f6', '#ec4899', '#10b981', '#f59e0b', '#8b5cf6', '#f97316'].map((c) => {
+                    const norm = normalizeHexColor(c, '#3b82f6');
+                    const active = normalizeHexColor(brandColor, '#3b82f6') === norm;
+                    return (
+                      <TouchableOpacity
+                        key={c}
+                        style={[styles.colorSwatch, { backgroundColor: norm }, active && styles.colorSwatchActive]}
+                        onPress={() => setBrandColor(norm)}
+                      />
+                    );
+                  })}
                 </View>
 
                 <Text style={styles.label}>Address</Text>
@@ -915,9 +1137,10 @@ export default function CompaniesScreen() {
                     <TextInput
                       style={[styles.input, styles.inputNoMargin]}
                       value={phone}
-                      onChangeText={setPhone}
+                      onChangeText={handlePhoneChange}
                       placeholder="(555) 123-4567"
                       keyboardType="phone-pad"
+                      maxLength={14}
                     />
                   </View>
                   <View style={{ flex: 1 }}>
@@ -983,8 +1206,9 @@ export default function CompaniesScreen() {
                 const c = filteredCompanies.find((x) => x.id === companyMenuForId);
                 setCompanyMenuForId(null);
                 if (c) {
+                  setManagerId(companyManagerUserId(c) || '__none__');
                   setAssignManagerCompany(c);
-                  void loadManagers('company_manager');
+                  void loadManagers(['company_manager', 'manager']);
                 }
               }}
             >
@@ -1006,9 +1230,11 @@ export default function CompaniesScreen() {
               </TouchableOpacity>
             </View>
             <Text style={styles.label}>Company Manager</Text>
-            <TouchableOpacity style={styles.selectField} onPress={() => setManagerPicker(true)}>
+            <TouchableOpacity style={styles.selectField} onPress={() => setManagerPicker(true)} disabled={saving}>
               <Text style={[styles.selectFieldText, !managerId && styles.selectPlaceholder]}>
-                {managerId ? managerOptions.find((o) => o.id === managerId)?.label : 'No company manager'}
+                {managerId && managerId !== '__none__'
+                  ? managerOptions.find((o) => o.id === managerId)?.label
+                  : 'No company manager'}
               </Text>
               <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
             </TouchableOpacity>
@@ -1016,11 +1242,11 @@ export default function CompaniesScreen() {
               The company manager will have full admin access to all operations within this company.
             </Text>
             <View style={styles.modalActions}>
-              <TouchableOpacity style={styles.modalCancelButton} onPress={() => setAssignManagerCompany(null)}>
+              <TouchableOpacity style={styles.modalCancelButton} onPress={() => setAssignManagerCompany(null)} disabled={saving}>
                 <Text style={styles.cancelButtonText}>Cancel</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.modalPrimaryButton} onPress={assignManager}>
-                <Text style={styles.primaryButtonText}>Assign Manager</Text>
+              <TouchableOpacity style={[styles.modalPrimaryButton, saving && styles.disabled]} onPress={() => void assignManager()} disabled={saving}>
+                <Text style={styles.primaryButtonText}>{saving ? 'Saving…' : 'Assign Manager'}</Text>
               </TouchableOpacity>
             </View>
           </Pressable>
@@ -1031,8 +1257,27 @@ export default function CompaniesScreen() {
           <Pressable style={styles.companyDetailsBox} onPress={(e) => e.stopPropagation()}>
             <View style={styles.modalHeaderRow}>
               <View style={styles.companyDetailsHead}>
-                <View style={styles.companyIconBubble}>
-                  <MaterialCommunityIcons name="office-building-outline" size={18} color="#2563eb" />
+                <View
+                  style={[
+                    styles.companyIconBubble,
+                    {
+                      backgroundColor: normalizeHexColor(
+                        (companyDetails as any)?.brand_color ?? (companyDetails as any)?.color,
+                        '#3b82f6'
+                      ),
+                    },
+                  ]}
+                >
+                  <MaterialCommunityIcons
+                    name="office-building-outline"
+                    size={18}
+                    color={iconColorOnBrandBg(
+                      normalizeHexColor(
+                        (companyDetails as any)?.brand_color ?? (companyDetails as any)?.color,
+                        '#3b82f6'
+                      )
+                    )}
+                  />
                 </View>
                 <View>
                   <Text style={styles.companyDetailsTitle}>{companyDetails?.name || 'Company'}</Text>
@@ -1047,6 +1292,7 @@ export default function CompaniesScreen() {
               <TouchableOpacity
                 style={styles.modalCancelButton}
                 onPress={() => {
+                  setManagerId(companyManagerUserId(companyDetails) || '__none__');
                   setAssignManagerCompany(companyDetails);
                   setCompanyDetails(null);
                 }}
@@ -1058,10 +1304,60 @@ export default function CompaniesScreen() {
               </TouchableOpacity>
             </View>
             <View style={styles.companyDetailsGrid}>
-              <View style={styles.detailsCard}><Text style={styles.detailsCardTitle}>Company Details</Text></View>
+              <View style={styles.detailsCard}>
+                <Text style={styles.detailsCardTitle}>Company Details</Text>
+                <View style={styles.detailsLine}>
+                  <MaterialCommunityIcons name="map-marker-outline" size={18} color="#64748b" />
+                  <Text style={styles.detailsLineText} numberOfLines={2}>
+                    {String((companyDetails as any)?.address || '—')}
+                  </Text>
+                </View>
+                <View style={styles.detailsLine}>
+                  <MaterialCommunityIcons name="phone-outline" size={18} color="#64748b" />
+                  <Text style={styles.detailsLineText}>
+                    {displayUsPhoneFromRaw(String((companyDetails as any)?.phone || '')) || '—'}
+                  </Text>
+                </View>
+                <View style={styles.detailsLine}>
+                  <MaterialCommunityIcons name="email-outline" size={18} color="#64748b" />
+                  <Text style={styles.detailsLineText} numberOfLines={1}>
+                    {String((companyDetails as any)?.email || '—')}
+                  </Text>
+                </View>
+              </View>
               <View style={styles.detailsCard}>
                 <Text style={styles.detailsCardTitle}>Manager</Text>
-                <Text style={styles.emptyText}>{managerByCompany[companyDetails?.id || ''] || 'No manager assigned'}</Text>
+                {(() => {
+                  const mid = companyManagerUserId(companyDetails);
+                  const u = mid ? usersById[mid] : null;
+                  const label = u ? getUserLabel(u) : '';
+                  const email = u ? userEmail(u) : '';
+                  const st = u ? userStatusToken(u) : '';
+                  const badgeText = st ? st.charAt(0).toUpperCase() + st.slice(1) : 'Active';
+                  if (!mid || !u) {
+                    return <Text style={styles.emptyText}>No manager assigned</Text>;
+                  }
+                  return (
+                    <View style={styles.managerCard}>
+                      <View style={styles.managerAvatar}>
+                        <Text style={styles.managerAvatarText}>{initialsFromLabel(label)}</Text>
+                      </View>
+                      <View style={styles.managerInfo}>
+                        <Text style={styles.managerName} numberOfLines={1}>
+                          {label}
+                        </Text>
+                        <Text style={styles.managerEmail} numberOfLines={1}>
+                          {email || '—'}
+                        </Text>
+                        <View style={[styles.managerStatusPill, st === 'inactive' && styles.managerStatusPillInactive]}>
+                          <Text style={[styles.managerStatusText, st === 'inactive' && styles.managerStatusTextInactive]}>
+                            {badgeText}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                })()}
               </View>
             </View>
             <View style={styles.detailsEmployeesCard}>
@@ -1093,7 +1389,7 @@ export default function CompaniesScreen() {
       <OptionPickerModal
         visible={managerPicker}
         title={modal === 'org' ? 'Organization Manager' : 'Company Manager'}
-        options={managerOptions}
+        options={modal === 'org' ? managerOptions : managerPickerOptions}
         selectedId={managerId ?? undefined}
         onSelect={(id) => setManagerId(id)}
         onClose={() => setManagerPicker(false)}
@@ -1106,6 +1402,49 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f8fafc' },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   header: { padding: 20, paddingBottom: 12, backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#e2e8f0' },
+  headerTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+    flexWrap: 'wrap',
+  },
+  headerTitleBlock: { flex: 1, minWidth: 200 },
+  headerToolbar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    justifyContent: 'flex-end',
+    flexShrink: 0,
+  },
+  statusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    backgroundColor: '#fff',
+  },
+  statusPillSelected: {
+    borderColor: '#cbd5e1',
+    backgroundColor: '#fff',
+    ...Platform.select({ web: { boxShadow: '0 1px 2px rgba(15, 23, 42, 0.06)' } as any }),
+  },
+  statusPillText: { fontSize: 13, fontWeight: '500', color: '#64748b' },
+  statusPillTextSelected: { color: '#0f172a', fontWeight: '600' },
+  headerNewOrgButton: {
+    paddingVertical: 7,
+    paddingHorizontal: 11,
+    borderRadius: 8,
+    backgroundColor: '#3b82f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerNewOrgButtonText: { color: '#fff', fontWeight: '600', fontSize: 13 },
   title: { fontSize: 20, fontWeight: '700', color: '#0f172a' },
   subtitle: { fontSize: 13, color: '#64748b', marginTop: 4 },
   primaryButton: { marginTop: 12, padding: 12, borderRadius: 8, backgroundColor: '#3b82f6', alignItems: 'center' },
@@ -1135,6 +1474,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   orgTitleWrap: { flexDirection: 'row', alignItems: 'center', flex: 1, minWidth: 0, gap: 10 },
+  orgSubRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginTop: 2 },
   orgIconBubble: {
     width: 34,
     height: 34,
@@ -1143,7 +1483,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  orgSub: { fontSize: 12, color: '#64748b', marginTop: 2 },
+  orgSub: { fontSize: 12, color: '#64748b' },
   orgHeaderActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   orgActionBtn: {
     width: 26,
@@ -1176,6 +1516,23 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   companyTypeText: { fontSize: 12, color: '#64748b', marginTop: 6, marginLeft: 36 },
+  assignedBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: '#e0e7ff',
+    alignSelf: 'flex-start',
+  },
+  companyAssignedBadge: {
+    position: 'absolute',
+    left: 36,
+    bottom: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: '#e0e7ff',
+  },
+  assignedBadgeText: { fontSize: 11, fontWeight: '700', color: '#3730a3' },
   companyEditBtn: {
     position: 'absolute',
     right: 8,
@@ -1239,15 +1596,18 @@ const styles = StyleSheet.create({
   selectPlaceholder: { color: '#94a3b8' },
 
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16 },
-  brandPreview: { width: 36, height: 28, borderRadius: 6, borderWidth: 1, borderColor: '#e2e8f0' },
-  webColorInput: {
-    width: 36,
-    height: 28,
-    borderWidth: 0,
-    padding: 0,
-    backgroundColor: 'transparent',
-    cursor: 'pointer',
-  } as any,
+  brandPreviewTile: {
+    width: 48,
+    height: 48,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  brandPreviewIcon: { pointerEvents: 'none' } as any,
   brandInput: {
     flex: 1,
     borderWidth: 1,
@@ -1371,4 +1731,30 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   detailsCardTitle: { alignSelf: 'flex-start', fontSize: 16, fontWeight: '700', color: '#0f172a', marginBottom: 8 },
+  detailsLine: { flexDirection: 'row', alignItems: 'center', gap: 8, width: '100%', marginTop: 8 },
+  detailsLineText: { flex: 1, fontSize: 13, color: '#334155' },
+  managerCard: { flexDirection: 'row', alignItems: 'center', gap: 12, width: '100%', marginTop: 4 },
+  managerAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#e2e8f0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  managerAvatarText: { fontWeight: '800', color: '#0f172a' },
+  managerInfo: { flex: 1, minWidth: 0 },
+  managerName: { fontSize: 15, fontWeight: '700', color: '#0f172a' },
+  managerEmail: { marginTop: 2, fontSize: 12, color: '#64748b' },
+  managerStatusPill: {
+    alignSelf: 'flex-start',
+    marginTop: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: '#dbeafe',
+  },
+  managerStatusText: { fontSize: 12, fontWeight: '700', color: '#1d4ed8' },
+  managerStatusPillInactive: { backgroundColor: '#fee2e2' },
+  managerStatusTextInactive: { color: '#b91c1c' },
 });

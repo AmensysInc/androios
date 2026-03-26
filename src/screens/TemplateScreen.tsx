@@ -1179,7 +1179,7 @@ export default function TemplateScreen() {
             </ScrollView>
 
             {taskPicker ? (
-              <View style={styles.inlineLayer} pointerEvents="box-none">
+              <View style={[styles.inlineLayer, { pointerEvents: 'box-none' }]}>
                 <Pressable style={StyleSheet.absoluteFill} onPress={() => setTaskPicker(null)} />
                 <View style={styles.inlineBox}>
                   <Text style={styles.inlineTitle}>Priority</Text>
@@ -1210,7 +1210,7 @@ export default function TemplateScreen() {
             ) : null}
 
             {taskDueOpen ? (
-              <View style={[styles.inlineLayer, { zIndex: 120 }]} pointerEvents="box-none">
+              <View style={[styles.inlineLayer, { zIndex: 120, pointerEvents: 'box-none' }]}>
                 <Pressable style={StyleSheet.absoluteFill} onPress={() => setTaskDueOpen(false)} />
                 <View style={[styles.inlineBox, { maxWidth: 400 }]}>
                   <Text style={styles.inlineTitle}>Due date & time</Text>

@@ -108,6 +108,47 @@ function normalizeEmail(v: any): string {
     .toLowerCase();
 }
 
+function digitsOnly(s: string): string {
+  return String(s || '').replace(/\D/g, '');
+}
+
+/** US display format (XXX) XXX-XXXX, max 10 digits. */
+function formatUsPhoneDisplay(digits: string): string {
+  const d = digitsOnly(digits).slice(0, 10);
+  if (d.length === 0) return '';
+  if (d.length <= 3) return `(${d}`;
+  if (d.length <= 6) return `(${d.slice(0, 3)}) ${d.slice(3)}`;
+  return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+}
+
+function displayUsPhoneFromRaw(raw: string | null | undefined): string {
+  return formatUsPhoneDisplay(digitsOnly(String(raw ?? '')));
+}
+
+
+function phoneDigitsForApi(phone: string | undefined): string | undefined {
+  let d = digitsOnly(String(phone || ''));
+  if (d.length === 11 && d.startsWith('1')) d = d.slice(1);
+  if (d.length === 10) return d;
+  return undefined;
+}
+
+function parseHourlyRateForApi(raw: string | undefined): number | string | undefined {
+  const s = String(raw || '').trim();
+  if (!s) return undefined;
+  const n = parseFloat(s.replace(/,/g, ''));
+  if (!Number.isNaN(n) && n >= 0) return n;
+  return undefined;
+}
+
+/** Django username: avoid characters that commonly break validation. */
+function sanitizeUsername(input: string, fallback: string): string {
+  const base = String(input || '').trim().toLowerCase();
+  const s = base.replace(/[^a-z0-9._-]+/g, '_').replace(/_+/g, '_').replace(/^\.+|\.+$/g, '').replace(/^_|_$/g, '');
+  const out = s.slice(0, 150);
+  return out || fallback;
+}
+
 function mapApiUser(u: any): RowUser {
   const profile = u.profile || u.user_profile || u.employee_profile || {};
   const employee = u.employee || u.employee_details || {};
@@ -331,6 +372,14 @@ export default function UserManagementScreen() {
     employee_pin: '',
     hourly_rate: '',
   });
+
+  const handleCreatePhoneChange = useCallback((text: string) => {
+    setForm((f) => ({ ...f, phone: formatUsPhoneDisplay(digitsOnly(text)) }));
+  }, []);
+
+  const handleEditPhoneChange = useCallback((text: string) => {
+    setEditForm((f) => ({ ...f, phone: formatUsPhoneDisplay(digitsOnly(text)) }));
+  }, []);
 
   const [createRolePicker, setCreateRolePicker] = useState(false);
   const [assignModalVisible, setAssignModalVisible] = useState(false);
@@ -781,16 +830,21 @@ export default function UserManagementScreen() {
     }
     setSaving(true);
     try {
-      const email = form.email.trim();
-      const username = (form.username || email.split('@')[0] || email).trim();
-      const fullName = (form.full_name || email.split('@')[0] || username).trim();
+      const email = normalizeEmail(form.email);
+      const emailLocal = email.includes('@') ? email.split('@')[0] : email;
+      const username = sanitizeUsername(
+        (form.username || emailLocal || email).trim(),
+        `user_${emailLocal.replace(/[^a-z0-9]/gi, '').slice(0, 20) || 'account'}`
+      );
+      const fullName = (form.full_name || emailLocal || username).trim();
       const parts = fullName.split(/\s+/).filter(Boolean);
       const firstName = parts[0] || username;
       const lastName = parts.slice(1).join(' ') || '';
+      const lastNameResolved = lastName.trim() || firstName;
       const desiredRole = form.role;
-      const phone = form.phone?.trim();
+      const phoneApi = phoneDigitsForApi(form.phone);
       const employeePin = form.employee_pin?.trim();
-      const hourlyRate = form.hourly_rate?.trim();
+      const hourlyRateNum = parseHourlyRateForApi(form.hourly_rate);
       const orgId = form.organization_id?.trim();
       const companyId = form.company_id?.trim();
 
@@ -810,10 +864,10 @@ export default function UserManagementScreen() {
         const basePayload = {
           email,
           username,
-        password: form.password,
+          password: form.password,
           full_name: fullName,
           first_name: firstName,
-          last_name: lastName,
+          last_name: lastNameResolved,
         };
         const clean = (obj: Record<string, any>): Record<string, any> => {
           const out: Record<string, any> = {};
@@ -822,20 +876,42 @@ export default function UserManagementScreen() {
           });
           return out;
         };
+
+        const profileNested = clean({
+          phone: phoneApi,
+          employee_pin: employeePin,
+          hourly_rate: hourlyRateNum,
+          organization: orgId,
+          company: companyId,
+          first_name: firstName,
+          last_name: lastNameResolved,
+          full_name: fullName,
+        });
+        const profileNestedById = clean({
+          phone: phoneApi,
+          employee_pin: employeePin,
+          hourly_rate: hourlyRateNum,
+          organization_id: orgId,
+          company_id: companyId,
+          first_name: firstName,
+          last_name: lastNameResolved,
+          full_name: fullName,
+        });
+
         const withProfileByRef = clean({
           ...basePayload,
-          phone,
+          phone: phoneApi,
           employee_pin: employeePin,
-          hourly_rate: hourlyRate,
+          hourly_rate: hourlyRateNum,
           organization: orgId,
           company: companyId,
           role: roleCandidate,
         });
         const withProfileById = clean({
           ...basePayload,
-          phone,
+          phone: phoneApi,
           employee_pin: employeePin,
-          hourly_rate: hourlyRate,
+          hourly_rate: hourlyRateNum,
           organization_id: orgId,
           company_id: companyId,
           role: roleCandidate,
@@ -843,24 +919,62 @@ export default function UserManagementScreen() {
         const roleNamePayload = clean({ ...basePayload, role_name: roleCandidate });
         const strictMinimal = clean({ email, username, password: form.password });
 
-        // Keep variants deterministic and deduplicated.
+        const pwd = form.password;
+        const withPwdPairs = (p: Record<string, any>) => [
+          clean({ ...p, re_password: pwd }),
+          clean({ ...p, password_confirm: pwd }),
+          clean({ ...p, password2: pwd }),
+          clean({ ...p, password1: pwd, password2: pwd }),
+        ];
+
+        // Prefer shapes common on Django / DRF user creation (password confirmation + nested profile).
+        const hasNestedProfile =
+          Object.keys(profileNested).length > 0 || Object.keys(profileNestedById).length > 0;
         const rawAttempts: Record<string, any>[] = [
+          ...withPwdPairs(strictMinimal),
+          clean({ email, username, password: pwd, password1: pwd, password2: pwd }),
+          clean({ email, username: email, password: pwd, password_confirm: pwd }),
+          ...(hasNestedProfile
+            ? [
+                ...withPwdPairs(
+                  clean({
+                    email,
+                    username,
+                    password: pwd,
+                    profile: profileNested,
+                  })
+                ),
+                ...withPwdPairs(
+                  clean({
+                    email,
+                    username,
+                    password: pwd,
+                    user_profile: profileNested,
+                  })
+                ),
+                ...withPwdPairs(
+                  clean({
+                    email,
+                    username,
+                    password: pwd,
+                    profile: profileNestedById,
+                  })
+                ),
+              ]
+            : []),
           withProfileByRef,
           withProfileById,
-          clean({ ...withProfileByRef, re_password: form.password }),
-          clean({ ...withProfileById, re_password: form.password }),
-          clean({ ...withProfileByRef, password2: form.password }),
-          clean({ ...withProfileById, password2: form.password }),
-          clean({ ...withProfileByRef, confirm_password: form.password }),
-          clean({ ...withProfileById, confirm_password: form.password }),
+          ...withPwdPairs(withProfileByRef),
+          ...withPwdPairs(withProfileById),
           roleNamePayload,
-          clean({ ...roleNamePayload, re_password: form.password }),
-          // Minimal fallbacks: no role, no org/company/profile fields.
+          clean({ ...roleNamePayload, re_password: pwd }),
+          clean({ ...roleNamePayload, password_confirm: pwd }),
           strictMinimal,
-          clean({ ...strictMinimal, re_password: form.password }),
-          clean({ ...strictMinimal, password2: form.password }),
-          clean({ ...strictMinimal, confirm_password: form.password }),
-          clean({ email, password: form.password, re_password: form.password }),
+          clean({ ...strictMinimal, re_password: pwd }),
+          clean({ ...strictMinimal, password2: pwd }),
+          clean({ ...strictMinimal, confirm_password: pwd }),
+          clean({ email, password: pwd, re_password: pwd }),
+          clean({ email, username, password: pwd }),
         ];
         const seen = new Set<string>();
         const attempts: Record<string, any>[] = [];
@@ -1328,11 +1442,12 @@ export default function UserManagementScreen() {
               <Text style={styles.fieldLabel}>Phone</Text>
               <TextInput
                 style={styles.inputOutlined}
-                placeholder="10 digit phone (no country code)"
+                placeholder="(555) 123-4567"
                 value={form.phone}
-                onChangeText={(t) => setForm((f) => ({ ...f, phone: t }))}
+                onChangeText={handleCreatePhoneChange}
                 placeholderTextColor="#94a3b8"
                 keyboardType="phone-pad"
+                maxLength={14}
               />
               <Text style={styles.fieldLabel}>Password</Text>
               <TextInput
@@ -1457,10 +1572,11 @@ export default function UserManagementScreen() {
               <TextInput
                 style={styles.inputOutlined}
                 value={editForm.phone}
-                onChangeText={(t) => setEditForm((f) => ({ ...f, phone: t }))}
-                placeholder="10 digit phone (no country code)"
+                onChangeText={handleEditPhoneChange}
+                placeholder="(555) 123-4567"
                 placeholderTextColor="#94a3b8"
                 keyboardType="phone-pad"
+                maxLength={14}
                 autoCapitalize="none"
               />
 
@@ -1531,7 +1647,7 @@ export default function UserManagementScreen() {
 
       <Modal visible={addMenuOpen} transparent animationType="fade" onRequestClose={() => setAddMenuOpen(false)}>
         <Pressable style={styles.addMenuOverlay} onPress={() => setAddMenuOpen(false)}>
-          <View style={styles.addMenuOuter} pointerEvents="box-none">
+          <View style={[styles.addMenuOuter, { pointerEvents: 'box-none' }]}>
             <Pressable style={styles.addMenu} onPress={(e) => e.stopPropagation()}>
               <TouchableOpacity
                 style={styles.addMenuItem}
@@ -1872,11 +1988,16 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#e2e8f0',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.12,
-    shadowRadius: 8,
-    elevation: 6,
+    ...Platform.select({
+      web: { boxShadow: '0 10px 26px rgba(15, 23, 42, 0.12)' },
+      default: {
+        elevation: 6,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.12,
+        shadowRadius: 8,
+      },
+    }),
     overflow: 'hidden',
   },
   addMenuItem: { paddingVertical: 14, paddingHorizontal: 16 },

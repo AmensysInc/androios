@@ -57,13 +57,24 @@ export function normalizePaginatedList<T extends Record<string, any>>(raw: any):
   if (typeof raw === 'object') {
     const list =
       raw.results ??
+      raw.sessions ??
+      raw.focus_sessions ??
       raw.organizations ??
       raw.companies ??
+      raw.schedule_templates ??
+      raw.templates ??
+      raw.shifts ??
       raw.items ??
+      raw.records ??
       (Array.isArray(raw.data) ? raw.data : undefined);
     if (Array.isArray(list)) return list.map((x) => attachId(x));
     if (raw.data && typeof raw.data === 'object' && !Array.isArray(raw.data)) {
-      const inner = raw.data.results ?? raw.data.items ?? raw.data.organizations;
+      const inner =
+        raw.data.results ??
+        raw.data.sessions ??
+        raw.data.items ??
+        raw.data.organizations ??
+        raw.data.schedule_templates;
       if (Array.isArray(inner)) return inner.map((x) => attachId(x));
     }
   }
@@ -293,6 +304,23 @@ export async function updateTaskCompleted(id: string, completed: boolean) {
     { status: completed ? 'done' : 'pending' },
   ];
   let last: unknown;
+  const enc = encodeURIComponent(String(id));
+  const actionPaths = [
+    `/calendar/events/${id}/complete/`,
+    `/calendar/events/${enc}/complete/`,
+    `/calendar/events/${id}/mark_complete/`,
+    `/calendar/events/${enc}/mark_complete/`,
+    `/calendar/events/${id}/mark_completed/`,
+    `/calendar/events/${enc}/mark_completed/`,
+    `/calendar/events/${id}/toggle_complete/`,
+    `/calendar/events/${enc}/toggle_complete/`,
+    `/calendar/events/${id}/toggle_completed/`,
+    `/calendar/events/${enc}/toggle_completed/`,
+    `/calendar/events/${id}/mark_done/`,
+    `/calendar/events/${enc}/mark_done/`,
+  ] as const;
+
+  // 1) Preferred: PATCH the event with field fallbacks.
   for (const path of CAL_EVENT_PATH(id)) {
     for (const body of bodies) {
       try {
@@ -304,6 +332,27 @@ export async function updateTaskCompleted(id: string, completed: boolean) {
       }
     }
   }
+
+  // 2) Fallback: custom action endpoints (common in DRF ViewSets).
+  const actionBodies: Record<string, any>[] = [
+    { completed },
+    { is_completed: completed },
+    { done: completed },
+    { status: completed ? 'completed' : 'pending' },
+    {}, // some endpoints ignore body and just toggle
+  ];
+  for (const path of actionPaths) {
+    for (const body of actionBodies) {
+      try {
+        return await apiClient.post<any>(path, body);
+      } catch (e) {
+        last = e;
+        if (e instanceof HttpError && (e.status === 400 || e.status === 404 || e.status === 405)) continue;
+        throw e;
+      }
+    }
+  }
+
   throw last;
 }
 
@@ -510,6 +559,187 @@ export async function getShifts(params?: Record<string, any>) {
   const raw = await apiClient.get<any>('/scheduler/shifts/', params);
   return normalizePaginatedList(raw);
 }
+
+let lastShiftRangeQueryIndex: number | null = null;
+let lastShiftBroadCompanyKey: 'company' | 'company_id' | null = null;
+
+/**
+ * Load shifts for a company in [rangeStart, rangeEnd]. Tries common Django filter param names,
+ * then falls back to fetching by company and filtering client-side (fixes empty grids when
+ * `start_date`/`end_date` are not supported).
+ */
+export async function getShiftsForCompanyInRange(params: {
+  companyId: string;
+  rangeStart: Date;
+  rangeEnd: Date;
+}): Promise<any[]> {
+  const cid = String(params.companyId || '').trim();
+  if (!cid) return [];
+
+  const rs = params.rangeStart.toISOString();
+  const re = params.rangeEnd.toISOString();
+  const rsDate = rs.slice(0, 10);
+  const reDate = re.slice(0, 10);
+
+  const tryQ = async (q: Record<string, any>) => {
+    try {
+      const rows = await getShifts(q);
+      return Array.isArray(rows) ? rows : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const queryTries: Record<string, any>[] = [
+    { company: cid, start_date: rs, end_date: re },
+    { company: cid, start_date: rsDate, end_date: reDate },
+    { company_id: cid, start_date: rs, end_date: re },
+    { company: cid, start_time__gte: rs, start_time__lte: re },
+    { company: cid, date__gte: rsDate, date__lte: reDate },
+    { company: cid, from_date: rsDate, to_date: reDate },
+    { company: cid, week_start: rsDate, week_end: reDate },
+  ];
+
+  const companyMatches = (s: any): boolean => {
+    const c = s?.company_id ?? s?.company;
+    if (c == null || c === '') return true;
+    if (typeof c === 'object' && (c as any).id != null) return String((c as any).id).trim() === cid;
+    return String(c).trim() === cid;
+  };
+  const inRange = (s: any): boolean => {
+    const stRaw = s?.start_time ?? s?.start ?? s?.start_at ?? s?.time_in ?? s?.start_datetime;
+    const st = stRaw ? new Date(stRaw) : null;
+    if (!st || Number.isNaN(st.getTime())) return false;
+    const t = st.getTime();
+    return t >= params.rangeStart.getTime() && t <= params.rangeEnd.getTime();
+  };
+  const normalizeRows = (rows: any[]): any[] => rows.filter((s: any) => companyMatches(s) && inRange(s));
+
+  const order: number[] = [];
+  if (lastShiftRangeQueryIndex != null && lastShiftRangeQueryIndex >= 0 && lastShiftRangeQueryIndex < queryTries.length) {
+    order.push(lastShiftRangeQueryIndex);
+  }
+  for (let i = 0; i < queryTries.length; i++) {
+    if (!order.includes(i)) order.push(i);
+  }
+
+  for (const idx of order) {
+    const q = queryTries[idx];
+    const rows = await tryQ(q);
+    if (rows.length > 0) {
+      const filtered = normalizeRows(rows);
+      if (filtered.length > 0) {
+        lastShiftRangeQueryIndex = idx;
+        return filtered;
+      }
+    }
+  }
+
+  const broadOrder: Array<'company' | 'company_id'> = [];
+  if (lastShiftBroadCompanyKey) broadOrder.push(lastShiftBroadCompanyKey);
+  if (!broadOrder.includes('company')) broadOrder.push('company');
+  if (!broadOrder.includes('company_id')) broadOrder.push('company_id');
+
+  let broad: any[] = [];
+  for (const key of broadOrder) {
+    broad = await tryQ({ [key]: cid });
+    if (broad.length > 0) {
+      lastShiftBroadCompanyKey = key;
+      break;
+    }
+  }
+  if (broad.length === 0) return [];
+  return normalizeRows(broad);
+}
+
+function dedupeShiftCreateBodies(bodies: Record<string, any>[]): Record<string, any>[] {
+  const seen = new Set<string>();
+  const out: Record<string, any>[] = [];
+  for (const body of bodies) {
+    const k = JSON.stringify(
+      Object.fromEntries(Object.entries(body).sort(([x], [y]) => x.localeCompare(y)))
+    );
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(body);
+  }
+  return out;
+}
+
+/**
+ * POST /scheduler/shifts/ — minimal bodies first (company/employee/start/end only), then add fields.
+ * Duplicate FK keys and unknown enum values on `shift_type` / `status` commonly cause 400.
+ */
+export async function createShiftWithFallbacks(data: {
+  companyId: string;
+  employeeId: string;
+  startTimeIso: string;
+  endTimeIso: string;
+  extras?: Record<string, any>;
+}): Promise<any> {
+  const { companyId, employeeId, startTimeIso, endTimeIso, extras = {} } = data;
+  const strip = (o: Record<string, any>) => {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(o)) {
+      if (v === undefined || v === null) continue;
+      if (v === '') continue;
+      out[k] = v;
+    }
+    return out;
+  };
+  const t = { start_time: startTimeIso, end_time: endTimeIso };
+  const x = strip(extras);
+  if (x.break_duration_minutes != null && x.break_duration != null) delete x.break_duration;
+
+  const cid = String(companyId).trim();
+  const eid = String(employeeId).trim();
+
+  const minimalCore = [
+    strip({ company: cid, employee: eid, ...t }),
+    strip({ company_id: cid, employee_id: eid, ...t }),
+    strip({ company: cid, employee_id: eid, ...t }),
+    strip({ company_id: cid, employee: eid, ...t }),
+  ];
+  if (/^\d+$/.test(eid)) {
+    const n = parseInt(eid, 10);
+    minimalCore.push(strip({ company: cid, employee: n, ...t }), strip({ company_id: cid, employee_id: n, ...t }));
+  }
+
+  const xNoEnum = strip({ ...x });
+  delete xNoEnum.shift_type;
+  delete xNoEnum.status;
+
+  const xLight = strip({
+    ...xNoEnum,
+    ...(x.break_duration_minutes != null ? { break_duration_minutes: Number(x.break_duration_minutes) } : {}),
+    ...(x.notes ? { notes: x.notes } : {}),
+    ...(x.hourly_rate ? { hourly_rate: x.hourly_rate } : {}),
+  });
+
+  const ordered: Record<string, any>[] = [
+    ...minimalCore,
+    ...minimalCore.map((b) => strip({ ...b, ...xLight })),
+    ...minimalCore.map((b) => strip({ ...b, ...(x.shift_type ? { shift_type: x.shift_type } : {}) })),
+    ...minimalCore.map((b) => strip({ ...b, ...(x.status ? { status: x.status } : {}) })),
+    ...minimalCore.map((b) => strip({ ...b, ...x })),
+  ];
+
+  const bodies = dedupeShiftCreateBodies(ordered);
+
+  let lastErr: unknown;
+  for (const body of bodies) {
+    if (Object.keys(body).length === 0) continue;
+    try {
+      return await createShift(body);
+    } catch (e: unknown) {
+      lastErr = e;
+      const st = e instanceof HttpError ? e.status : (e as any)?.status;
+      if (st === 401 || st === 403) throw e;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Could not create shift');
+}
+
 export async function createShift(data: any) {
   return apiClient.post<any>('/scheduler/shifts/', data);
 }
@@ -755,9 +985,683 @@ export async function rejectReplacementRequest(id: string, data?: { notes?: stri
 }
 
 // —— Scheduler: schedule templates ——
+/** Plausible list/detail base paths (DRF routers differ: kebab vs snake, nested vs flat). */
+const SCHEDULE_TEMPLATE_PATH_PREFIXES = [
+  '/scheduler/schedule-templates',
+  '/scheduler/schedule_templates',
+  '/scheduler/schedule-week-templates',
+  '/scheduler/schedule_week_templates',
+  '/scheduler/saved-schedule-templates',
+  '/scheduler/saved_schedule_templates',
+  '/scheduler/week-templates',
+  '/scheduler/week_templates',
+];
+
+// Remember which schedule-template base path worked for GET so DELETE can mirror it.
+let lastScheduleTemplatesApiPath: string | null = null;
+let lastScheduleTemplatesCreateApiPath: string | null = null;
+let lastScheduleTemplatesCompanyParamIndex: number | null = null;
+
+/**
+ * Detail URLs for GET/PATCH: same basename as the working list endpoint first, then other known routers.
+ * List may be `/scheduler/week-templates/` while a naive client only tried `/scheduler/schedule-templates/<id>/` → 404 → false "empty template" and cleanup.
+ */
+function scheduleTemplateIdPaths(id: string): string[] {
+  const enc = encodeURIComponent(String(id || '').trim());
+  if (!enc) return [];
+  const bases: string[] = [];
+  const seen = new Set<string>();
+  const add = (b: string) => {
+    const n = String(b || '').replace(/\/+$/, '');
+    if (!n || seen.has(n)) return;
+    seen.add(n);
+    bases.push(n);
+  };
+  const lb = lastScheduleTemplatesApiPath?.replace(/\/+$/, '');
+  if (lb) add(lb);
+  for (const p of SCHEDULE_TEMPLATE_PATH_PREFIXES) add(p);
+  return bases.map((b) => `${b}/${enc}/`);
+}
+
 export async function getScheduleTemplates(params?: Record<string, any>) {
-  const raw = await apiClient.get<any>('/scheduler/schedule-templates/', params);
-  return normalizePaginatedList(raw);
+  const paths = SCHEDULE_TEMPLATE_PATH_PREFIXES.map((p) => `${p}/`);
+  let lastErr: unknown;
+  for (const path of paths) {
+    try {
+      const raw = await apiClient.get<any>(path, params);
+      // Cache the successful base path (strip trailing slash).
+      lastScheduleTemplatesApiPath = String(path || '').replace(/\/+$/, '');
+      return normalizePaginatedList(raw);
+    } catch (e: any) {
+      lastErr = e;
+      const st = typeof e?.status === 'number' ? e.status : e?.response?.status;
+      if (st === 404) continue;
+      throw e;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Failed to load schedule templates');
+}
+
+function templateRowCompanyId(row: any): string {
+  const c = row?.company_id ?? row?.company;
+  if (c != null && typeof c === 'object' && (c as any).id != null) return String((c as any).id).trim();
+  if (c != null && c !== '') return String(c).trim();
+  return '';
+}
+
+/**
+ * Load schedule templates for one company. Tries several query param shapes, then GET-all + client filter.
+ */
+export async function getScheduleTemplatesForCompany(
+  companyId: string,
+  organizationId?: string | null
+): Promise<any[]> {
+  const cid = String(companyId || '').trim();
+  if (!cid) return [];
+
+  const tryList = async (params: Record<string, any>) => {
+    try {
+      const rows = await getScheduleTemplates(params);
+      return Array.isArray(rows) ? rows : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const paramSets: Record<string, any>[] = [
+    { company: cid },
+    { company_id: cid },
+    { company: cid, ordering: '-created_at' },
+    { company: cid, ordering: '-id' },
+  ];
+  if (organizationId) {
+    paramSets.push(
+      { company: cid, organization: organizationId },
+      { company: cid, organization_id: organizationId }
+    );
+  }
+
+  const order: number[] = [];
+  if (
+    lastScheduleTemplatesCompanyParamIndex != null &&
+    lastScheduleTemplatesCompanyParamIndex >= 0 &&
+    lastScheduleTemplatesCompanyParamIndex < paramSets.length
+  ) {
+    order.push(lastScheduleTemplatesCompanyParamIndex);
+  }
+  for (let i = 0; i < paramSets.length; i++) {
+    if (!order.includes(i)) order.push(i);
+  }
+
+  const keepCompanyRows = (rows: any[]): any[] => {
+    const hasCompanyInfo = rows.some((r: any) => String(r?.company_id ?? r?.company ?? '').trim() !== '');
+    const matched = rows.filter((r: any) => templateRowCompanyId(r) === cid);
+    if (matched.length > 0) return matched;
+    return hasCompanyInfo ? [] : rows;
+  };
+
+  for (const idx of order) {
+    const p = paramSets[idx];
+    const rows = await tryList(p);
+    if (rows.length > 0) {
+      const filtered = keepCompanyRows(rows);
+      if (filtered.length > 0) {
+        lastScheduleTemplatesCompanyParamIndex = idx;
+        return filtered;
+      }
+    }
+  }
+
+  const all = await tryList({});
+  if (all.length === 0) return [];
+  return all.filter((r: any) => templateRowCompanyId(r) === cid);
+}
+
+export async function createScheduleTemplate(data: Record<string, any>) {
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  const add = (p: string | null | undefined) => {
+    const n = String(p || '').replace(/\/+$/, '');
+    if (!n) return;
+    const withSlash = `${n}/`;
+    if (seen.has(withSlash)) return;
+    seen.add(withSlash);
+    paths.push(withSlash);
+  };
+  add(lastScheduleTemplatesCreateApiPath);
+  add(lastScheduleTemplatesApiPath);
+  for (const p of SCHEDULE_TEMPLATE_PATH_PREFIXES) add(p);
+
+  let lastErr: unknown;
+  for (const path of paths) {
+    try {
+      const created = await apiClient.post<any>(path, data);
+      lastScheduleTemplatesCreateApiPath = String(path || '').replace(/\/+$/, '');
+      return created;
+    } catch (e: any) {
+      lastErr = e;
+      const st = typeof e?.status === 'number' ? e.status : e?.response?.status;
+      if (st === 404) continue;
+      throw e;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Could not create schedule template');
+}
+
+function scrubWrite(obj: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === undefined) continue;
+    if (v === null) continue;
+    if (v === '') continue;
+    if (Array.isArray(v)) {
+      if (v.length === 0) continue;
+      out[k] = v.map((item) =>
+        item && typeof item === 'object' && !Array.isArray(item) ? scrubWrite(item as Record<string, any>) : item
+      );
+      continue;
+    }
+    if (typeof v === 'object' && v !== null && !(v instanceof Date)) {
+      const nested = scrubWrite(v as Record<string, any>);
+      if (Object.keys(nested).length > 0) out[k] = nested;
+      continue;
+    }
+    out[k] = v;
+  }
+  return out;
+}
+
+function dedupeBodies(list: Record<string, any>[]): Record<string, any>[] {
+  const seen = new Set<string>();
+  const out: Record<string, any>[] = [];
+  for (const b of list) {
+    const k = JSON.stringify(b);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(b);
+  }
+  return out;
+}
+
+/** DRF DateTimeField expects ISO 8601 strings in JSON. */
+function toIsoDateTime(v: any): string | undefined {
+  if (v == null || v === '') return undefined;
+  if (typeof v === 'string') return v;
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? undefined : v.toISOString();
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+  }
+  return String(v);
+}
+
+/** Count nested shifts on a schedule-template row (serializer / list / detail shapes differ). */
+function countShiftsOnTemplateRow(row: any): number {
+  if (!row || typeof row !== 'object') return 0;
+  const sc =
+    row.shift_count ??
+    row.shifts_count ??
+    row.template_shift_count ??
+    row.num_shifts ??
+    row.shift_set_count;
+  if (typeof sc === 'number' && Number.isFinite(sc) && sc >= 0) return sc;
+  const embedded =
+    row.template_shifts ??
+    row.shifts ??
+    row.shift_templates ??
+    row.schedule_shifts ??
+    row.scheduled_shifts ??
+    row.lines ??
+    row.items;
+  if (Array.isArray(embedded)) return embedded.length;
+  const raw = row.shifts_data ?? row.shift_data ?? row.data;
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.length : 0;
+    } catch {
+      return 0;
+    }
+  }
+  return 0;
+}
+
+function hasTemplateShiftSignal(row: any): boolean {
+  if (!row || typeof row !== 'object') return false;
+  const countKeys = ['shift_count', 'shifts_count', 'template_shift_count', 'num_shifts', 'shift_set_count'];
+  for (const k of countKeys) {
+    if (Object.prototype.hasOwnProperty.call(row, k)) return true;
+  }
+  const embeddedKeys = [
+    'template_shifts',
+    'shifts',
+    'shift_templates',
+    'schedule_shifts',
+    'scheduled_shifts',
+    'lines',
+    'items',
+    'shift_ids',
+  ];
+  for (const k of embeddedKeys) {
+    if (Object.prototype.hasOwnProperty.call(row, k)) return true;
+  }
+  return false;
+}
+
+async function getScheduleTemplateDetail(id: string): Promise<any | null> {
+  const paths = scheduleTemplateIdPaths(id);
+  for (const p of paths) {
+    try {
+      return await apiClient.get<any>(p);
+    } catch (e: any) {
+      const st = e instanceof HttpError ? e.status : e?.status;
+      if (st === 404) continue;
+      throw e;
+    }
+  }
+  return null;
+}
+
+async function findScheduleTemplateRowByName(companyId: string, label: string): Promise<any | null> {
+  const cid = String(companyId || '').trim();
+  if (!cid) return null;
+  const rows = await getScheduleTemplates({ company: cid, ordering: '-created_at' });
+  const list = Array.isArray(rows) ? rows : [];
+  const target = label.trim();
+  return list.find((r: any) => String(r.name ?? r.title ?? '').trim() === target) ?? null;
+}
+
+/**
+ * POST often returns `{}` (empty body) on 201; resolve id + nested shifts via GET list/detail.
+ */
+async function resolveScheduleTemplateAfterCreate(createdRaw: any, companyId: string, label: string): Promise<any> {
+  const id = String(createdRaw?.id ?? createdRaw?.pk ?? createdRaw?.uuid ?? '').trim();
+  if (id) {
+    const detail = await getScheduleTemplateDetail(id);
+    if (detail) return detail;
+    return createdRaw;
+  }
+  const byName = await findScheduleTemplateRowByName(companyId, label);
+  if (!byName) return createdRaw || {};
+  const tid = String(byName.id ?? byName.pk ?? byName.uuid ?? '').trim();
+  if (!tid) return byName;
+  const detail = await getScheduleTemplateDetail(tid);
+  return detail ?? byName;
+}
+
+async function tryPatchLinkShiftsToTemplate(
+  templateId: string,
+  shiftIds: string[],
+  nestedMinimal: Record<string, any>[],
+  templateRow?: any
+): Promise<boolean> {
+  if (!String(templateId || '').trim()) return false;
+  const enc = encodeURIComponent(String(templateId || '').trim());
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  const add = (p: string | null | undefined) => {
+    const n = String(p || '').replace(/\/+$/, '');
+    if (!n || seen.has(n)) return;
+    seen.add(n);
+    paths.push(`${n}/`);
+  };
+  const rowUrl = templateRow?.url ?? templateRow?.self ?? templateRow?.detail_url;
+  if (typeof rowUrl === 'string') add(normalizeScheduleTemplateDeleteEndpoint(rowUrl));
+  if (lastScheduleTemplatesCreateApiPath) add(`${lastScheduleTemplatesCreateApiPath}/${enc}`);
+  if (lastScheduleTemplatesApiPath) add(`${lastScheduleTemplatesApiPath}/${enc}`);
+  add(`/scheduler/schedule-templates/${enc}`);
+  if (paths.length === 0) return false;
+
+  const patchBodies: Record<string, any>[] = [
+    scrubWrite({ shift_ids: shiftIds }),
+    scrubWrite({ template_shifts: nestedMinimal }),
+    scrubWrite({ shifts: shiftIds }),
+  ].filter((b) => Object.keys(b).length > 0);
+
+  for (const path of paths) {
+    for (const body of patchBodies) {
+      try {
+        await apiClient.patch<any>(path, body);
+        const detail = await getScheduleTemplateDetail(templateId);
+        if (detail && countShiftsOnTemplateRow(detail) > 0) return true;
+      } catch (e: any) {
+        const st = e instanceof HttpError ? e.status : e?.status;
+        if (st === 404 || st === 400 || st === 405) continue;
+        throw e;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * POST /scheduler/schedule-templates/ — backend serializers vary; try many DRF-friendly shapes.
+ * Stops on first success; otherwise throws the last error (usually HttpError with DRF body).
+ */
+export async function createScheduleTemplateWithFallbacks(params: {
+  companyId: string;
+  organizationId?: string | null;
+  rangeStart: Date;
+  rangeEnd: Date;
+  shifts: any[];
+}): Promise<any> {
+  const cid = String(params.companyId || '').trim();
+  if (!cid) throw new Error('companyId is required');
+
+  const rsIso = params.rangeStart.toISOString();
+  const reIso = params.rangeEnd.toISOString();
+  const rsDate = rsIso.slice(0, 10);
+  const reDate = reIso.slice(0, 10);
+  const oid = params.organizationId ? String(params.organizationId).trim() : '';
+
+  const label = `Schedule ${rsDate} – ${reDate}`;
+
+  const resolveEmployeeId = (s: any): string => {
+    const emp =
+      s.employee_id ??
+      (typeof s.employee === 'object' && s.employee != null && (s.employee as any).id != null
+        ? (s.employee as any).id
+        : s.employee);
+    return String(emp ?? '').trim();
+  };
+
+  // Shifts coming from the backend are not always shaped consistently (field names).
+  // If we send invalid start/end, the backend often creates an empty template.
+  const resolveStartIso = (s: any): string | undefined => {
+    const v =
+      s.start_time ??
+      s.start ??
+      s.startAt ??
+      s.start_at ??
+      s.time_in ??
+      s.start_datetime ??
+      s.startDate ??
+      s.datetime_start;
+    return toIsoDateTime(v);
+  };
+
+  const resolveEndIso = (s: any): string | undefined => {
+    const v =
+      s.end_time ??
+      s.end ??
+      s.endAt ??
+      s.end_at ??
+      s.time_out ??
+      s.end_datetime ??
+      s.endDate ??
+      s.datetime_end;
+    const direct = toIsoDateTime(v);
+    if (direct) return direct;
+    const st = resolveStartIso(s);
+    if (!st) return undefined;
+    const d = new Date(st);
+    if (Number.isNaN(d.getTime())) return undefined;
+    d.setTime(d.getTime() + 8 * 60 * 60 * 1000);
+    return d.toISOString();
+  };
+
+  const shiftsIn = params.shifts.filter((s) => {
+    const eid = resolveEmployeeId(s);
+    const st = resolveStartIso(s);
+    const et = resolveEndIso(s);
+    return eid.length > 0 && !!st && !!et;
+  });
+  if (shiftsIn.length === 0) {
+    throw new Error('No shifts with a valid employee id and start/end times');
+  }
+
+  /** Existing Shift rows from the week — backend often links templates via PK list, not nested JSON. */
+  const shiftIdsFromApi = shiftsIn
+    .map((s: any) => String(s.id ?? s.pk ?? s.uuid ?? '').trim())
+    .filter((x: string) => x.length > 0);
+
+  const shiftRowsFull = shiftsIn.map((s) => {
+    const eid = resolveEmployeeId(s);
+    const st = resolveStartIso(s);
+    const et = resolveEndIso(s);
+    return scrubWrite({
+      employee: eid,
+      employee_id: eid,
+      start_time: st,
+      end_time: et,
+      break_duration_minutes: Number(s.break_duration_minutes ?? s.break_minutes ?? 0) || 0,
+      break_duration: Number(s.break_duration_minutes ?? s.break_minutes ?? 0) || 0,
+      notes: s.notes,
+      shift_type: s.shift_type,
+      hourly_rate: s.hourly_rate,
+      status: s.status,
+    });
+  });
+
+  const shiftRowsMinimal = shiftsIn.map((s) => {
+    const eid = resolveEmployeeId(s);
+    const st = resolveStartIso(s);
+    const et = resolveEndIso(s);
+    return scrubWrite({
+      employee: eid,
+      start_time: st,
+      end_time: et,
+    });
+  });
+
+  
+  const primaryBody = scrubWrite({
+    company: cid,
+    name: label,
+    week_start: rsDate,
+    week_end: reDate,
+    ...(oid ? { organization: oid } : {}),
+    ...(shiftIdsFromApi.length > 0 ? { shift_ids: shiftIdsFromApi } : {}),
+    template_shifts: shiftRowsMinimal,
+  });
+
+  const fallbackBody = scrubWrite({
+    company: cid,
+    name: label,
+    week_start: rsDate,
+    week_end: reDate,
+    ...(oid ? { organization: oid } : {}),
+    shifts: shiftRowsFull,
+  });
+
+  const idsBody = scrubWrite({
+    company: cid,
+    name: label,
+    week_start: rsDate,
+    week_end: reDate,
+    ...(oid ? { organization: oid } : {}),
+    ...(shiftIdsFromApi.length > 0 ? { shifts: shiftIdsFromApi } : {}),
+  });
+
+  const primaryCompanyIdBody = scrubWrite({
+    company_id: cid,
+    name: label,
+    week_start: rsDate,
+    week_end: reDate,
+    ...(oid ? { organization_id: oid } : {}),
+    ...(shiftIdsFromApi.length > 0 ? { shift_ids: shiftIdsFromApi } : {}),
+    template_shifts: shiftRowsMinimal,
+  });
+
+  const tryBodies = dedupeBodies(
+    [primaryBody, primaryCompanyIdBody, idsBody, fallbackBody].filter((b) => Object.keys(b).length > 0)
+  );
+
+  let lastErr: unknown;
+
+  const cleanupEmptyTemplate = async (row: any) => {
+    const tid = String(row?.id ?? row?.pk ?? row?.uuid ?? '').trim();
+    const url = row?.url ?? row?.self ?? row?.delete_url;
+    if (!tid) return;
+    try {
+      await deleteScheduleTemplate(tid, cid, typeof url === 'string' ? url : undefined);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const getScheduleTemplateRowFromList = async (templateId: string): Promise<any | null> => {
+    const tid = String(templateId || '').trim();
+    if (!tid) return null;
+    try {
+      const rows = await getScheduleTemplatesForCompany(cid, oid || null);
+      return rows.find((r: any) => String(r?.id ?? r?.pk ?? r?.uuid ?? '').trim() === tid) ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  const finalizeTemplate = async (createdRaw: any): Promise<any> => {
+    let resolved = await resolveScheduleTemplateAfterCreate(createdRaw, cid, label);
+    let count = countShiftsOnTemplateRow(resolved);
+    let hasSignal = hasTemplateShiftSignal(resolved);
+    const tid = String(resolved?.id ?? resolved?.pk ?? resolved?.uuid ?? '').trim();
+
+    if (count === 0 && tid) {
+      const listRow = await getScheduleTemplateRowFromList(tid);
+      if (listRow) {
+        resolved = listRow;
+        count = countShiftsOnTemplateRow(listRow);
+        hasSignal = hasTemplateShiftSignal(listRow);
+      }
+    }
+
+    // If count is still zero, attempt one constrained link pass.
+    // This runs even when list/detail serializers are sparse (no shift-count fields).
+    if (count === 0 && shiftsIn.length > 0 && tid && shiftIdsFromApi.length > 0) {
+      const patched = await tryPatchLinkShiftsToTemplate(tid, shiftIdsFromApi, shiftRowsMinimal, resolved);
+      if (patched) {
+        resolved = (await getScheduleTemplateDetail(tid)) ?? resolved;
+        count = countShiftsOnTemplateRow(resolved);
+        hasSignal = hasTemplateShiftSignal(resolved);
+      } else if (!hasSignal) {
+        const listRow = await getScheduleTemplateRowFromList(tid);
+        if (listRow) {
+          resolved = listRow;
+          count = countShiftsOnTemplateRow(listRow);
+          hasSignal = hasTemplateShiftSignal(listRow);
+        }
+      }
+    }
+
+    if (hasSignal && count === 0 && shiftsIn.length > 0) {
+      await cleanupEmptyTemplate(resolved);
+      throw new Error('Template created but contained zero shifts');
+    }
+
+    return resolved;
+  };
+
+  for (let i = 0; i < tryBodies.length; i++) {
+    const body = tryBodies[i];
+    if (Object.keys(body).length === 0) continue;
+    try {
+      const createdRaw = await createScheduleTemplate(body);
+      return await finalizeTemplate(createdRaw);
+    } catch (e: unknown) {
+      lastErr = e;
+      const st = e instanceof HttpError ? e.status : (e as any)?.status;
+      if (st === 401 || st === 403) throw e;
+      if (st === 400 && i < tryBodies.length - 1) continue;
+      throw e;
+    }
+  }
+
+  throw lastErr instanceof Error ? lastErr : new Error('Could not create schedule template');
+}
+
+export async function updateScheduleTemplate(id: string, data: Record<string, any>) {
+  const paths = scheduleTemplateIdPaths(id);
+  let lastErr: unknown;
+  for (const path of paths) {
+    try {
+      return await apiClient.patch<any>(path, data);
+    } catch (e: any) {
+      lastErr = e;
+      const st = e instanceof HttpError ? e.status : e?.status;
+      if (st === 404) continue;
+      throw e;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Could not update schedule template');
+}
+
+function normalizeScheduleTemplateDeleteEndpoint(pathOrUrl: string): string | null {
+  const raw = String(pathOrUrl || '').trim();
+  if (!raw) return null;
+  try {
+    if (raw.startsWith('http://') || raw.startsWith('https://')) {
+      const u = new URL(raw);
+      // apiClient already includes `/api` in baseURL, so remove leading `/api`.
+      const p = u.pathname.replace(/^\/api\/?/, '/');
+      return p.startsWith('/') ? p : `/${p}`;
+    }
+  } catch {
+    // fall through to best-effort normalization
+  }
+
+ 
+  const stripped = raw.replace(/^\/api\/?/, '/');
+  return stripped.startsWith('/') ? stripped : `/${stripped}`;
+}
+
+
+function scheduleTemplateDeleteUrls(id: string, deleteEndpoint?: string | null): string[] {
+  const raw = String(id || '').trim();
+  if (!raw) return [];
+  const enc = encodeURIComponent(raw);
+  const out: string[] = [];
+  const add = (path: string) => {
+    const n = path.replace(/\/+$/, '') + '/';
+    if (!out.includes(n)) out.push(n);
+  };
+
+  const fromHyperlink = deleteEndpoint ? normalizeScheduleTemplateDeleteEndpoint(deleteEndpoint) : null;
+  if (fromHyperlink) {
+    add(fromHyperlink);
+  }
+
+  const preferredBase =
+    lastScheduleTemplatesCreateApiPath?.replace(/\/+$/, '') ||
+    lastScheduleTemplatesApiPath?.replace(/\/+$/, '');
+  if (preferredBase) {
+    add(`${preferredBase}/${enc}`);
+  }
+  add(`/scheduler/schedule-templates/${enc}`);
+
+  return out;
+}
+
+/**
+ * DELETE one schedule template. Tries at most three URLs to prevent repeated Not Found spam.
+ * `companyId` is accepted for call-site compatibility; flat routers do not use it in the path.
+ */
+export async function deleteScheduleTemplate(
+  id: string,
+  _companyId?: string | null,
+  deleteEndpoint?: string
+) {
+  const raw = String(id || '').trim();
+  if (!raw) throw new Error('Template id is required');
+
+  const urls = scheduleTemplateDeleteUrls(raw, deleteEndpoint);
+  let lastErr: unknown;
+  let lastTried: string | null = null;
+
+  for (const url of urls) {
+    try {
+      lastTried = url;
+      return await apiClient.delete(url);
+    } catch (e: unknown) {
+      lastErr = e;
+      const st = e instanceof HttpError ? e.status : (e as any)?.status;
+      if (st === 401 || st === 403) throw e;
+      if (st !== 404 && st !== 405) throw e;
+    }
+  }
+
+  const msg = lastErr instanceof Error ? lastErr.message : 'Could not delete schedule template';
+  throw new Error(`${msg}${lastTried ? ` (tried ${urls.length} URL(s), last: ${lastTried})` : ''}`);
 }
 
 // —— Templates (check lists / learning) ——
@@ -918,9 +1822,29 @@ export async function unassignTemplate(templateId: string, userId: string) {
 
 // —— Focus ——
 export async function getFocusSessions(params?: Record<string, any>) {
-  const raw = await apiClient.get<any>('/focus/sessions/', params);
-  return normalizePaginatedList(raw);
+  const merged = { ...(params || {}) };
+  const withPage = { page_size: 100, ...merged };
+  let last: unknown;
+  for (const q of [withPage, merged]) {
+    try {
+      const raw = await apiClient.get<any>('/focus/sessions/', q);
+      return normalizePaginatedList(raw);
+    } catch (e) {
+      last = e;
+      if (e instanceof HttpError && (e.status === 400 || e.status === 404)) continue;
+      throw e;
+    }
+  }
+  if (last) throw last;
+  return [];
 }
+
+/** Single focus session (refresh active session / recover when list is stale). */
+export async function getFocusSession(id: string) {
+  const enc = encodeURIComponent(String(id));
+  return apiClient.get<any>(`/focus/sessions/${id}/`);
+}
+
 export async function createFocusSession(data: any) {
   return apiClient.post<any>('/focus/sessions/', data);
 }
@@ -971,6 +1895,9 @@ export async function deleteHabit(id: string) {
 export async function getHabitCompletions(params?: Record<string, any>) {
   const raw = await apiClient.get<any>('/habits/completions/', params);
   return normalizePaginatedList(raw);
+}
+export async function getHabitCompletionSchema() {
+  return apiClient.options<any>('/habits/completions/');
 }
 export async function createHabitCompletion(data: any) {
   return apiClient.post<any>('/habits/completions/', data);

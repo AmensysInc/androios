@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -14,28 +14,37 @@ import {
   FlatList,
   Platform,
   KeyboardAvoidingView,
+  AppState,
+  type AppStateStatus,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useIsFocused } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
-import { type UserRole } from '../types/auth';
+import { getPrimaryRoleFromUser, getRoleDisplayLabel, type UserRole } from '../types/auth';
 import * as api from '../api';
 
-/** Section header gradients (matches web reference: blue→purple, purple→pink, blue→cyan) */
-const GRAD_TIMER = ['#2196F3', '#9C27B0'] as const;
+/** Section header gradients (sessions / admin cards) */
 const GRAD_SESSIONS = ['#8E24AA', '#D81B60'] as const;
 const GRAD_ADMIN = ['#0288D1', '#00BCD4'] as const;
 
-/** Accents tied to each section’s gradient */
-const TIMER_ACCENT = '#9C27B0';
+/** Focus timer — solid purple header & digits (matches web reference) */
+const FOCUS_PURPLE = '#7C3AED';
+const TIMER_ACCENT = FOCUS_PURPLE;
 const SESSIONS_PURPLE = '#8E24AA';
 const SESSIONS_PINK = '#D81B60';
 
 const PURPLE = '#7E57C2';
-const GREEN = '#4CAF50';
+const GREEN = '#22C55E';
+const STOP_ROSE = '#F43F5E';
+const PEACH_BG = '#FFEDD5';
+const PEACH_BORDER = '#FDBA74';
+const PEACH_TEXT = '#C2410C';
 const PAGE_BG = '#F5F7F9';
 
 type PickerOption = { id: string; label: string };
+
+type AdminSelectableUser = { id: string; label: string; primaryRole: UserRole };
 
 function CardHeaderGradient({ colors }: { colors: readonly [string, string] }) {
   return (
@@ -58,14 +67,116 @@ function startOfWeekMonday(d: Date): Date {
 }
 
 function sessionStart(s: any): Date | null {
-  const t = s.start_time ?? s.started_at ?? s.start ?? s.planned_start;
+  const t =
+    s.start_time ??
+    s.starts_at ??
+    s.session_start ??
+    s.focus_start ??
+    s.started_at ??
+    s.start ??
+    s.planned_start ??
+    s.clock_in_time ??
+    s.clocked_in_at ??
+    s.clock_in ??
+    s.check_in_time ??
+    s.check_in ??
+    s.begin_time ??
+    s.began_at;
   if (t == null || t === '') return null;
   const d = new Date(t);
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+/** When the API omits start_time but has created_at, still show/filter sessions in “This week”. */
+function effectiveSessionStart(s: any): Date | null {
+  const st = sessionStart(s);
+  if (st) return st;
+  const raw = s?.created_at ?? s?.created ?? s?.updated_at;
+  if (raw == null || raw === '') return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function durationMinutesFromRaw(raw: unknown): number | null {
+  if (raw == null || raw === '') return null;
+  const n = typeof raw === 'string' ? parseFloat(raw.trim()) : Number(raw);
+  if (Number.isNaN(n)) return null;
+  if (n > 1000) return Math.max(0, Math.round(n / 60));
+  return Math.max(0, Math.round(n));
+}
+
+function sessionDurationMinutes(s: any): number | null {
+  const fromFields = durationMinutesFromRaw(
+    s.actual_duration ?? s.duration_minutes ?? s.duration_mins ?? s.duration ?? s.total_duration_minutes
+  );
+  if (fromFields != null) return fromFields;
+
+  const fromSeconds = s.actual_duration_seconds ?? s.duration_seconds ?? s.total_duration_seconds ?? s.seconds;
+  if (typeof fromSeconds === 'number' && !Number.isNaN(fromSeconds)) {
+    return Math.max(0, Math.round(fromSeconds / 60));
+  }
+
+  const start = sessionStart(s) ?? effectiveSessionStart(s);
+  const end = sessionEnd(s);
+  if (start && end) {
+    return Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000));
+  }
+
+  // In progress (no end): show elapsed minutes like the web list.
+  if (start && !end) {
+    const st = sessionStatusRaw(s);
+    if (
+      st === 'in_progress' ||
+      st === 'active' ||
+      st === 'running' ||
+      st === 'paused' ||
+      st.includes('pause')
+    ) {
+      return Math.max(0, Math.floor((Date.now() - start.getTime()) / 60000));
+    }
+  }
+
+  return null;
+}
+
+function sessionDurationLabel(s: any): string {
+  const n = sessionDurationMinutes(s);
+  if (n == null) return '—';
+  if (n < 1) return '0m';
+  if (n < 60) return `${Math.round(n)}m`;
+  const h = Math.floor(n / 60);
+  const m = Math.round(n % 60);
+  return m ? `${h}h ${m}m` : `${h}h`;
+}
+
+function sessionDistractionCount(s: any): number {
+  const v = s.distractions ?? s.interruptions ?? s.interruption_count ?? 0;
+  if (typeof v === 'number' && !Number.isNaN(v)) return v;
+  const p = parseInt(String(v), 10);
+  return Number.isNaN(p) ? 0 : p;
+}
+
+function sessionDateTimeBadges(s: any): { date: string; time: string } {
+  const start = sessionStart(s) ?? effectiveSessionStart(s);
+  if (!start) return { date: '—', time: '' };
+  return {
+    date: start.toLocaleDateString(undefined, { day: 'numeric', month: 'numeric', year: 'numeric' }),
+    time: start.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' }),
+  };
+}
+
 function sessionEnd(s: any): Date | null {
-  const t = s.end_time ?? s.ended_at ?? s.end;
+  const t =
+    s.end_time ??
+    s.ended_at ??
+    s.end ??
+    s.clock_out_time ??
+    s.clocked_out_at ??
+    s.clock_out ??
+    s.check_out_time ??
+    s.check_out ??
+    s.finish_time ??
+    s.finished_at;
   if (t == null || t === '') return null;
   const d = new Date(t);
   return Number.isNaN(d.getTime()) ? null : d;
@@ -76,6 +187,102 @@ function sessionId(s: any): string {
   return id != null ? String(id) : '';
 }
 
+/** Owning user id for a focus session. `null` = API did not expose owner (only acceptable on JWT-scoped “my” lists). */
+function sessionOwnerId(s: any): string | null {
+  const u = s?.user;
+  if (u != null && typeof u === 'object') {
+    if (u.id != null) return String(u.id);
+    if (u.pk != null) return String(u.pk);
+    if (u.uuid != null) return String(u.uuid);
+  }
+  const raw =
+    u ??
+    s?.user_id ??
+    s?.owner ??
+    s?.created_by ??
+    s?.member ??
+    s?.assigned_user;
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'object' && raw?.id != null) return String(raw.id);
+  if (typeof raw === 'string' || typeof raw === 'number') {
+    const str = String(raw).trim();
+    return str.length ? str : null;
+  }
+  return null;
+}
+
+function filterSessionsForSelf(list: any[], uid: string): any[] {
+  const id = String(uid);
+  return (Array.isArray(list) ? list : []).filter((s) => {
+    const oid = sessionOwnerId(s);
+    if (oid == null) return true;
+    return oid === id;
+  });
+}
+
+/** Team view: never show a row unless it clearly belongs to the selected user. */
+function filterSessionsForOtherUser(list: any[], uid: string): any[] {
+  const id = String(uid);
+  return (Array.isArray(list) ? list : []).filter((s) => {
+    const oid = sessionOwnerId(s);
+    if (oid == null) return false;
+    return oid === id;
+  });
+}
+
+function sessionStatusRaw(s: any): string {
+  return String(s?.status ?? s?.session_status ?? '').toLowerCase().replace(/-/g, '_');
+}
+
+/** Elapsed time while paused (when backend exposes it). */
+function elapsedMsFromServerSession(s: any): number | null {
+  const sec = s.elapsed_seconds ?? s.total_elapsed_seconds;
+  if (typeof sec === 'number' && !Number.isNaN(sec)) return Math.round(sec * 1000);
+  const ms = s.elapsed_ms ?? s.total_elapsed_ms;
+  if (typeof ms === 'number' && !Number.isNaN(ms)) return ms;
+  const pa = s.paused_at ?? s.pause_time ?? s.paused_at_time;
+  const start = effectiveSessionStart(s);
+  if (start && pa) {
+    const pt = new Date(pa).getTime();
+    if (!Number.isNaN(pt)) return Math.max(0, pt - start.getTime());
+  }
+  return null;
+}
+
+/** Open session started elsewhere (e.g. web): no end_time, in progress or paused. */
+function findActiveSessionFromList(list: any[]): any | null {
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const open = list.filter((s) => {
+    if (sessionEnd(s)) return false;
+    const st = sessionStatusRaw(s);
+    if (st.includes('complete') || st.includes('done') || st.includes('cancel')) return false;
+    if (st === 'planned') return false;
+    if (
+      st === 'in_progress' ||
+      st === 'active' ||
+      st === 'running' ||
+      st === 'paused' ||
+      st.includes('pause')
+    ) {
+      return true;
+    }
+    if (!st) {
+      const start = effectiveSessionStart(s);
+      return !!(start && start.getTime() <= Date.now());
+    }
+    return false;
+  });
+  if (open.length === 0) return null;
+  open.sort(
+    (a, b) => (effectiveSessionStart(b)?.getTime() ?? 0) - (effectiveSessionStart(a)?.getTime() ?? 0)
+  );
+  return open[0];
+}
+
+function findSessionById(list: any[], id: string): any | undefined {
+  return list.find((s) => sessionId(s) === id);
+}
+
 function inferStatus(s: any): 'completed' | 'planned' | 'active' {
   const st = String(s.status ?? s.session_status ?? '').toLowerCase().replace(/-/g, '_');
   if (st === 'planned') return 'planned';
@@ -84,9 +291,10 @@ function inferStatus(s: any): 'completed' | 'planned' | 'active' {
   if (st.includes('plan')) return 'planned';
   if (st.includes('active') || st.includes('progress') || st.includes('running')) return 'active';
   if (sessionEnd(s)) return 'completed';
-  if (sessionStart(s)) {
+  const start = effectiveSessionStart(s);
+  if (start) {
     const now = Date.now();
-    if (sessionStart(s)!.getTime() > now) return 'planned';
+    if (start.getTime() > now) return 'planned';
     return 'active';
   }
   return 'completed';
@@ -120,7 +328,7 @@ function formatTimer(totalSec: number): string {
 }
 
 function formatSessionWhen(s: any): string {
-  const start = sessionStart(s);
+  const start = sessionStart(s) ?? effectiveSessionStart(s);
   if (!start) return '—';
   const end = sessionEnd(s);
   if (end) {
@@ -209,30 +417,38 @@ const pmStyles = StyleSheet.create({
   rowText: { flex: 1, fontSize: 16, color: '#0f172a', marginRight: 8 },
 });
 
-function canViewUserFocusSessions(role: UserRole | null): boolean {
+/** Team focus panel: Super Admin, Organization Manager, Company Manager only (not generic admin). */
+function canViewTeamFocusSessions(role: UserRole | null): boolean {
   if (!role) return false;
-  return ['super_admin', 'admin', 'operations_manager', 'manager'].includes(role);
+  return ['super_admin', 'operations_manager', 'manager'].includes(role);
 }
 
 export default function FocusScreen() {
-  const { user, role } = useAuth();
+  const { user, role, isLoading: authLoading } = useAuth();
+  const isFocused = useIsFocused();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [mySessions, setMySessions] = useState<any[]>([]);
   const [adminSessions, setAdminSessions] = useState<any[]>([]);
-  const [adminUsers, setAdminUsers] = useState<{ id: string; label: string }[]>([]);
+  const [adminUsers, setAdminUsers] = useState<AdminSelectableUser[]>([]);
 
-  const [timeFilter, setTimeFilter] = useState<'week' | 'month' | 'all'>('week');
+  const [timeFilter, setTimeFilter] = useState<'week' | 'month' | 'all'>('all');
   const [typeFilter, setTypeFilter] = useState<'all' | 'task' | 'freeform' | 'planned'>('all');
   const [timePicker, setTimePicker] = useState(false);
   const [typePicker, setTypePicker] = useState(false);
 
-  const [adminUserId, setAdminUserId] = useState<string>('self');
+  /** Selected team member only (never the logged-in user). */
+  const [adminUserId, setAdminUserId] = useState<string>('');
   const [adminUserPicker, setAdminUserPicker] = useState(false);
 
   const [tick, setTick] = useState(0);
-  const [runningSince, setRunningSince] = useState<number | null>(null);
+  /** Elapsed milliseconds accumulated while paused (and final segments). */
+  const [accumulatedMs, setAccumulatedMs] = useState(0);
+  /** When non-null, timer is running and we add (now - runStart) to accumulatedMs. */
+  const [runStart, setRunStart] = useState<number | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [interruptions, setInterruptions] = useState(0);
+  const [sessionNotes, setSessionNotes] = useState('');
 
   const [taskModal, setTaskModal] = useState(false);
   const [tasks, setTasks] = useState<any[]>([]);
@@ -249,69 +465,241 @@ export default function FocusScreen() {
   const [durationPicker, setDurationPicker] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  const showAdmin = canViewUserFocusSessions(role);
+  const showTeamPanel = canViewTeamFocusSessions(role);
+
+  /**
+   * Self: JWT-scoped list first, then `?user=` variants. Rows are filtered to `uid` when `user` is set.
+   *
+   * Team (other user): only `?user=`-style requests — never unfiltered JWT (that is the viewer’s
+   * data). Every row must have `sessionOwnerId === uid` or it is dropped (no wrong data).
+   */
+  const fetchSessionsForUser = useCallback(async (uid: string, mode: 'self' | 'other'): Promise<any[]> => {
+    const userQueryVariants: Array<Record<string, any>> = [
+      { user: uid },
+      { user_id: uid },
+      { userId: uid },
+      { owner: uid },
+      { created_by: uid },
+    ];
+
+    let last: unknown;
+
+    const tryGet = async (extra?: Record<string, any>) => {
+      return api.getFocusSessions(extra ? { ...extra } : {});
+    };
+
+    if (mode === 'self') {
+      const attempts: Array<Record<string, any> | undefined> = [undefined, ...userQueryVariants];
+      let jwtScopedList: any[] | null = null;
+      for (const extra of attempts) {
+        try {
+          const raw = await tryGet(extra);
+          const list = Array.isArray(raw) ? raw : [];
+          if (list.length === 0) continue;
+          if (!extra) jwtScopedList = list;
+          const filtered = filterSessionsForSelf(list, uid);
+          if (filtered.length > 0) return filtered;
+        } catch (e) {
+          last = e;
+        }
+      }
+      // JWT-scoped list is already limited to the current user; if rows omit `user` or use a shape
+      // we don't match, filtering can drop everything — still show the list.
+      if (jwtScopedList && jwtScopedList.length > 0) return jwtScopedList;
+    } else {
+      for (const extra of userQueryVariants) {
+        try {
+          const raw = await tryGet(extra);
+          const list = Array.isArray(raw) ? raw : [];
+          if (list.length === 0) continue;
+          const filtered = filterSessionsForOtherUser(list, uid);
+          if (filtered.length > 0) return filtered;
+        } catch (e) {
+          last = e;
+        }
+      }
+    }
+    if (last) throw last;
+    return [];
+  }, []);
 
   const loadMySessions = useCallback(async () => {
     if (!user?.id) return;
     try {
-      const raw = await api.getFocusSessions({ user: user.id });
-      setMySessions(Array.isArray(raw) ? raw : []);
+      const list = await fetchSessionsForUser(String(user.id), 'self');
+      setMySessions(list);
     } catch (e) {
       console.warn(e);
     }
-  }, [user?.id]);
+  }, [user?.id, fetchSessionsForUser]);
 
   const loadAdminSessions = useCallback(async () => {
-    if (!showAdmin || !user?.id) return;
-    const uid = adminUserId === 'self' ? user.id : adminUserId;
+    if (!showTeamPanel || !user?.id) return;
+    if (!adminUserId || String(adminUserId) === String(user.id)) {
+      setAdminSessions([]);
+      return;
+    }
     try {
-      const raw = await api.getFocusSessions({ user: uid });
-      setAdminSessions(Array.isArray(raw) ? raw : []);
+      const list = await fetchSessionsForUser(String(adminUserId), 'other');
+      setAdminSessions(list);
     } catch (e) {
       console.warn(e);
     }
-  }, [showAdmin, user?.id, adminUserId]);
+  }, [showTeamPanel, user?.id, adminUserId, fetchSessionsForUser]);
 
   const loadAdminUsers = useCallback(async () => {
-    if (!showAdmin) return;
+    if (!showTeamPanel) return;
+    const myId = user?.id != null ? String(user.id) : '';
+    const viewerIsSuperAdmin = role === 'super_admin';
     try {
       const raw = await api.getUsers({}).catch(() => []);
       const list = (Array.isArray(raw) ? raw : [])
         .filter((u: any) => (u.profile?.status ?? u.status) !== 'deleted')
-        .map((u: any) => ({
-          id: String(u.id),
-          label: u.profile?.full_name || u.full_name || u.email || u.username || String(u.id),
-        }));
+        .map((u: any) => {
+          const id = String(u.id);
+          const primaryRole = getPrimaryRoleFromUser(u);
+          return {
+            id,
+            label: u.profile?.full_name || u.full_name || u.email || u.username || id,
+            primaryRole,
+          };
+        })
+        .filter((u) => myId && u.id !== myId)
+        .filter((u) => !(viewerIsSuperAdmin && u.primaryRole === 'super_admin'));
       setAdminUsers(list);
     } catch (e) {
       console.warn(e);
     }
-  }, [showAdmin]);
+  }, [showTeamPanel, user?.id, role]);
 
   const load = useCallback(async () => {
+    if (authLoading) return;
     await Promise.all([loadMySessions(), loadAdminSessions(), loadAdminUsers()]);
     setLoading(false);
     setRefreshing(false);
-  }, [loadMySessions, loadAdminSessions, loadAdminUsers]);
+  }, [authLoading, loadMySessions, loadAdminSessions, loadAdminUsers]);
 
   useEffect(() => {
     load();
   }, [load]);
 
+  // If you clock in on web, then return to this screen, we need to refetch.
+  useEffect(() => {
+    if (!isFocused) return;
+    load();
+  }, [isFocused, load]);
+
   useEffect(() => {
     loadAdminSessions();
   }, [adminUserId, loadAdminSessions]);
 
+  const resetLocalSession = useCallback(() => {
+    setAccumulatedMs(0);
+    setRunStart(null);
+    setActiveSessionId(null);
+    setInterruptions(0);
+    setSessionNotes('');
+  }, []);
+
+  /** Apply server `start_time` + status (session started on web / another client). Only call when session id differs from local. */
+  const syncActiveFromBackendRow = useCallback((s: any) => {
+    const sid = sessionId(s);
+    if (!sid) return;
+    setActiveSessionId(sid);
+    setInterruptions(sessionDistractionCount(s));
+    setSessionNotes(String(s.notes ?? s.notes_text ?? '').trim());
+    const st = sessionStatusRaw(s);
+    const start = effectiveSessionStart(s);
+    const startMs = start ? start.getTime() : Date.now();
+    if (st === 'paused' || st.includes('pause')) {
+      const pausedMs = elapsedMsFromServerSession(s);
+      setAccumulatedMs(pausedMs ?? 0);
+      setRunStart(null);
+    } else {
+      setAccumulatedMs(0);
+      setRunStart(startMs);
+    }
+  }, []);
+
+  /** Pick up an in-progress session started on web; align timer to server `start_time` (full sync only when session id changes). */
   useEffect(() => {
-    if (!runningSince) return;
+    if (!user?.id || loading) return;
+    const active = findActiveSessionFromList(mySessions);
+    if (active) {
+      const sid = sessionId(active);
+      if (sid !== activeSessionId) {
+        syncActiveFromBackendRow(active);
+      } else {
+        setInterruptions(sessionDistractionCount(active));
+      }
+      return;
+    }
+    if (activeSessionId) {
+      const row = findSessionById(mySessions, activeSessionId);
+      if (row && (sessionEnd(row) || sessionStatusRaw(row).includes('complete'))) {
+        resetLocalSession();
+      }
+    }
+  }, [mySessions, loading, user?.id, activeSessionId, syncActiveFromBackendRow, resetLocalSession]);
+
+  /** Poll + refresh single session so timer stays consistent while another client updates the session. */
+  useEffect(() => {
+    if (!isFocused || !user?.id) return;
+    const id = setInterval(() => {
+      void loadMySessions();
+      const sid = activeSessionId;
+      if (!sid) return;
+      void (async () => {
+        try {
+          const one = await api.getFocusSession(sid);
+          if (one && !sessionEnd(one) && !sessionStatusRaw(one).includes('complete')) {
+            setInterruptions(sessionDistractionCount(one));
+          }
+          if (one && (sessionEnd(one) || sessionStatusRaw(one).includes('complete'))) {
+            resetLocalSession();
+          }
+        } catch {
+          /* ignore */
+        }
+      })();
+    }, 5000);
+    return () => clearInterval(id);
+  }, [isFocused, user?.id, activeSessionId, loadMySessions, resetLocalSession]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next: AppStateStatus) => {
+      if (next === 'active') void load();
+    });
+    return () => sub.remove();
+  }, [load]);
+
+  /** Default team selection when the list loads (never includes the logged-in user). */
+  useEffect(() => {
+    if (!showTeamPanel) return;
+    const ids = adminUsers.map((u) => u.id);
+    if (ids.length === 0) {
+      setAdminUserId('');
+      return;
+    }
+    if (!adminUserId || !ids.includes(adminUserId)) {
+      setAdminUserId(ids[0]);
+    }
+  }, [showTeamPanel, adminUsers, adminUserId]);
+
+  useEffect(() => {
+    if (!runStart) return;
     const id = setInterval(() => setTick((t) => t + 1), 1000);
     return () => clearInterval(id);
-  }, [runningSince]);
+  }, [runStart]);
 
-  const elapsedSec = useMemo(() => {
+  const elapsedMsLive = useMemo(() => {
     void tick;
-    return runningSince ? Math.floor((Date.now() - runningSince) / 1000) : 0;
-  }, [runningSince, tick]);
+    return accumulatedMs + (runStart != null ? Date.now() - runStart : 0);
+  }, [accumulatedMs, runStart, tick]);
+
+  const elapsedSec = useMemo(() => Math.max(0, Math.floor(elapsedMsLive / 1000)), [elapsedMsLive]);
+
+  const hasActiveSession = activeSessionId != null;
 
   const filterSessions = useCallback(
     (list: any[]) => {
@@ -320,14 +708,14 @@ export default function FocusScreen() {
       if (timeFilter === 'week') {
         const start = startOfWeekMonday(now);
         out = out.filter((s) => {
-          const st = sessionStart(s);
+          const st = effectiveSessionStart(s);
           return st && st >= start;
         });
       } else if (timeFilter === 'month') {
         const start = new Date(now.getFullYear(), now.getMonth(), 1);
         start.setHours(0, 0, 0, 0);
         out = out.filter((s) => {
-          const st = sessionStart(s);
+          const st = effectiveSessionStart(s);
           return st && st >= start;
         });
       }
@@ -339,8 +727,8 @@ export default function FocusScreen() {
         out = out.filter((s) => sessionKind(s) === 'planned');
       }
       return out.sort((a, b) => {
-        const ta = sessionStart(a)?.getTime() ?? 0;
-        const tb = sessionStart(b)?.getTime() ?? 0;
+        const ta = effectiveSessionStart(a)?.getTime() ?? 0;
+        const tb = effectiveSessionStart(b)?.getTime() ?? 0;
         return tb - ta;
       });
     },
@@ -372,41 +760,29 @@ export default function FocusScreen() {
   const timeLabel = timeOptions.find((o) => o.id === timeFilter)?.label ?? 'This Week';
   const typeLabel = typeOptions.find((o) => o.id === typeFilter)?.label ?? 'All Sessions';
 
-  const adminUserOptions: PickerOption[] = useMemo(() => {
-    return [{ id: 'self', label: 'My Sessions' }, ...adminUsers.map((u) => ({ id: u.id, label: u.label }))];
-  }, [adminUsers]);
+  const adminUserOptions: PickerOption[] = useMemo(
+    () => adminUsers.map((u) => ({ id: u.id, label: u.label })),
+    [adminUsers]
+  );
 
-  const adminUserLabel =
-    adminUserId === 'self' ? 'My Sessions' : adminUsers.find((u) => u.id === adminUserId)?.label ?? 'Select user';
+  const adminUserLabel = adminUsers.find((u) => u.id === adminUserId)?.label ?? 'Select a team member';
 
   const endRunningSession = async () => {
-    if (!runningSince) return;
+    if (!activeSessionId) return;
+    const endMs = accumulatedMs + (runStart != null ? Date.now() - runStart : 0);
+    const elapsedSeconds = Math.max(0, Math.floor(endMs / 1000));
     const endIso = new Date().toISOString();
-    const startIso = new Date(runningSince).toISOString();
-    const minutes = Math.max(1, Math.floor(elapsedSec / 60));
+    const minutes = Math.max(1, Math.floor(elapsedSeconds / 60));
     setSaving(true);
     try {
-      if (activeSessionId) {
-        await api.updateFocusSession(activeSessionId, {
-          end_time: endIso,
-          actual_duration: minutes,
-          status: 'completed',
-          distractions: 0,
-        });
-      } else {
-        await api.createFocusSession({
-          title: 'Productive session',
-          start_time: startIso,
-          end_time: endIso,
-          planned_duration: minutes,
-          actual_duration: minutes,
-          status: 'completed',
-          distractions: 0,
-          notes: '',
-        });
-      }
-      setRunningSince(null);
-      setActiveSessionId(null);
+      await api.updateFocusSession(activeSessionId, {
+        end_time: endIso,
+        actual_duration: minutes,
+        status: 'completed',
+        distractions: interruptions,
+        notes: sessionNotes.trim() || '',
+      });
+      resetLocalSession();
       await loadMySessions();
       Alert.alert('Session saved', 'Your focus session was recorded.');
     } catch (e: any) {
@@ -416,8 +792,41 @@ export default function FocusScreen() {
     }
   };
 
+  const pauseSession = async () => {
+    if (!activeSessionId || runStart == null) return;
+    const now = Date.now();
+    setAccumulatedMs((a) => a + (now - runStart));
+    setRunStart(null);
+    try {
+      await api.updateFocusSession(activeSessionId, { status: 'paused' });
+    } catch {
+      /* optional field */
+    }
+  };
+
+  const resumeSession = async () => {
+    if (!activeSessionId || runStart != null) return;
+    setRunStart(Date.now());
+    try {
+      await api.updateFocusSession(activeSessionId, { status: 'in_progress' });
+    } catch {
+      /* optional field */
+    }
+  };
+
+  const addInterruption = async () => {
+    if (!activeSessionId) return;
+    const next = interruptions + 1;
+    setInterruptions(next);
+    try {
+      await api.updateFocusSession(activeSessionId, { distractions: next });
+    } catch {
+      /* keep local count */
+    }
+  };
+
   const beginProductiveSession = async () => {
-    if (runningSince) {
+    if (hasActiveSession) {
       if (Platform.OS === 'web' && typeof (globalThis as any).confirm === 'function') {
         if ((globalThis as any).confirm('End current session and save?')) void endRunningSession();
         return;
@@ -429,8 +838,8 @@ export default function FocusScreen() {
       return;
     }
     setSaving(true);
-    const startIso = new Date().toISOString();
     try {
+      const startIso = new Date().toISOString();
       const created = await api.createFocusSession({
         title: 'Productive session',
         start_time: startIso,
@@ -441,19 +850,23 @@ export default function FocusScreen() {
         notes: '',
       });
       const sid = sessionId(created);
-      setActiveSessionId(sid || null);
-      setRunningSince(Date.now());
+      if (!sid) throw new Error('No session id returned');
+      setActiveSessionId(sid);
+      setAccumulatedMs(0);
+      setRunStart(effectiveSessionStart(created)?.getTime() ?? Date.now());
+      setInterruptions(0);
+      setSessionNotes('');
+      await loadMySessions();
     } catch (e2: any) {
       Alert.alert('Error', e2?.message || 'Could not start session');
-      setRunningSince(null);
-      setActiveSessionId(null);
+      resetLocalSession();
     } finally {
       setSaving(false);
     }
   };
 
   const openTaskModal = async () => {
-    if (runningSince) {
+    if (hasActiveSession) {
       Alert.alert('Session active', 'End your current session before starting one on a task.');
       return;
     }
@@ -477,10 +890,9 @@ export default function FocusScreen() {
     setTaskModal(false);
     setSelectedTask(null);
     setSaving(true);
-    const startIso = new Date().toISOString();
     const body: Record<string, any> = {
       title: `Focus: ${title}`,
-      start_time: startIso,
+      start_time: new Date().toISOString(),
       end_time: null,
       planned_duration: 25,
       status: 'in_progress',
@@ -490,10 +902,17 @@ export default function FocusScreen() {
     if (eid != null) body.task_id = String(eid);
     try {
       const created = await api.createFocusSession(body);
-      setActiveSessionId(sessionId(created) || null);
-      setRunningSince(Date.now());
+      const sid = sessionId(created);
+      if (!sid) throw new Error('No session id returned');
+      setActiveSessionId(sid);
+      setAccumulatedMs(0);
+      setRunStart(effectiveSessionStart(created)?.getTime() ?? Date.now());
+      setInterruptions(0);
+      setSessionNotes('');
+      await loadMySessions();
     } catch (e2: any) {
       Alert.alert('Error', e2?.message || 'Could not start task session');
+      resetLocalSession();
     } finally {
       setSaving(false);
     }
@@ -546,7 +965,7 @@ export default function FocusScreen() {
   };
 
   const openPlanModal = () => {
-    if (runningSince) {
+    if (hasActiveSession) {
       Alert.alert('Session active', 'End your current session before planning another.');
       return;
     }
@@ -615,32 +1034,77 @@ export default function FocusScreen() {
         {/* Focus Timer */}
         <View style={styles.card}>
           <View style={styles.timerHeaderWrap}>
-            <CardHeaderGradient colors={GRAD_TIMER} />
+            <View style={styles.timerHeaderSolid} />
             <View style={styles.timerHeaderInner}>
               <MaterialCommunityIcons name="timer-outline" size={26} color="#fff" />
               <View style={styles.timerHeaderTextCol}>
                 <Text style={styles.timerHeaderTitle}>Focus Timer</Text>
-                <Text style={styles.timerHeaderSub}>Begin a focus session to track your efficiency</Text>
+                <Text style={styles.timerHeaderSub}>
+                  {hasActiveSession
+                    ? 'Session in progress—pause, resume, or stop when you are done'
+                    : 'Begin a focus session to track your efficiency'}
+                </Text>
               </View>
             </View>
           </View>
           <View style={styles.timerBody}>
-            <Text style={[styles.timerDigits, { color: TIMER_ACCENT }]}>{formatTimer(elapsedSec)}</Text>
-            <View style={styles.timerBtnRow}>
-              <View style={styles.timerBtnWrap}>
-                {runningSince ? (
+            <Text style={[styles.timerDigits, { color: FOCUS_PURPLE }]}>{formatTimer(elapsedSec)}</Text>
+            <View style={styles.timerStatusDotRow}>
+              <View
+                style={[
+                  styles.timerLiveDot,
+                  hasActiveSession && runStart != null && styles.timerLiveDotOn,
+                  hasActiveSession && runStart == null && styles.timerLiveDotPaused,
+                ]}
+              />
+            </View>
+
+            {hasActiveSession ? (
+              <>
+                <View style={styles.interruptRow}>
+                  <View style={styles.interruptBadge}>
+                    <Text style={styles.interruptBadgeText}>Interruptions: {interruptions}</Text>
+                  </View>
+                  <TouchableOpacity style={styles.interruptAddBtn} onPress={() => void addInterruption()} activeOpacity={0.85}>
+                    <Text style={styles.interruptAddBtnText}>+1 Interruption</Text>
+                  </TouchableOpacity>
+                </View>
+                <View style={styles.sessionControlRow}>
+                  {runStart != null ? (
+                    <TouchableOpacity
+                      style={[styles.ctrlBtn, styles.ctrlPause]}
+                      onPress={() => void pauseSession()}
+                      disabled={saving}
+                      activeOpacity={0.9}
+                    >
+                      <MaterialCommunityIcons name="pause" size={20} color="#fff" />
+                      <Text style={styles.ctrlBtnTextLight}>Pause</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity
+                      style={[styles.ctrlBtn, styles.ctrlResume]}
+                      onPress={() => void resumeSession()}
+                      disabled={saving}
+                      activeOpacity={0.9}
+                    >
+                      <MaterialCommunityIcons name="play" size={20} color="#fff" />
+                      <Text style={styles.ctrlBtnTextLight}>Resume</Text>
+                    </TouchableOpacity>
+                  )}
                   <TouchableOpacity
-                    style={[styles.timerActionBtn, styles.btnTimerPrimary, saving && styles.btnDisabled]}
+                    style={[styles.ctrlBtn, styles.ctrlStop]}
                     onPress={() => void endRunningSession()}
                     disabled={saving}
                     activeOpacity={0.9}
                   >
-                    <MaterialCommunityIcons name="stop" size={18} color="#fff" />
-                    <Text style={styles.timerActionBtnLabelLight} numberOfLines={2}>
-                      End & save
-                    </Text>
+                    <MaterialCommunityIcons name="stop" size={20} color="#fff" />
+                    <Text style={styles.ctrlBtnTextLight}>Stop Session</Text>
                   </TouchableOpacity>
-                ) : (
+                </View>
+              </>
+            ) : (
+              <View style={styles.timerBtnRow}>
+                <View style={styles.timerBtnWrap}>
                   <TouchableOpacity
                     style={[styles.timerActionBtn, styles.btnTimerPrimary, saving && styles.btnDisabled]}
                     onPress={() => void beginProductiveSession()}
@@ -652,31 +1116,46 @@ export default function FocusScreen() {
                       Begin Productive Session
                     </Text>
                   </TouchableOpacity>
-                )}
+                </View>
+                <View style={styles.timerBtnWrap}>
+                  <TouchableOpacity
+                    style={[styles.timerActionBtn, styles.btnOutlineTimer]}
+                    onPress={() => void openTaskModal()}
+                    activeOpacity={0.85}
+                  >
+                    <MaterialCommunityIcons name="target" size={18} color={FOCUS_PURPLE} />
+                    <Text style={styles.timerActionBtnLabelTimer}>Focus on Task</Text>
+                  </TouchableOpacity>
+                </View>
+                <View style={styles.timerBtnWrap}>
+                  <TouchableOpacity
+                    style={[styles.timerActionBtn, styles.btnOutlineGreen]}
+                    onPress={openPlanModal}
+                    activeOpacity={0.85}
+                  >
+                    <MaterialCommunityIcons name="calendar-clock" size={18} color={GREEN} />
+                    <Text style={styles.timerActionBtnLabelGreen}>Plan Session</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
-              <View style={styles.timerBtnWrap}>
-                <TouchableOpacity
-                  style={[styles.timerActionBtn, styles.btnOutlineTimer]}
-                  onPress={() => void openTaskModal()}
-                  activeOpacity={0.85}
-                >
-                  <MaterialCommunityIcons name="target" size={18} color={TIMER_ACCENT} />
-                  <Text style={styles.timerActionBtnLabelTimer}>Focus on Task</Text>
-                </TouchableOpacity>
-              </View>
-              <View style={styles.timerBtnWrap}>
-                <TouchableOpacity
-                  style={[styles.timerActionBtn, styles.btnOutlineGreen]}
-                  onPress={openPlanModal}
-                  activeOpacity={0.85}
-                >
-                  <MaterialCommunityIcons name="calendar-clock" size={18} color={GREEN} />
-                  <Text style={styles.timerActionBtnLabelGreen}>Plan Session</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
+            )}
           </View>
         </View>
+
+        {hasActiveSession ? (
+          <View style={styles.notesSection}>
+            <Text style={styles.notesSectionLabel}>Session Notes</Text>
+            <TextInput
+              style={styles.notesSectionInput}
+              placeholder="What did you work on? Any insights or challenges?"
+              placeholderTextColor="#94a3b8"
+              value={sessionNotes}
+              onChangeText={setSessionNotes}
+              multiline
+              textAlignVertical="top"
+            />
+          </View>
+        ) : null}
 
         {/* Focus Sessions (mine) */}
         <View style={styles.card}>
@@ -703,21 +1182,44 @@ export default function FocusScreen() {
                 </Text>
               </View>
             ) : (
-              filteredMySessions.map((s, i) => (
-                <View key={sessionId(s) || `my-${i}`} style={styles.sessionRow}>
-                  <View style={styles.sessionRowMain}>
-                    <Text style={styles.sessionTitle}>{s.title || 'Focus session'}</Text>
-                    <Text style={styles.sessionMeta}>{formatSessionWhen(s)}</Text>
-                    <Text style={[styles.sessionBadge, { color: SESSIONS_PINK }]}>{inferStatus(s)}</Text>
+              filteredMySessions.map((s, i) => {
+                const badges = sessionDateTimeBadges(s);
+                return (
+                  <View key={sessionId(s) || `my-${i}`} style={styles.sessionRow}>
+                    <View style={styles.sessionCardInner}>
+                      <View style={styles.sessionCardLeft}>
+                        <Text style={styles.sessionTitle}>{s.title || 'Focus session'}</Text>
+                        <View style={styles.sessionBadgesRow}>
+                          <View style={styles.sessionPill}>
+                            <Text style={styles.sessionPillText}>{badges.date}</Text>
+                          </View>
+                          {badges.time ? (
+                            <View style={styles.sessionPill}>
+                              <Text style={styles.sessionPillText}>{badges.time}</Text>
+                            </View>
+                          ) : null}
+                        </View>
+                      </View>
+                      <View style={styles.sessionCardRight}>
+                        <View style={styles.sessionStatBlock}>
+                          <Text style={styles.sessionStatLabel}>Duration</Text>
+                          <Text style={styles.sessionStatValDuration}>{sessionDurationLabel(s)}</Text>
+                        </View>
+                        <View style={styles.sessionStatBlock}>
+                          <Text style={styles.sessionStatLabel}>Interruptions</Text>
+                          <Text style={styles.sessionStatValInterruptions}>{sessionDistractionCount(s)}</Text>
+                        </View>
+                      </View>
+                    </View>
                   </View>
-                </View>
-              ))
+                );
+              })
             )}
           </View>
         </View>
 
         {/* Admin: view other users */}
-        {showAdmin ? (
+        {showTeamPanel ? (
           <View style={styles.card}>
             <View style={styles.adminHeaderWrap}>
               <CardHeaderGradient colors={GRAD_ADMIN} />
@@ -728,7 +1230,7 @@ export default function FocusScreen() {
                   <Text style={styles.timerHeaderSub}>Review focus history for the selected team member</Text>
                 </View>
                 <View style={styles.adminRoleBadge}>
-                  <Text style={styles.adminRoleBadgeText}>Admin: {role ?? '—'}</Text>
+                  <Text style={styles.adminRoleBadgeText}>{getRoleDisplayLabel(role)}</Text>
                 </View>
               </View>
             </View>
@@ -747,15 +1249,43 @@ export default function FocusScreen() {
               </View>
               {filteredAdminSessions.length === 0 ? (
                 <View style={styles.emptyBlockSmall}>
-                  <Text style={styles.emptySub}>No sessions for this user with the current filters.</Text>
+                  <Text style={styles.emptySub}>
+                    No sessions for this team member. Sessions are filtered to the selected user only.
+                  </Text>
                 </View>
               ) : (
-                filteredAdminSessions.slice(0, 50).map((s, i) => (
-                  <View key={sessionId(s) ? `adm-${sessionId(s)}` : `adm-i-${i}`} style={styles.sessionRow}>
-                    <Text style={styles.sessionTitle}>{s.title || 'Focus session'}</Text>
-                    <Text style={styles.sessionMeta}>{formatSessionWhen(s)}</Text>
-                  </View>
-                ))
+                filteredAdminSessions.slice(0, 50).map((s, i) => {
+                  const badges = sessionDateTimeBadges(s);
+                  return (
+                    <View key={sessionId(s) ? `adm-${sessionId(s)}` : `adm-i-${i}`} style={styles.sessionRow}>
+                      <View style={styles.sessionCardInner}>
+                        <View style={styles.sessionCardLeft}>
+                          <Text style={styles.sessionTitle}>{s.title || 'Focus session'}</Text>
+                          <View style={styles.sessionBadgesRow}>
+                            <View style={styles.sessionPill}>
+                              <Text style={styles.sessionPillText}>{badges.date}</Text>
+                            </View>
+                            {badges.time ? (
+                              <View style={styles.sessionPill}>
+                                <Text style={styles.sessionPillText}>{badges.time}</Text>
+                              </View>
+                            ) : null}
+                          </View>
+                        </View>
+                        <View style={styles.sessionCardRight}>
+                          <View style={styles.sessionStatBlock}>
+                            <Text style={styles.sessionStatLabel}>Duration</Text>
+                            <Text style={styles.sessionStatValDuration}>{sessionDurationLabel(s)}</Text>
+                          </View>
+                          <View style={styles.sessionStatBlock}>
+                            <Text style={styles.sessionStatLabel}>Interruptions</Text>
+                            <Text style={styles.sessionStatValInterruptions}>{sessionDistractionCount(s)}</Text>
+                          </View>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                })
               )}
             </View>
           </View>
@@ -964,13 +1494,22 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: '#e2e8f0',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 10,
-    elevation: 3,
+    ...Platform.select({
+      web: { boxShadow: '0 6px 16px rgba(15, 23, 42, 0.08)' },
+      default: {
+        elevation: 3,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.06,
+        shadowRadius: 10,
+      },
+    }),
   },
   timerHeaderWrap: { position: 'relative', minHeight: 76 },
+  timerHeaderSolid: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: FOCUS_PURPLE,
+  },
   sessionsHeaderWrap: { position: 'relative', minHeight: 76 },
   timerHeaderInner: {
     flexDirection: 'row',
@@ -984,7 +1523,87 @@ const styles = StyleSheet.create({
   timerHeaderSub: { fontSize: 13, color: 'rgba(255,255,255,0.9)', marginTop: 4 },
 
   timerBody: { padding: 24, alignItems: 'center' },
-  timerDigits: { fontSize: 56, fontWeight: '800', color: PURPLE, marginBottom: 20 },
+  timerDigits: { fontSize: 56, fontWeight: '800', color: FOCUS_PURPLE, marginBottom: 8 },
+  timerStatusDotRow: { alignItems: 'center', marginBottom: 20 },
+  timerLiveDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#cbd5e1',
+  },
+  timerLiveDotOn: { backgroundColor: GREEN },
+  timerLiveDotPaused: { backgroundColor: '#f59e0b' },
+  interruptRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    width: '100%',
+    maxWidth: 560,
+    marginBottom: 14,
+  },
+  interruptBadge: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    backgroundColor: PEACH_BG,
+    borderWidth: 1,
+    borderColor: PEACH_BORDER,
+  },
+  interruptBadgeText: { fontSize: 14, fontWeight: '600', color: PEACH_TEXT },
+  interruptAddBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    backgroundColor: '#fff7ed',
+    borderWidth: 1,
+    borderColor: PEACH_BORDER,
+  },
+  interruptAddBtnText: { fontSize: 14, fontWeight: '600', color: PEACH_TEXT },
+  sessionControlRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    alignItems: 'stretch',
+    gap: 10,
+    width: '100%',
+    maxWidth: 560,
+  },
+  ctrlBtn: {
+    flex: 1,
+    minWidth: 140,
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 4,
+    borderRadius: 10,
+    gap: 8,
+  },
+  ctrlPause: { backgroundColor: '#64748b' },
+  ctrlResume: { backgroundColor: GREEN },
+  ctrlStop: { backgroundColor: STOP_ROSE },
+  ctrlBtnTextLight: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  notesSection: {
+    width: '100%',
+    maxWidth: 560,
+    alignSelf: 'center',
+    marginBottom: 16,
+    paddingHorizontal: 4,
+  },
+  notesSectionLabel: { fontSize: 15, fontWeight: '700', color: '#334155', marginBottom: 8 },
+  notesSectionInput: {
+    minHeight: 120,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 10,
+    padding: 14,
+    fontSize: 16,
+    color: '#0f172a',
+    backgroundColor: '#fff',
+  },
   timerBtnCol: { width: '100%', gap: 12, maxWidth: 400 },
   timerBtnRow: {
     flexDirection: 'row',
@@ -1007,11 +1626,11 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     gap: 6,
   },
-  btnTimerPrimary: { backgroundColor: TIMER_ACCENT },
+  btnTimerPrimary: { backgroundColor: FOCUS_PURPLE },
   btnOutlineTimer: {
     backgroundColor: '#fff',
     borderWidth: 1,
-    borderColor: TIMER_ACCENT,
+    borderColor: FOCUS_PURPLE,
   },
   btnOutlineGreen: {
     backgroundColor: '#fff',
@@ -1026,7 +1645,7 @@ const styles = StyleSheet.create({
     flexShrink: 1,
   },
   timerActionBtnLabelTimer: {
-    color: TIMER_ACCENT,
+    color: FOCUS_PURPLE,
     fontSize: 12,
     fontWeight: '600',
     textAlign: 'center',
@@ -1091,9 +1710,29 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#f1f5f9',
   },
+  sessionCardInner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  sessionCardLeft: { flex: 1, minWidth: 0 },
+  sessionCardRight: { flexDirection: 'row', alignItems: 'flex-start', gap: 16 },
   sessionRowMain: { gap: 4 },
   sessionTitle: { fontSize: 16, fontWeight: '600', color: '#0f172a' },
   sessionMeta: { fontSize: 13, color: '#64748b' },
+  sessionBadgesRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
+  sessionPill: {
+    backgroundColor: '#f1f5f9',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  sessionPillText: { fontSize: 12, fontWeight: '600', color: '#475569' },
+  sessionStatBlock: { alignItems: 'flex-end', minWidth: 80 },
+  sessionStatLabel: { fontSize: 11, fontWeight: '600', color: '#94a3b8', marginBottom: 2 },
+  sessionStatValDuration: { fontSize: 15, fontWeight: '700', color: '#2563eb' },
+  sessionStatValInterruptions: { fontSize: 15, fontWeight: '700', color: '#ea580c' },
   sessionBadge: { fontSize: 12, color: SESSIONS_PINK, fontWeight: '600', marginTop: 4, textTransform: 'capitalize' },
 
   adminHeaderWrap: { position: 'relative', minHeight: 88 },

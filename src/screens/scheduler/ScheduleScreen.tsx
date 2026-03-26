@@ -47,6 +47,11 @@ type SavedWeekTemplate = {
   companyId: string;
   orgName: string;
   companyName: string;
+  /**
+   * Optional hyperlinked endpoint returned by the backend (DRF often returns `url`).
+   * Used to delete a template without trying many fallback routes.
+   */
+  deleteEndpoint?: string;
   weekStartISO: string;
   weekEndISO: string;
   weekLabel: string;
@@ -124,6 +129,200 @@ function isStandardMondaySundayWeek(start: Date, end: Date): boolean {
 function formatWeekToolbar(start: Date, end: Date): string {
   const o: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
   return `${start.toLocaleDateString(undefined, o)} – ${end.toLocaleDateString(undefined, o)}`;
+}
+
+/** Map `/scheduler/schedule-templates/` rows into local card model (field names vary by backend). */
+function resolveCompanyIdFromRow(row: any, fallback: string): string {
+  const c = row?.company_id ?? row?.company;
+  if (c != null && typeof c === 'object' && (c as any).id != null) return String((c as any).id).trim();
+  if (c != null && c !== '') return String(c).trim();
+  return String(fallback || '').trim();
+}
+
+/** True for `.../scheduler/<collection>/<pk>/` (detail), not bare list URLs. */
+function isSchedulerResourceDetailUrl(u: string): boolean {
+  const pathOnly = u.trim().split('?')[0].split('#')[0].replace(/\/+$/, '');
+  const parts = pathOnly.split('/').filter(Boolean);
+  const si = parts.indexOf('scheduler');
+  if (si < 0) return false;
+  return parts.length - (si + 1) >= 2;
+}
+
+function mapScheduleTemplateApiToSaved(
+  row: any,
+  orgName: string,
+  companyName: string,
+  companyIdFallback: string
+): SavedWeekTemplate | null {
+  const id = String(row?.id ?? row?.pk ?? row?.uuid ?? '').trim();
+  if (!id) return null;
+  const companyId = resolveCompanyIdFromRow(row, companyIdFallback);
+  if (!companyId) return null;
+
+  const deleteEndpointCandidate: any =
+    row?.delete_url ??
+    row?.destroy_url ??
+    row?.remove_url ??
+    row?.deletion_url ??
+    row?.detail_url ??
+    row?.self ??
+    row?.url;
+  // Prefer the serializer’s detail URL for DELETE (path PK may differ from row.id, e.g. int vs uuid).
+  const deleteEndpoint =
+    typeof deleteEndpointCandidate === 'string' &&
+    deleteEndpointCandidate.includes('/scheduler/') &&
+    (deleteEndpointCandidate.includes(id) ||
+      deleteEndpointCandidate.endsWith(`${id}/`) ||
+      deleteEndpointCandidate.endsWith(id) ||
+      isSchedulerResourceDetailUrl(deleteEndpointCandidate))
+      ? deleteEndpointCandidate
+      : undefined;
+
+  let shiftsRaw =
+    row.shifts ??
+    row.shift_data ??
+    row.shifts_data ??
+    row.template_shifts ??
+    row.shift_templates ??
+    row.shift_ids ??
+    row.data;
+  if (typeof shiftsRaw === 'string') {
+    try {
+      shiftsRaw = JSON.parse(shiftsRaw);
+    } catch {
+      shiftsRaw = [];
+    }
+  }
+  if (!Array.isArray(shiftsRaw)) shiftsRaw = [];
+
+  let wsRaw =
+    row.week_start ??
+    row.week_start_date ??
+    row.start_date ??
+    row.weekStart ??
+    row.range_start ??
+    row.template_week_start;
+  let weRaw =
+    row.week_end ??
+    row.week_end_date ??
+    row.end_date ??
+    row.weekEnd ??
+    row.range_end ??
+    row.template_week_end;
+
+  /** Infer week bounds from embedded shifts when the API omits week_* fields. */
+  if (!wsRaw && shiftsRaw.length > 0) {
+    const starts = shiftsRaw
+      .map((s: any) => (s?.start_time ? new Date(s.start_time) : null))
+      .filter((d: Date | null): d is Date => !!d && !Number.isNaN(d.getTime()));
+    if (starts.length > 0) {
+      starts.sort((a: Date, b: Date) => a.getTime() - b.getTime());
+      const first = starts[0];
+      const mon = startOfWeekMonday(startOfDayLocal(first));
+      wsRaw = mon.toISOString();
+      if (!weRaw) {
+        weRaw = endOfDayLocal(addDays(mon, 6)).toISOString();
+      }
+    }
+  }
+
+  /** List endpoints sometimes omit week_*; anchor from created_at so the card still appears. */
+  if (!wsRaw) {
+    const ca = row.created_at ?? row.updated_at ?? row.saved_at;
+    if (ca) {
+      const d = new Date(ca);
+      if (!Number.isNaN(d.getTime())) {
+        const mon = startOfWeekMonday(startOfDayLocal(d));
+        wsRaw = mon.toISOString();
+        if (!weRaw) weRaw = endOfDayLocal(addDays(mon, 6)).toISOString();
+      }
+    }
+  }
+
+  if (!wsRaw) return null;
+  const ws = new Date(wsRaw as string);
+  if (Number.isNaN(ws.getTime())) return null;
+
+  let we: Date;
+  if (!weRaw) {
+    we = endOfDayLocal(addDays(startOfDayLocal(ws), 6));
+  } else {
+    we = new Date(weRaw as string);
+    if (Number.isNaN(we.getTime())) return null;
+  }
+
+  const shifts = shiftsRaw.map((s: any) => {
+    if (typeof s === 'string' || typeof s === 'number') {
+      // Some APIs return `shift_ids` only. Keep placeholders so count/UI don't show 0.
+      return {
+        employee: '',
+        start_time: '',
+        end_time: undefined,
+        break_duration_minutes: 0,
+        notes: undefined,
+        shift_type: undefined,
+        hourly_rate: undefined,
+        status: undefined,
+      };
+    }
+    const emp =
+      s.employee_id ??
+      (typeof s.employee === 'object' && s.employee != null && (s.employee as any).id != null
+        ? (s.employee as any).id
+        : s.employee);
+    return {
+      employee: String(emp ?? ''),
+      start_time: String(s.start_time ?? ''),
+      end_time: s.end_time != null ? String(s.end_time) : undefined,
+      break_duration_minutes: Number(s.break_duration_minutes ?? s.break_minutes ?? 0),
+      notes: s.notes ? String(s.notes) : undefined,
+      shift_type: s.shift_type ? String(s.shift_type) : undefined,
+      hourly_rate: s.hourly_rate != null ? String(s.hourly_rate) : undefined,
+      status: s.status ? String(s.status) : undefined,
+    };
+  });
+
+  const savedAtRaw =
+    row.saved_at ?? row.created_at ?? row.updated_at ?? row.savedAt ?? new Date().toISOString();
+  const savedAtISO =
+    typeof savedAtRaw === 'string' ? savedAtRaw : new Date(savedAtRaw as Date | number).toISOString();
+
+  const st = String(row.status ?? '').toLowerCase();
+  const published = Boolean(row.published ?? row.is_published ?? st === 'published');
+
+  const shiftCount =
+    Number(
+      row.shift_count ??
+        row.shifts_count ??
+        row.template_shift_count ??
+        row.num_shifts ??
+        row.shift_set_count ??
+        shifts.length
+    ) || shifts.length;
+
+  const weekLabel =
+    typeof row.week_label === 'string' && row.week_label.trim()
+      ? row.week_label.replace(/ – /g, ' - ')
+      : typeof row.name === 'string' && row.name.trim()
+        ? row.name.replace(/ – /g, ' - ')
+        : typeof row.title === 'string' && row.title.trim()
+          ? row.title.replace(/ – /g, ' - ')
+          : formatWeekToolbar(startOfDayLocal(ws), startOfDayLocal(we)).replace(/ – /g, ' - ');
+
+  return {
+    id,
+    companyId,
+    orgName,
+    companyName,
+    deleteEndpoint,
+    weekStartISO: startOfDayLocal(ws).toISOString(),
+    weekEndISO: endOfDayLocal(we).toISOString(),
+    weekLabel,
+    shiftCount,
+    savedAtISO,
+    published,
+    shifts,
+  };
 }
 
 function employeeDisplayName(e: Employee): string {
@@ -303,6 +502,24 @@ function cellContentForDay(employee: Employee, day: Date, shifts: any[]): string
     .join('\n');
 }
 
+function normalizeShiftRowForUi(row: any): any {
+  if (!row || typeof row !== 'object') return row;
+  const employeeRaw =
+    row.employee_id ??
+    (typeof row.employee === 'object' && row.employee != null ? (row.employee as any).id : row.employee) ??
+    row.employee_pk;
+  const startRaw =
+    row.start_time ?? row.start ?? row.start_at ?? row.time_in ?? row.start_datetime ?? row.datetime_start;
+  const endRaw = row.end_time ?? row.end ?? row.end_at ?? row.time_out ?? row.end_datetime ?? row.datetime_end;
+  return {
+    ...row,
+    id: String(row.id ?? row.pk ?? row.uuid ?? '').trim(),
+    employee_id: String(employeeRaw ?? '').trim(),
+    start_time: startRaw != null ? String(startRaw) : '',
+    end_time: endRaw != null ? String(endRaw) : undefined,
+  };
+}
+
 function pad2(n: number): string {
   return String(n).padStart(2, '0');
 }
@@ -344,13 +561,29 @@ function parseDateInput(v: string): Date | null {
   return d;
 }
 
-const SHIFT_TYPE_OPTIONS = ['Morning (6am - 2pm)', 'Evening (2pm - 10pm)', 'Night (10pm - 6am)'];
+/** Labels match Add Shift UI: preset windows + Custom (user sets start/end manually). */
+const SHIFT_TYPE_OPTIONS = [
+  'Morning (6am - 2pm)',
+  'Afternoon (2pm - 10pm)',
+  'Night (10pm - 6am)',
+  'Day (9am - 5pm)',
+  'Custom',
+];
 
 const SHIFT_TYPE_DEFAULT_TIMES: Record<string, { start: string; end: string }> = {
   'Morning (6am - 2pm)': { start: '06:00', end: '14:00' },
+  'Afternoon (2pm - 10pm)': { start: '14:00', end: '22:00' },
+  /** Legacy label from older builds — same window as Afternoon */
   'Evening (2pm - 10pm)': { start: '14:00', end: '22:00' },
   'Night (10pm - 6am)': { start: '22:00', end: '06:00' },
+  'Day (9am - 5pm)': { start: '09:00', end: '17:00' },
 };
+
+function normalizeShiftTypeForUi(raw: string): string {
+  const s = String(raw || '').trim();
+  if (s === 'Evening (2pm - 10pm)') return 'Afternoon (2pm - 10pm)';
+  return s;
+}
 
 const TIME_PICKER_HOURS = Array.from({ length: 24 }, (_, i) => i);
 const TIME_PICKER_MINUTES = Array.from({ length: 60 }, (_, i) => i);
@@ -451,6 +684,7 @@ export default function ScheduleScreen() {
   const [shiftModalOpen, setShiftModalOpen] = useState(false);
   const [shiftSaving, setShiftSaving] = useState(false);
   const [publishWeekLoading, setPublishWeekLoading] = useState(false);
+  const [saveTemplateLoading, setSaveTemplateLoading] = useState(false);
   const [shiftEmployee, setShiftEmployee] = useState<Employee | null>(null);
   const [shiftDay, setShiftDay] = useState<Date | null>(null);
   const [shiftType, setShiftType] = useState('Morning (6am - 2pm)');
@@ -572,27 +806,11 @@ export default function ScheduleScreen() {
         }
       }
 
-      try {
-        shiftRaw = await api.getShifts({
-          company: cid,
-          start_date: rangeStart.toISOString(),
-          end_date: rangeEnd.toISOString(),
-        });
-      } catch {
-        shiftRaw = [];
-      }
-      if (!Array.isArray(shiftRaw) || shiftRaw.length === 0) {
-        try {
-          const byId = await api.getShifts({
-            company_id: cid,
-            start_date: rangeStart.toISOString(),
-            end_date: rangeEnd.toISOString(),
-          });
-          shiftRaw = Array.isArray(byId) ? byId : [];
-        } catch {
-          shiftRaw = [];
-        }
-      }
+      shiftRaw = await api.getShiftsForCompanyInRange({
+        companyId: cid,
+        rangeStart,
+        rangeEnd,
+      });
 
       const normalizedEmployees = (Array.isArray(empRaw) ? empRaw : [])
         .map((e: any) => ({
@@ -602,13 +820,38 @@ export default function ScheduleScreen() {
         .filter((e: any) => String(e.id || '').trim() !== '');
 
       setEmployees(normalizedEmployees);
-      setShifts(Array.isArray(shiftRaw) ? shiftRaw : []);
+      setShifts((Array.isArray(shiftRaw) ? shiftRaw : []).map((s: any) => normalizeShiftRowForUi(s)));
     } catch (e) {
       console.warn(e);
       setEmployees([]);
       setShifts([]);
     }
   }, [selectedCompanyId, rangeStart, rangeEnd]);
+
+  const loadScheduleTemplatesFromApi = useCallback(async () => {
+    if (!selectedCompanyId) {
+      setSavedTemplates([]);
+      return;
+    }
+    const cid = String(selectedCompanyId);
+    const orgName = selectedOrgName || 'Organization';
+    const companyName = selectedCompanyName || 'Company';
+    let rows: any[] = [];
+    try {
+      rows = await api.getScheduleTemplatesForCompany(cid, needsOrg ? selectedOrgId : null);
+    } catch (e) {
+      console.warn('getScheduleTemplatesForCompany', e);
+      rows = [];
+    }
+
+    const mapped: SavedWeekTemplate[] = [];
+    for (const row of rows) {
+      const m = mapScheduleTemplateApiToSaved(row, orgName, companyName, cid);
+      if (m) mapped.push(m);
+    }
+    mapped.sort((a, b) => new Date(b.savedAtISO).getTime() - new Date(a.savedAtISO).getTime());
+    setSavedTemplates(mapped);
+  }, [selectedCompanyId, selectedOrgName, selectedCompanyName, selectedOrgId, needsOrg]);
 
   const load = useCallback(async () => {
     if (!initialScheduleLoadDone.current) setLoading(true);
@@ -652,10 +895,14 @@ export default function ScheduleScreen() {
     loadEmployeesAndShifts();
   }, [loadEmployeesAndShifts]);
 
+  useEffect(() => {
+    void loadScheduleTemplatesFromApi();
+  }, [loadScheduleTemplatesFromApi]);
+
   const onRefresh = () => {
     setRefreshing(true);
     loadMeta()
-      .then(() => loadEmployeesAndShifts())
+      .then(() => Promise.all([loadEmployeesAndShifts(), loadScheduleTemplatesFromApi()]))
       .finally(() => setRefreshing(false));
   };
 
@@ -721,7 +968,7 @@ export default function ScheduleScreen() {
     setShiftEmployee(emp);
     setShiftDay(st);
     setEditingShiftId(String(shift?.id ?? shift?.pk ?? shift?.uuid ?? ''));
-    setShiftType(String(shift?.shift_type ?? 'Morning (6am - 2pm)'));
+    setShiftType(normalizeShiftTypeForUi(String(shift?.shift_type ?? 'Morning (6am - 2pm)')));
     setShiftStart(toTime24(st));
     setShiftEnd(toTime24(et));
     setShiftBreakMin(breakMin > 0 ? `${breakMin} minutes` : 'No break');
@@ -786,30 +1033,29 @@ export default function ScheduleScreen() {
       const statusVariants = Array.from(
         new Set([statusRaw, statusRaw.toLowerCase(), statusRaw.toUpperCase()].filter((x) => x))
       );
-      const payloadAttempts = statusVariants.map((s) => clean({ ...baseWrite, status: s }));
-      payloadAttempts.push(baseWrite);
+      const payloadAttempts = [
+        baseWrite,
+        ...statusVariants.map((s) => clean({ ...baseWrite, status: s })),
+      ];
 
       const runCreateWithFallbacks = async (day: Date) => {
         const dayRange = computeStartEndForDay(day, shiftStart, shiftEnd);
         if (!dayRange) return;
         const { startAt: st, endAt: et } = dayRange;
-        const writeBaseForDay = payloadAttempts.map((p) =>
-          clean({
-            ...p,
-            start_time: st.toISOString(),
-            end_time: et.toISOString(),
-          })
-        );
-        let lastErr: any = null;
-        for (const payload of writeBaseForDay) {
-          try {
-            await api.createShift(payload);
-            return;
-          } catch (e: any) {
-            lastErr = e;
-          }
-        }
-        throw lastErr || new Error('Failed to create shift');
+        const cid = String(selectedCompanyId);
+        const extras = clean({
+          ...(Number.isFinite(breakMin) && breakMin > 0 ? { break_duration_minutes: breakMin } : {}),
+          notes: shiftNotes.trim() || undefined,
+          shift_type: shiftType,
+          hourly_rate: shiftHourlyRate.trim() || undefined,
+        });
+        await api.createShiftWithFallbacks({
+          companyId: cid,
+          employeeId: String(shiftEmployee.id),
+          startTimeIso: st.toISOString(),
+          endTimeIso: et.toISOString(),
+          extras,
+        });
       };
 
       const runUpdateWithFallbacks = async () => {
@@ -888,44 +1134,64 @@ export default function ScheduleScreen() {
       return st >= rangeStart && st <= rangeEnd;
     });
   }, [shifts, rangeStart, rangeEnd]);
-  const activeWeekTemplate = useMemo(() => {
-    if (!selectedCompanyId) return null;
-    const key = String(selectedCompanyId);
-    const startISO = rangeStart.toISOString().slice(0, 10);
-    return (
-      savedTemplates.find((t) => t.companyId === key && t.weekStartISO.slice(0, 10) === startISO) || null
-    );
-  }, [savedTemplates, selectedCompanyId, rangeStart]);
 
-  const handleSaveTemplate = (opts?: { silent?: boolean }) => {
-    if (!selectedCompanyId) return;
-    const item: SavedWeekTemplate = {
-      id: activeWeekTemplate?.id || `${selectedCompanyId}:${rangeStart.toISOString()}`,
-      companyId: String(selectedCompanyId),
-      orgName: selectedOrgName || 'Organization',
-      companyName: selectedCompanyName || 'Company',
-      weekStartISO: rangeStart.toISOString(),
-      weekEndISO: rangeEnd.toISOString(),
-      weekLabel: formatWeekToolbar(rangeStart, rangeEnd).replace(' – ', ' - '),
-      shiftCount: currentWeekShifts.length,
-      savedAtISO: new Date().toISOString(),
-      published: activeWeekTemplate?.published || false,
-      shifts: currentWeekShifts.map((s) => ({
-        employee: String(s.employee_id ?? s.employee ?? ''),
-        start_time: String(s.start_time),
-        end_time: s.end_time ? String(s.end_time) : undefined,
-        break_duration_minutes: Number(s.break_duration_minutes ?? 0),
-        notes: s.notes ? String(s.notes) : undefined,
-        shift_type: s.shift_type ? String(s.shift_type) : undefined,
-        hourly_rate: s.hourly_rate != null ? String(s.hourly_rate) : undefined,
-        status: s.status ? String(s.status) : undefined,
-      })),
-    };
-    setSavedTemplates((prev) => {
-      const next = prev.filter((t) => t.id !== item.id);
-      return [item, ...next];
-    });
-    if (!opts?.silent) Alert.alert('Saved', 'Schedule template saved');
+  /** Remove shifts from the builder, refresh lists, move date range to the next period (Save / Publish). */
+  const removeWeekShiftsAndAdvance = async (
+    weekShiftsSnapshot: any[]
+  ): Promise<{ ok: true } | { ok: false; failures: number }> => {
+    const deleteFailures: string[] = [];
+    for (const s of weekShiftsSnapshot) {
+      const sid = String(s.id ?? s.pk ?? s.uuid ?? '').trim();
+      if (!sid) continue;
+      try {
+        await api.deleteShift(sid);
+      } catch {
+        deleteFailures.push(sid);
+      }
+    }
+    await loadScheduleTemplatesFromApi();
+    if (deleteFailures.length > 0) return { ok: false, failures: deleteFailures.length };
+    goNextWeek();
+    // `weekAnchor` change triggers the standard load effect; avoid duplicate fetches here.
+    return { ok: true };
+  };
+
+  const handleSaveTemplate = async () => {
+    if (!selectedCompanyId || saveTemplateLoading) return;
+    if (currentWeekShifts.length === 0) {
+      Alert.alert('Nothing to save', 'Add shifts to this week before saving as a template.');
+      return;
+    }
+
+    const cid = String(selectedCompanyId);
+    const weekShiftsSnapshot = currentWeekShifts;
+
+    setSaveTemplateLoading(true);
+    try {
+      await api.createScheduleTemplateWithFallbacks({
+        companyId: cid,
+        organizationId: needsOrg && selectedOrgId ? selectedOrgId : null,
+        rangeStart,
+        rangeEnd,
+        shifts: weekShiftsSnapshot,
+      });
+
+      const cleared = await removeWeekShiftsAndAdvance(weekShiftsSnapshot);
+      if (!cleared.ok) {
+        Alert.alert(
+          'Template saved',
+          `The template was saved, but ${cleared.failures} shift(s) could not be removed from the calendar. Clear them with Edit → Clear, then try again.`
+        );
+        return;
+      }
+      Alert.alert('Saved', 'Schedule saved as a template. The week is cleared — build the next week above.');
+    } catch (e: any) {
+      const body = e?.body ?? e?.response?.data ?? e?.errors;
+      const detail = body && typeof body === 'object' ? `\n${JSON.stringify(body).slice(0, 500)}` : '';
+      Alert.alert('Save failed', `${e?.message || 'Could not save schedule template.'}${detail}`);
+    } finally {
+      setSaveTemplateLoading(false);
+    }
   };
 
   const handlePublishTemplate = async () => {
@@ -934,8 +1200,8 @@ export default function ScheduleScreen() {
       Alert.alert('Nothing to publish', 'Add shifts to this week before publishing.');
       return;
     }
-    handleSaveTemplate({ silent: true });
 
+    const weekShiftsSnapshot = currentWeekShifts;
     const cid = String(selectedCompanyId);
     const rs = rangeStart.toISOString();
     const re = rangeEnd.toISOString();
@@ -1001,18 +1267,13 @@ export default function ScheduleScreen() {
       }
       if (lastErr) throw lastErr;
 
-      setSavedTemplates((prev) =>
-        prev.map((t) =>
-          t.companyId === cid && t.weekStartISO.slice(0, 10) === rsDate
-            ? { ...t, published: true }
-            : t
-        )
-      );
-      await loadEmployeesAndShifts();
+      // Publishing should keep shifts in place so employees dashboards (which read `/scheduler/shifts/`)
+      // can immediately reflect the published schedule. We only move the builder forward to the next week.
       Alert.alert(
         'Published',
-        'Schedule published. Employees will see these shifts on their dashboard and calendar.'
+        'Schedule published. Employees will see these shifts on their dashboard and calendar. The builder is moved to next week — add shifts there.'
       );
+      goNextWeek();
     } catch (e: any) {
       const body = e?.body ?? e?.response?.data ?? e?.errors;
       const detail = body && typeof body === 'object' ? `\n${JSON.stringify(body).slice(0, 500)}` : '';
@@ -1084,6 +1345,31 @@ export default function ScheduleScreen() {
     }
   };
 
+  const handleDeleteSavedTemplate = (template: SavedWeekTemplate) => {
+    const label = template.weekLabel || 'this schedule';
+    const run = async () => {
+      let err: any = null;
+      try {
+        await api.deleteScheduleTemplate(template.id, template.companyId, template.deleteEndpoint);
+      } catch (e: any) {
+        // still refresh — template may already be gone, but show error if we can.
+        err = e;
+      }
+      await loadScheduleTemplatesFromApi();
+      if (err) {
+        Alert.alert('Delete failed', err?.message || `Could not delete "${label}".`);
+      }
+    };
+    if (Platform.OS === 'web' && typeof (globalThis as any).confirm === 'function') {
+      if ((globalThis as any).confirm(`Delete saved template "${label}"?`)) void run();
+      return;
+    }
+    Alert.alert('Delete saved schedule', `Delete "${label}"? This removes the template from the server.`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => void run() },
+    ]);
+  };
+
   const handleCopyTemplateToCurrentWeek = async (template: SavedWeekTemplate) => {
     if (!selectedCompanyId) return;
     const src = new Date(template.weekStartISO);
@@ -1095,17 +1381,19 @@ export default function ScheduleScreen() {
         const st = new Date(s.start_time);
         const et = s.end_time ? new Date(s.end_time) : null;
         const shiftedStart = new Date(st.getTime() + deltaMs);
-        const shiftedEnd = et ? new Date(et.getTime() + deltaMs) : undefined;
-        await api.createShift({
-          company: selectedCompanyId,
-          employee: s.employee,
-          start_time: shiftedStart.toISOString(),
-          end_time: shiftedEnd ? shiftedEnd.toISOString() : undefined,
-          break_duration_minutes: s.break_duration_minutes ?? 0,
-          notes: s.notes,
-          shift_type: s.shift_type,
-          hourly_rate: s.hourly_rate,
-          status: s.status,
+        const shiftedEnd = et ? new Date(et.getTime() + deltaMs) : new Date(shiftedStart.getTime() + 8 * 60 * 60 * 1000);
+        const br = Number(s.break_duration_minutes ?? 0) || 0;
+        await api.createShiftWithFallbacks({
+          companyId: String(selectedCompanyId),
+          employeeId: String(s.employee),
+          startTimeIso: shiftedStart.toISOString(),
+          endTimeIso: shiftedEnd.toISOString(),
+          extras: {
+            ...(br > 0 ? { break_duration_minutes: br } : {}),
+            notes: s.notes,
+            shift_type: s.shift_type,
+            hourly_rate: s.hourly_rate != null ? String(s.hourly_rate) : undefined,
+          },
         });
       }
       await loadEmployeesAndShifts();
@@ -1207,13 +1495,17 @@ export default function ScheduleScreen() {
               </TouchableOpacity>
               {scheduleEditMode && (
                 <>
-                  <TouchableOpacity style={styles.actionPlain} onPress={() => void handleClearWeek()}>
-                    <MaterialCommunityIcons name="trash-can-outline" size={15} color="#ef4444" />
+                  <TouchableOpacity style={styles.actionDangerChip} onPress={() => void handleClearWeek()}>
+                    <MaterialCommunityIcons name="trash-can-outline" size={16} color="#ef4444" />
                     <Text style={styles.actionDangerText}>Clear</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={styles.actionSaveChip} onPress={() => handleSaveTemplate()}>
+                  <TouchableOpacity
+                    style={[styles.actionSaveChip, saveTemplateLoading && { opacity: 0.6 }]}
+                    onPress={() => void handleSaveTemplate()}
+                    disabled={saveTemplateLoading}
+                  >
                     <MaterialCommunityIcons name="check" size={15} color="#0f172a" />
-                    <Text style={styles.actionSaveChipText}>Save</Text>
+                    <Text style={styles.actionSaveChipText}>{saveTemplateLoading ? 'Saving…' : 'Save'}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.actionPublishChip, publishWeekLoading && { opacity: 0.6 }]}
@@ -1349,10 +1641,11 @@ export default function ScheduleScreen() {
         )}
       </View>
 
-      {selectedOrgId && selectedCompanyId ? (
+      {selectedCompanyId ? (
         <View style={styles.savedCard}>
           <Text style={styles.savedTitle}>
-            All Schedules — {selectedOrgName || 'Organization'} · {selectedCompanyName || 'Company'}
+            All Schedules
+            {selectedOrgName ? ` — ${selectedOrgName}` : ''} · {selectedCompanyName || 'Company'}
           </Text>
           <Text style={styles.savedSubtitle}>Saved schedules for {selectedCompanyName || 'this company'}.</Text>
           {savedTemplates.filter((t) => t.companyId === String(selectedCompanyId)).length === 0 ? (
@@ -1373,21 +1666,31 @@ export default function ScheduleScreen() {
                       Saved: {new Date(t.savedAtISO).toLocaleDateString()} · {t.shiftCount} shifts
                     </Text>
                     <View style={styles.savedItemActions}>
-                      <TouchableOpacity
-                        style={styles.savedEditBtn}
-                        onPress={() => {
-                          const ws = new Date(t.weekStartISO);
-                          const we = new Date(t.weekEndISO);
-                          ws.setHours(0, 0, 0, 0);
-                          we.setHours(0, 0, 0, 0);
-                          setWeekAnchor(ws);
-                          setCustomRangeEnd(isStandardMondaySundayWeek(ws, we) ? null : we);
-                          setScheduleEditMode(true);
-                        }}
-                      >
-                        <MaterialCommunityIcons name="pencil-outline" size={14} color="#fff" />
-                        <Text style={styles.savedEditBtnText}>Edit</Text>
-                      </TouchableOpacity>
+                      <View style={styles.savedEditDeleteRow}>
+                        <TouchableOpacity
+                          style={styles.savedEditBtn}
+                          onPress={() => {
+                            const ws = new Date(t.weekStartISO);
+                            const we = new Date(t.weekEndISO);
+                            ws.setHours(0, 0, 0, 0);
+                            we.setHours(0, 0, 0, 0);
+                            setWeekAnchor(ws);
+                            setCustomRangeEnd(isStandardMondaySundayWeek(ws, we) ? null : we);
+                            setScheduleEditMode(true);
+                          }}
+                        >
+                          <MaterialCommunityIcons name="pencil-outline" size={14} color="#fff" />
+                          <Text style={styles.savedEditBtnText}>Edit</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.savedDeleteBtn}
+                          onPress={() => void handleDeleteSavedTemplate(t)}
+                          accessibilityLabel="Delete saved schedule"
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                        >
+                          <MaterialCommunityIcons name="trash-can-outline" size={18} color="#475569" />
+                        </TouchableOpacity>
+                      </View>
                       <TouchableOpacity
                         style={styles.savedCopyBtn}
                         onPress={() => void handleCopyTemplateToCurrentWeek(t)}
@@ -1643,8 +1946,8 @@ export default function ScheduleScreen() {
       >
         <View style={styles.timePickerOverlay}>
           <Pressable style={styles.timePickerBackdrop} onPress={() => setTimePickerField(null)} />
-          <View style={styles.timePickerCenter} pointerEvents="box-none">
-            <View style={styles.timePickerSheet} pointerEvents="auto">
+          <View style={[styles.timePickerCenter, { pointerEvents: 'box-none' }]}>
+            <View style={[styles.timePickerSheet, { pointerEvents: 'auto' }]}>
               <Text style={styles.timePickerSheetTitle}>
                 {timePickerField === 'start' ? 'Start time' : 'End time'}
               </Text>
@@ -1890,6 +2193,18 @@ const styles = StyleSheet.create({
   actionChipPrimaryText: { fontSize: 13, fontWeight: '600', color: '#fff' },
   actionPlain: { paddingHorizontal: 8, paddingVertical: 6 },
   actionPlainText: { fontSize: 13, fontWeight: '500', color: '#475569' },
+  /** Same row layout as actionSaveChip / actionChip so icon + label stay aligned on web. */
+  actionDangerChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#fecaca',
+    backgroundColor: '#fff',
+  },
   actionDangerText: { fontSize: 13, fontWeight: '500', color: '#ef4444' },
   actionSaveChip: {
     flexDirection: 'row',
@@ -1985,7 +2300,9 @@ const styles = StyleSheet.create({
   savedItemMeta: { marginTop: 4, fontSize: 13, color: '#64748b' },
   savedItemMeta2: { marginTop: 4, fontSize: 12, color: '#94a3b8' },
   savedItemActions: { marginTop: 10, gap: 8 },
+  savedEditDeleteRow: { flexDirection: 'row', alignItems: 'stretch', gap: 8 },
   savedEditBtn: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1993,6 +2310,16 @@ const styles = StyleSheet.create({
     backgroundColor: '#3b5bdb',
     borderRadius: 8,
     paddingVertical: 8,
+    minHeight: 40,
+  },
+  savedDeleteBtn: {
+    width: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 8,
+    backgroundColor: '#fff',
   },
   savedEditBtnText: { color: '#fff', fontWeight: '600', fontSize: 13 },
   savedCopyBtn: {

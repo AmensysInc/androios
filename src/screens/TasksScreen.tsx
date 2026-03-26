@@ -253,8 +253,18 @@ function taskCreatedLine(t: any): string {
 
 function taskIsCompleted(t: any): boolean {
   if (t?.completed === true || t?.is_completed === true) return true;
-  const st = String(t?.status ?? '').toLowerCase();
-  return st === 'completed' || st === 'done';
+  if (t?.done === true || t?.is_done === true) return true;
+  if (t?.completed_at || t?.completed_on || t?.completed_date) return true;
+  const raw = t?.status ?? t?.task_status ?? t?.event_status ?? t?.state ?? '';
+  const st = String(raw).toLowerCase().replace(/[\s-]+/g, '_');
+  if (['completed', 'complete', 'done', 'closed', 'resolved'].includes(st)) return true;
+  if (st.endsWith('_completed')) return true;
+  return false;
+}
+
+/** Label for the status pill (matches common backend enums). */
+function taskStatusLabel(t: any): 'Completed' | 'Pending' {
+  return taskIsCompleted(t) ? 'Completed' : 'Pending';
 }
 
 function displayLocalFromStr(s: string): string {
@@ -819,31 +829,63 @@ export default function TasksScreen() {
       return;
     }
     const next = !taskIsCompleted(task);
+    // Optimistic UI so the row updates immediately.
+    setTasks((prev) =>
+      prev.map((t) => {
+        const tid = eventId(t);
+        if (!tid || String(tid) !== String(id)) return t;
+        return {
+          ...t,
+          completed: next,
+          is_completed: next,
+          done: next,
+          is_done: next,
+          status: next ? 'completed' : 'pending',
+          ...(next ? { completed_at: new Date().toISOString() } : { completed_at: null }),
+        };
+      })
+    );
     try {
+      let updatedTask: any = null;
       try {
-        await api.updateTaskCompleted(id, next);
-      } catch {
+        updatedTask = await api.updateTaskCompleted(id, next);
+      } catch (e: unknown) {
         const fallbacks = [
           { completed: next },
           { is_completed: next },
           { done: next },
           { is_done: next },
           { status: next ? 'completed' : 'pending' },
+          { status: next ? 'done' : 'pending' },
+          { status: next ? 'Complete' : 'Pending' },
         ];
+        let lastErr: unknown = e;
         let updated = false;
         for (const body of fallbacks) {
           try {
-            await api.updateCalendarEvent(id, body);
+            updatedTask = await api.updateCalendarEvent(id, body);
             updated = true;
             break;
-          } catch {
-            // try next body
+          } catch (ee: unknown) {
+            lastErr = ee;
           }
         }
-        if (!updated) throw new Error('Unable to update completion state');
+        if (!updated) throw lastErr;
+      }
+      // Merge the backend response when provided.
+      if (updatedTask && typeof updatedTask === 'object') {
+        setTasks((prev) =>
+          prev.map((t) => {
+            const tid = eventId(t);
+            if (!tid || String(tid) !== String(id)) return t;
+            return { ...t, ...updatedTask };
+          })
+        );
       }
       load();
     } catch (e: unknown) {
+      // Roll back by reloading from server.
+      load();
       Alert.alert('Error', formatTaskApiError(e));
     }
   };
@@ -1210,8 +1252,20 @@ export default function TasksScreen() {
                   </Text>
                   <Text style={styles.taskMeta}>{taskCreatedLine(item)}</Text>
                 </View>
-                <View style={[styles.priorityPill, { backgroundColor: pb.bg, borderColor: pb.border }]}>
-                  <Text style={[styles.priorityPillText, { color: pb.text }]}>{pr}</Text>
+                <View style={styles.cardBadgesRow}>
+                  <View style={[styles.priorityPill, { backgroundColor: pb.bg, borderColor: pb.border }]}>
+                    <Text style={[styles.priorityPillText, { color: pb.text }]}>{pr}</Text>
+                  </View>
+                  <View style={[styles.statusPill, itemDone ? styles.statusPillDone : styles.statusPillPending]}>
+                    <MaterialCommunityIcons
+                      name={itemDone ? 'check-circle' : 'clock-outline'}
+                      size={14}
+                      color={itemDone ? '#fff' : '#64748b'}
+                    />
+                    <Text style={itemDone ? styles.statusPillTextDone : styles.statusPillTextPending}>
+                      {taskStatusLabel(item)}
+                    </Text>
+                  </View>
                 </View>
                 <TouchableOpacity onPress={() => tid && toggleExpanded(tid)} hitSlop={8} style={styles.chevronHit}>
                   <MaterialCommunityIcons name={isOpen ? 'chevron-up' : 'chevron-down'} size={24} color="#64748b" />
@@ -1223,8 +1277,20 @@ export default function TasksScreen() {
                   <View style={styles.expandedHead}>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.expandedTitle}>{item.title || 'Task'}</Text>
-                      <View style={[styles.priorityPill, styles.priorityPillSm, { backgroundColor: pb.bg, borderColor: pb.border }]}>
-                        <Text style={[styles.priorityPillText, { color: pb.text }]}>{pr}</Text>
+                      <View style={styles.expandedMetaRow}>
+                        <View style={[styles.priorityPill, styles.priorityPillSm, { backgroundColor: pb.bg, borderColor: pb.border }]}>
+                          <Text style={[styles.priorityPillText, { color: pb.text }]}>{pr}</Text>
+                        </View>
+                        <View style={[styles.statusPill, styles.statusPillSm, itemDone ? styles.statusPillDone : styles.statusPillPending]}>
+                          <MaterialCommunityIcons
+                            name={itemDone ? 'check-circle' : 'clock-outline'}
+                            size={14}
+                            color={itemDone ? '#fff' : '#64748b'}
+                          />
+                          <Text style={itemDone ? styles.statusPillTextDone : styles.statusPillTextPending}>
+                            {taskStatusLabel(item)}
+                          </Text>
+                        </View>
                       </View>
                     </View>
                   </View>
@@ -1435,14 +1501,15 @@ export default function TasksScreen() {
             </ScrollView>
 
             {createPicker ? (
-              <View style={styles.createModalPickerLayer} pointerEvents="box-none">
+              <View style={[styles.createModalPickerLayer, { pointerEvents: 'box-none' }]}>
+
                 <Pressable style={StyleSheet.absoluteFill} onPress={() => setCreatePicker(null)} />
                 <View
                   style={[
                     styles.createModalPickerBox,
                     (createPicker === 'start' || createPicker === 'end') && styles.createModalPickerWide,
+                    { pointerEvents: 'auto' },
                   ]}
-                  pointerEvents="auto"
                 >
                   {createPicker === 'start' || createPicker === 'end' ? (
                     <>
@@ -1634,14 +1701,14 @@ export default function TasksScreen() {
             </ScrollView>
 
             {editPicker ? (
-              <View style={styles.createModalPickerLayer} pointerEvents="box-none">
+              <View style={[styles.createModalPickerLayer, { pointerEvents: 'box-none' }]}>
                 <Pressable style={StyleSheet.absoluteFill} onPress={() => setEditPicker(null)} />
                 <View
                   style={[
                     styles.createModalPickerBox,
                     (editPicker === 'start' || editPicker === 'end') && styles.createModalPickerWide,
+                    { pointerEvents: 'auto' },
                   ]}
-                  pointerEvents="auto"
                 >
                   {editPicker === 'start' || editPicker === 'end' ? (
                     <>
@@ -1778,9 +1845,9 @@ export default function TasksScreen() {
             </ScrollView>
 
             {assignUserPicker ? (
-              <View style={styles.createModalPickerLayer} pointerEvents="box-none">
+              <View style={[styles.createModalPickerLayer, { pointerEvents: 'box-none' }]}>
                 <Pressable style={StyleSheet.absoluteFill} onPress={() => setAssignUserPicker(false)} />
-                <View style={styles.createModalPickerBox} pointerEvents="auto">
+                <View style={[styles.createModalPickerBox, { pointerEvents: 'auto' }]}>
                   <Text style={styles.createModalPickerTitle}>Assign to User</Text>
                   <FlatList
                     data={assignMemberPickOptions}
@@ -1954,14 +2021,14 @@ export default function TasksScreen() {
             </ScrollView>
 
             {subPicker ? (
-              <View style={styles.createModalPickerLayer} pointerEvents="box-none">
+              <View style={[styles.createModalPickerLayer, { pointerEvents: 'box-none' }]}>
                 <Pressable style={StyleSheet.absoluteFill} onPress={() => setSubPicker(null)} />
                 <View
                   style={[
                     styles.createModalPickerBox,
                     (subPicker === 'start' || subPicker === 'end') && styles.createModalPickerWide,
+                    { pointerEvents: 'auto' },
                   ]}
-                  pointerEvents="auto"
                 >
                   {subPicker === 'start' || subPicker === 'end' ? (
                     <>
@@ -2179,6 +2246,42 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
+  },
+  cardBadgesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 6,
+    maxWidth: 200,
+    justifyContent: 'flex-end',
+  },
+  statusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+    alignSelf: 'flex-start',
+  },
+  statusPillSm: { marginTop: 0 },
+  statusPillDone: {
+    backgroundColor: '#16a34a',
+    borderColor: '#15803d',
+  },
+  statusPillPending: {
+    backgroundColor: '#f8fafc',
+    borderColor: '#e2e8f0',
+  },
+  statusPillTextDone: { fontSize: 12, fontWeight: '700', color: '#fff' },
+  statusPillTextPending: { fontSize: 12, fontWeight: '700', color: '#64748b' },
+  expandedMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
   },
   priorityPill: {
     paddingVertical: 4,
