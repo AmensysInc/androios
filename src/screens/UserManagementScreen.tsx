@@ -18,7 +18,7 @@ import {
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
-import { getPrimaryRoleFromUser, getRoleDisplayLabel } from '../types/auth';
+import { getPrimaryRoleFromUser, getRoleDisplayLabel, type UserRole } from '../types/auth';
 import * as api from '../api';
 
 const BLUE = '#2563eb';
@@ -30,19 +30,6 @@ function normalizeRoleToken(r: any): string {
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, '_');
-}
-
-function userIsAdminRole(roles: any[] | undefined): boolean {
-  if (!Array.isArray(roles)) return false;
-  const adminTokens = new Set([
-    'super_admin',
-    'admin',
-    'operations_manager',
-    'organization_manager',
-    'manager',
-    'company_manager',
-  ]);
-  return roles.some((x) => adminTokens.has(normalizeRoleToken(x)));
 }
 
 /** Matches web sidebar: User Management is only for `super_admin`. */
@@ -68,6 +55,21 @@ type RowUser = {
   raw: any;
 };
 
+/**
+ * Admins tab: elevated roles (same resolution as session / web sidebar).
+ * Uses full `raw` user so list APIs that omit `roles[]` but send `role` / `primary_role` still classify correctly.
+ * Users tab: employee, house_keeping, maintenance, user, and unknown.
+ */
+const ADMIN_TAB_PRIMARY_ROLES = new Set<UserRole>(['super_admin', 'admin', 'operations_manager', 'manager']);
+
+function rowBelongsToAdminsTab(r: RowUser): boolean {
+  const u = r.raw;
+  if (!u || typeof u !== 'object') return false;
+  if ((u as any).is_superuser === true) return true;
+  const primary = getPrimaryRoleFromUser(u);
+  return ADMIN_TAB_PRIMARY_ROLES.has(primary);
+}
+
 function initialsFromName(name: string, email: string): string {
   const n = (name || '').trim();
   if (n) {
@@ -91,6 +93,16 @@ function formatLastLogin(v: any): string {
   const d = new Date(v);
   if (Number.isNaN(d.getTime())) return 'Never logged in';
   return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
+}
+
+/** Auth user id linked to a scheduler employee row (`user` may be a nested object). */
+function employeeSchedulerUserId(e: any): string {
+  const raw = e?.user_id ?? e?.user;
+  if (raw == null || raw === '') return '';
+  if (typeof raw === 'object' && (raw as any).id != null) return String((raw as any).id).trim();
+  const s = String(raw).trim();
+  if (s === '[object Object]') return '';
+  return s;
 }
 
 function pickFirstNonEmpty(...values: any[]): string {
@@ -149,6 +161,43 @@ function sanitizeUsername(input: string, fallback: string): string {
   return out || fallback;
 }
 
+function roleAliasCandidates(desired: string): string[] {
+  switch (desired) {
+    case 'company_manager':
+      return ['company_manager', 'manager'];
+    case 'organization_manager':
+      return ['organization_manager', 'operations_manager'];
+    case 'super_admin':
+      return ['super_admin', 'admin'];
+    default:
+      return ['employee', 'user'];
+  }
+}
+
+/** Try common auth user PATCH shapes until one succeeds (backend field names vary). */
+async function persistAuthUserRole(userId: string, desiredRole: string): Promise<boolean> {
+  const uid = String(userId || '').trim();
+  if (!uid) return false;
+  for (const r of roleAliasCandidates(desiredRole)) {
+    const payloads: Record<string, any>[] = [
+      { role: r },
+      { role_name: r },
+      { primary_role: r },
+      { user_role: r },
+      { role: r, role_name: r },
+    ];
+    for (const p of payloads) {
+      try {
+        await api.updateUserWithFallbacks(uid, p);
+        return true;
+      } catch {
+        /* next */
+      }
+    }
+  }
+  return false;
+}
+
 function mapApiUser(u: any): RowUser {
   const profile = u.profile || u.user_profile || u.employee_profile || {};
   const employee = u.employee || u.employee_details || {};
@@ -156,7 +205,13 @@ function mapApiUser(u: any): RowUser {
     (u.created_by && typeof u.created_by === 'object' ? u.created_by : null) ||
     (u.added_by && typeof u.added_by === 'object' ? u.added_by : null);
   const title =
-    pickFirstNonEmpty(profile.job_title, profile.title, employee.job_title, employee.title) ||
+    pickFirstNonEmpty(
+      profile.job_title,
+      profile.title,
+      employee.job_title,
+      employee.position,
+      employee.title
+    ) ||
     getRoleDisplayLabel(getPrimaryRoleFromUser(u)) ||
     '—';
   const phone = pickFirstNonEmpty(
@@ -366,6 +421,7 @@ export default function UserManagementScreen() {
     email: '',
     full_name: '',
     phone: '',
+    job_title: '',
     role: 'employee' as string,
     organization_id: '',
     company_id: '',
@@ -428,9 +484,9 @@ export default function UserManagementScreen() {
       const employeeByUserId = new Map<string, any>();
       const employeeByEmail = new Map<string, any>();
       for (const e of employees) {
-        const uid = e?.user_id ?? e?.user;
-        if (uid != null && String(uid).trim() !== '' && !employeeByUserId.has(String(uid))) {
-          employeeByUserId.set(String(uid), e);
+        const uid = employeeSchedulerUserId(e);
+        if (uid && !employeeByUserId.has(uid)) {
+          employeeByUserId.set(uid, e);
         }
         const em = normalizeEmail(e?.email);
         if (em && !employeeByEmail.has(em)) employeeByEmail.set(em, e);
@@ -452,6 +508,13 @@ export default function UserManagementScreen() {
             employee_pin: pickFirstNonEmpty(u?.profile?.employee_pin, employee?.employee_pin, employee?.pin),
             department: pickFirstNonEmpty(u?.profile?.department, employee?.department_name, employee?.department),
             team: pickFirstNonEmpty(u?.profile?.team, employee?.team_name, employee?.team),
+            job_title: pickFirstNonEmpty(
+              u?.profile?.job_title,
+              u?.profile?.title,
+              employee?.job_title,
+              employee?.position,
+              employee?.title
+            ),
           },
         };
       });
@@ -480,11 +543,30 @@ export default function UserManagementScreen() {
     let cancelled = false;
     (async () => {
       try {
-        const emps = await api.getEmployees({ company: assignCompanyId });
+        let emps: any[] = [];
+        try {
+          emps = await api.getEmployees({ company: assignCompanyId });
+        } catch {
+          emps = [];
+        }
+        if (!Array.isArray(emps) || emps.length === 0) {
+          try {
+            const byId = await api.getEmployees({ company_id: assignCompanyId });
+            emps = Array.isArray(byId) ? byId : [];
+          } catch {
+            emps = [];
+          }
+        }
+        if (emps.length === 0) {
+          const all = await api.getEmployees().catch(() => []);
+          const rows = Array.isArray(all) ? all : [];
+          const cid = String(assignCompanyId);
+          emps = rows.filter((e: any) => String(e?.company_id ?? e?.company ?? '').trim() === cid);
+        }
         const next = new Set<string>();
-        for (const e of Array.isArray(emps) ? emps : []) {
-          const uid = e.user ?? e.user_id;
-          if (uid != null && String(uid) !== '') next.add(String(uid));
+        for (const e of emps) {
+          const uid = employeeSchedulerUserId(e);
+          if (uid) next.add(uid);
         }
         if (!cancelled) setEmployeeUserIds(next);
       } catch {
@@ -505,8 +587,28 @@ export default function UserManagementScreen() {
     let cancelled = false;
     (async () => {
       try {
-        const comps = await api.getCompanies({ organization: assignOrgId });
-        const list = (Array.isArray(comps) ? comps : []).map((c: any) => ({
+        let comps: any[] = [];
+        try {
+          comps = await api.getCompanies({ organization: assignOrgId });
+        } catch {
+          comps = [];
+        }
+        if (!Array.isArray(comps) || comps.length === 0) {
+          try {
+            const byOid = await api.getCompanies({ organization_id: assignOrgId });
+            comps = Array.isArray(byOid) ? byOid : [];
+          } catch {
+            comps = [];
+          }
+        }
+        if (!Array.isArray(comps) || comps.length === 0) {
+          const all = await api.getCompanies().catch(() => []);
+          const oid = String(assignOrgId);
+          comps = (Array.isArray(all) ? all : []).filter(
+            (c: any) => String(c?.organization_id ?? c?.organization ?? '').trim() === oid
+          );
+        }
+        const list = comps.map((c: any) => ({
           id: String(c.id),
           name: c.name || '—',
         }));
@@ -577,9 +679,22 @@ export default function UserManagementScreen() {
   }, [editForm.organization_id, editModal]);
 
   const assignAvailableUsers = useMemo(() => {
+    if (assignRole === 'super_admin' || assignRole === 'organization_manager' || assignRole === 'company_manager') {
+      return rows;
+    }
     if (!assignCompanyId) return [];
     return rows.filter((r) => !employeeUserIds.has(r.id));
-  }, [rows, assignCompanyId, employeeUserIds]);
+  }, [rows, assignCompanyId, employeeUserIds, assignRole]);
+
+  const assignFormReady = useMemo(() => {
+    if (assignSelectedUserIds.size === 0) return false;
+    if (assignRole === 'super_admin') return true;
+    if (assignRole === 'organization_manager') return !!assignOrgId;
+    if (assignRole === 'company_manager' || assignRole === 'employee') {
+      return !!assignOrgId && !!assignCompanyId;
+    }
+    return false;
+  }, [assignSelectedUserIds, assignRole, assignOrgId, assignCompanyId]);
 
   const openAssignModal = useCallback(async () => {
     setAddMenuOpen(false);
@@ -618,11 +733,13 @@ export default function UserManagementScreen() {
   const clearAllAssign = () => setAssignSelectedUserIds(new Set());
 
   const handleAssignSubmit = async () => {
-    if (assignSelectedUserIds.size === 0 || !assignCompanyId) return;
+    if (!assignFormReady) return;
     const backendRole =
       assignRole === 'organization_manager' || assignRole === 'company_manager' || assignRole === 'super_admin'
         ? assignRole
         : 'employee';
+    const orgStr = assignOrgId ? String(assignOrgId) : '';
+    const compStr = assignCompanyId ? String(assignCompanyId) : '';
     setSaving(true);
     const errors: string[] = [];
     try {
@@ -634,19 +751,23 @@ export default function UserManagementScreen() {
         const first = parts[0] || row.username || 'User';
         const last = parts.slice(1).join(' ') || '—';
         try {
-          await api.createEmployee({
-            company: assignCompanyId,
-            user: id,
-            email: row.email && row.email !== '—' ? row.email : undefined,
-            first_name: first,
-            last_name: last,
-            status: 'active',
-            job_title: assignRoleLabel(assignRole),
-          });
-          try {
-            await api.updateUser(id, { role: backendRole });
-          } catch {
-            /* optional: some backends only persist role via employee */
+          if (assignRole === 'employee' && assignCompanyId) {
+            await api.assignSchedulerEmployeeToCompany({
+              companyId: assignCompanyId,
+              userId: id,
+              email: row.email && row.email !== '—' ? row.email : undefined,
+              first_name: first,
+              last_name: last,
+              status: 'active',
+              job_title: assignRoleLabel(assignRole),
+            });
+          }
+          if (orgStr || compStr) {
+            await api.syncAuthUserOrgCompany(id, orgStr, compStr);
+          }
+          const roleOk = await persistAuthUserRole(id, backendRole);
+          if (!roleOk && backendRole !== 'employee') {
+            throw new Error('Role was not accepted by the server');
           }
         } catch (e: any) {
           errors.push(row.username + (e?.message ? `: ${e.message}` : ''));
@@ -668,8 +789,8 @@ export default function UserManagementScreen() {
     }
   };
 
-  const adminRows = useMemo(() => rows.filter((r) => userIsAdminRole(r.roles)), [rows]);
-  const userRows = useMemo(() => rows.filter((r) => !userIsAdminRole(r.roles)), [rows]);
+  const adminRows = useMemo(() => rows.filter((r) => rowBelongsToAdminsTab(r)), [rows]);
+  const userRows = useMemo(() => rows.filter((r) => !rowBelongsToAdminsTab(r)), [rows]);
 
   const tabRows = tab === 'admins' ? adminRows : userRows;
 
@@ -747,12 +868,20 @@ export default function UserManagementScreen() {
     const companyId = String(
       profile.company_id ?? profile.company ?? raw.company_id ?? raw.company ?? employee.company_id ?? employee.company ?? ''
     );
+    const jobTitle = pickFirstNonEmpty(
+      profile.job_title,
+      profile.title,
+      employee.job_title,
+      employee.position,
+      employee.title
+    );
     setEditModal(r);
     setEditForm({
       username: r.username === '—' ? '' : r.username,
       email: r.email === '—' ? '' : r.email,
       full_name: r.full_name === '—' ? '' : r.full_name,
       phone: r.phone === '—' ? '' : r.phone,
+      job_title: jobTitle,
       role,
       organization_id: orgId && orgId !== 'undefined' ? orgId : '',
       company_id: companyId && companyId !== 'undefined' ? companyId : '',
@@ -930,7 +1059,21 @@ export default function UserManagementScreen() {
         // Prefer shapes common on Django / DRF user creation (password confirmation + nested profile).
         const hasNestedProfile =
           Object.keys(profileNested).length > 0 || Object.keys(profileNestedById).length > 0;
+        const roleFirst: Record<string, any>[] =
+          desiredRole !== 'employee'
+            ? [
+                withProfileByRef,
+                withProfileById,
+                roleNamePayload,
+                ...withPwdPairs(withProfileByRef),
+                ...withPwdPairs(withProfileById),
+                ...withPwdPairs(roleNamePayload),
+                clean({ ...roleNamePayload, re_password: pwd }),
+                clean({ ...roleNamePayload, password_confirm: pwd }),
+              ]
+            : [];
         const rawAttempts: Record<string, any>[] = [
+          ...roleFirst,
           ...withPwdPairs(strictMinimal),
           clean({ email, username, password: pwd, password1: pwd, password2: pwd }),
           clean({ email, username: email, password: pwd, password_confirm: pwd }),
@@ -1006,27 +1149,36 @@ export default function UserManagementScreen() {
       if (!created) {
         throw lastErr || new Error('Failed to create user');
       }
-      // Enforce role assignment even when strict serializer accepted only minimal fields.
-      if (createdUserId && desiredRole !== 'employee') {
-        const roleBackfillCandidates =
-          desiredRole === 'company_manager'
-            ? ['company_manager', 'manager']
-            : desiredRole === 'organization_manager'
-              ? ['organization_manager', 'operations_manager']
-              : desiredRole === 'super_admin'
-                ? ['super_admin', 'admin']
-                : ['employee'];
-        for (const r of roleBackfillCandidates) {
+      if (createdUserId) {
+        const roleOk = await persistAuthUserRole(createdUserId, desiredRole);
+        if (!roleOk && desiredRole !== 'employee') {
+          throw new Error(
+            'User was created but the server did not accept the selected role. Edit the user to set role, or check API permissions.'
+          );
+        }
+      }
+      if (createdUserId) {
+        const o = String(orgId || '').trim();
+        const c = String(companyId || '').trim();
+        if (o || c) {
           try {
-            await api.updateUser(createdUserId, { role: r });
-            break;
+            await api.syncAuthUserOrgCompany(createdUserId, o, c);
           } catch {
-            try {
-              await api.updateUser(createdUserId, { role_name: r });
-              break;
-            } catch {
-              // keep trying alias roles
-            }
+            /* backend may store org/company only on employee */
+          }
+        }
+        if (desiredRole === 'employee' && c) {
+          try {
+            await api.assignSchedulerEmployeeToCompany({
+              companyId: c,
+              userId: createdUserId,
+              email,
+              first_name: firstName,
+              last_name: lastNameResolved || '—',
+              status: 'active',
+            });
+          } catch {
+            /* employee row may already exist */
           }
         }
       }
@@ -1091,14 +1243,8 @@ export default function UserManagementScreen() {
         });
         return out;
       };
-      const roleCandidates =
-        editForm.role === 'company_manager'
-          ? ['company_manager', 'manager']
-          : editForm.role === 'organization_manager'
-            ? ['organization_manager', 'operations_manager']
-            : editForm.role === 'super_admin'
-              ? ['super_admin', 'admin']
-              : ['employee'];
+      const jt = editForm.job_title.trim();
+      // Avoid nested profile / job_title on core PATCH (often rejected); title saved in a second pass.
       const userAttempts = [
         clean({
           username: editForm.username.trim(),
@@ -1134,7 +1280,7 @@ export default function UserManagementScreen() {
       let userUpdated = false;
       for (const payload of userAttempts) {
         try {
-          await api.updateUser(editModal.id, payload);
+          await api.updateUserWithFallbacks(editModal.id, payload);
           userUpdated = true;
           break;
         } catch (e: any) {
@@ -1143,31 +1289,49 @@ export default function UserManagementScreen() {
       }
       if (!userUpdated) throw lastErr || new Error('Failed to update user');
 
-      // Keep role update compatible with backend aliases.
-      for (const roleCandidate of roleCandidates) {
-        try {
-          await api.updateUser(editModal.id, { role: roleCandidate });
-          break;
-        } catch {
-          try {
-            await api.updateUser(editModal.id, { role_name: roleCandidate });
-            break;
-          } catch {
-            // continue trying aliases
-          }
-        }
+      const roleOk = await persistAuthUserRole(editModal.id, editForm.role);
+      if (!roleOk && editForm.role !== 'employee') {
+        throw new Error('Could not update role on the server. Check permissions or try a different role label in the API.');
+      }
+
+      const orgId = String(editForm.organization_id || '').trim();
+      const compId = String(editForm.company_id || '').trim();
+      if (orgId || compId) {
+        await api.syncAuthUserOrgCompany(editModal.id, orgId, compId);
       }
 
       // Scheduler employee row holds company assignment; resolve id if enrich missed it.
       let employeeId = String(editModal.raw?.employee?.id ?? editModal.raw?.employee_details?.id ?? '').trim();
-      if (!employeeId && editForm.role === 'employee') {
-        const resolved = await api.resolveEmployeeForUser({
+      if (!employeeId) {
+        const resolved = await api.findSchedulerEmployeeForAuthUser({
           id: editModal.id,
           email: editForm.email.trim(),
+          company_id: editForm.company_id || undefined,
+          assigned_company: editForm.company_id || undefined,
         });
         if (resolved?.id) employeeId = String(resolved.id).trim();
       }
       if (editForm.role === 'employee') {
+        const nextCompany = String(editForm.company_id ?? '').trim();
+        if (!employeeId) {
+          try {
+            const created = await api.createEmployeeLinkedToUser({
+              companyId: nextCompany,
+              userId: editModal.id,
+              email: editForm.email.trim(),
+              first_name: firstName,
+              last_name: lastName || '—',
+              job_title: jt || undefined,
+              status: 'active',
+            });
+            employeeId = String(created?.id ?? created?.pk ?? created?.uuid ?? '').trim();
+          } catch (createErr: any) {
+            throw new Error(
+              createErr?.message ||
+                'Could not create employee for this user. Check company selection and API permissions.'
+            );
+          }
+        }
         if (!employeeId) {
           throw new Error('No employee record for this user; company cannot be updated.');
         }
@@ -1175,7 +1339,6 @@ export default function UserManagementScreen() {
         const prevCompany = String(
           rawEmp.company_id ?? (typeof rawEmp.company === 'object' ? rawEmp.company?.id : rawEmp.company) ?? ''
         ).trim();
-        const nextCompany = String(editForm.company_id ?? '').trim();
         const companyChanged = nextCompany !== '' && prevCompany !== nextCompany;
 
         const empPayload: Record<string, any> = {
@@ -1187,13 +1350,56 @@ export default function UserManagementScreen() {
           phone: editForm.phone.trim() || undefined,
           employee_pin: editForm.employee_pin.trim() || undefined,
           hourly_rate: editForm.hourly_rate.trim() || undefined,
+          job_title: jt || undefined,
+          position: jt || undefined,
+          title: jt || undefined,
         };
         const empBody = clean(empPayload);
         if (companyChanged) {
           empBody.department = null;
           empBody.team = null;
         }
-        await api.updateEmployee(employeeId, empBody);
+        await api.updateSchedulerEmployeeWithFallbacks(employeeId, [
+          empBody,
+          clean({
+            company_id: nextCompany,
+            company: nextCompany,
+            first_name: firstName,
+            last_name: lastName || undefined,
+            job_title: jt || undefined,
+            position: jt || undefined,
+            email: editForm.email.trim() || undefined,
+          }),
+          clean({ company_id: nextCompany, first_name: firstName, last_name: lastName || undefined }),
+        ]);
+      } else if (employeeId && jt) {
+        try {
+          await api.updateSchedulerEmployeeWithFallbacks(employeeId, [
+            clean({ job_title: jt, position: jt, title: jt }),
+            { job_title: jt, position: jt },
+          ]);
+        } catch {
+          /* title may only exist on auth profile */
+        }
+      } else if (!employeeId && jt) {
+        const linked = await api.findSchedulerEmployeeForAuthUser({
+          id: editModal.id,
+          email: editForm.email.trim(),
+        });
+        if (linked?.id) {
+          try {
+            await api.updateSchedulerEmployeeWithFallbacks(String(linked.id), [
+              clean({ job_title: jt, position: jt, title: jt }),
+              { job_title: jt, position: jt },
+            ]);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+
+      if (jt) {
+        await api.updateAuthUserJobTitleWithFallbacks(editModal.id, jt);
       }
       setEditModal(null);
       await load();
@@ -1328,13 +1534,15 @@ export default function UserManagementScreen() {
   }
 
   const usersTabLabel = `Users (${userRows.length}/${rows.length})`;
-  const adminsTabLabel = `Admins (${adminRows.length})`;
+  const adminsTabLabel = `Admins (${adminRows.length}/${rows.length})`;
 
   return (
     <View style={styles.container}>
       <View style={styles.pageHeader}>
         <Text style={styles.pageTitle}>User Management</Text>
-        <Text style={styles.pageSubtitle}>Manage users and their roles in the system.</Text>
+        <Text style={styles.pageSubtitle}>
+          Users: line staff (employee roles). Admins: super admins, admins, org managers, and company managers.
+        </Text>
 
         <View style={styles.tabs}>
           <TouchableOpacity
@@ -1568,6 +1776,15 @@ export default function UserManagementScreen() {
                 placeholderTextColor="#94a3b8"
               />
 
+              <Text style={styles.fieldLabel}>Title / Job title</Text>
+              <TextInput
+                style={styles.inputOutlined}
+                value={editForm.job_title}
+                onChangeText={(t) => setEditForm((f) => ({ ...f, job_title: t }))}
+                placeholder="e.g. Front desk, Supervisor"
+                placeholderTextColor="#94a3b8"
+              />
+
               <Text style={styles.fieldLabel}>Phone</Text>
               <TextInput
                 style={styles.inputOutlined}
@@ -1712,9 +1929,9 @@ export default function UserManagementScreen() {
               </Text>
               <View style={styles.assignUsersToolbarBtns}>
                 <TouchableOpacity
-                  style={[styles.textLinkBtn, !assignCompanyId && styles.textLinkBtnDisabled]}
+                  style={[styles.textLinkBtn, assignAvailableUsers.length === 0 && styles.textLinkBtnDisabled]}
                   onPress={selectAllAssign}
-                  disabled={!assignCompanyId || assignAvailableUsers.length === 0}
+                  disabled={assignAvailableUsers.length === 0}
                 >
                   <Text style={styles.textLinkBtnText}>Select All</Text>
               </TouchableOpacity>
@@ -1725,7 +1942,7 @@ export default function UserManagementScreen() {
             </View>
 
             <ScrollView style={styles.assignUserListBox} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
-              {!assignCompanyId ? (
+              {assignRole === 'employee' && !assignCompanyId ? (
                 <Text style={styles.assignEmptyText}>Select an organization and company to see available users.</Text>
               ) : assignAvailableUsers.length === 0 ? (
                 <Text style={styles.assignEmptyText}>
@@ -1757,7 +1974,9 @@ export default function UserManagementScreen() {
               )}
             </ScrollView>
 
-            <Text style={styles.fieldLabel}>Organization</Text>
+            <Text style={styles.fieldLabel}>
+              Organization{assignRole === 'super_admin' ? ' (optional)' : ''}
+            </Text>
             <TouchableOpacity style={styles.selectField} onPress={() => setAssignOrgPicker(true)} disabled={saving}>
               <Text style={[styles.selectFieldText, !assignOrgId && styles.selectPlaceholder]}>
                 {assignOrgId ? orgList.find((o) => o.id === assignOrgId)?.name : 'Select an organization'}
@@ -1765,18 +1984,28 @@ export default function UserManagementScreen() {
               <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
             </TouchableOpacity>
 
-            <Text style={styles.fieldLabel}>Company</Text>
+            <Text style={styles.fieldLabel}>
+              Company
+              {assignRole === 'super_admin' || assignRole === 'organization_manager'
+                ? ' (optional)'
+                : ''}
+            </Text>
             <TouchableOpacity
-              style={[styles.selectField, !assignOrgId && styles.selectFieldDisabled]}
-              onPress={() => assignOrgId && setAssignCompanyPicker(true)}
-              disabled={saving || !assignOrgId}
+              style={[
+                styles.selectField,
+                assignRole !== 'super_admin' && !assignOrgId && styles.selectFieldDisabled,
+              ]}
+              onPress={() => (assignRole === 'super_admin' || assignOrgId) && setAssignCompanyPicker(true)}
+              disabled={saving || (assignRole !== 'super_admin' && !assignOrgId)}
             >
               <Text style={[styles.selectFieldText, !assignCompanyId && styles.selectPlaceholder]}>
-                {!assignOrgId
+                {assignRole !== 'super_admin' && !assignOrgId
                   ? 'Select organization first'
                   : assignCompanyId
                     ? companyList.find((c) => c.id === assignCompanyId)?.name
-                    : 'Select a company'}
+                    : assignRole === 'super_admin' || assignRole === 'organization_manager'
+                      ? 'Optional — select to scope to a company'
+                      : 'Select a company'}
               </Text>
               <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
             </TouchableOpacity>
@@ -1788,16 +2017,9 @@ export default function UserManagementScreen() {
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={[
-                styles.assignSubmitBtn,
-                (saving ||
-                  assignSelectedUserIds.size === 0 ||
-                  !assignOrgId ||
-                  !assignCompanyId) &&
-                  styles.assignSubmitBtnDisabled,
-              ]}
+              style={[styles.assignSubmitBtn, (saving || !assignFormReady) && styles.assignSubmitBtnDisabled]}
               onPress={() => void handleAssignSubmit()}
-              disabled={saving || assignSelectedUserIds.size === 0 || !assignOrgId || !assignCompanyId}
+              disabled={saving || !assignFormReady}
             >
               <Text style={styles.assignSubmitBtnText}>
                 Assign {assignSelectedUserIds.size} User{assignSelectedUserIds.size === 1 ? '' : 's'} to Organization

@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
+import { getPrimaryRoleFromUser } from '../../types/auth';
 import * as api from '../../api';
 
 type Organization = { id: string; name: string; [k: string]: any };
@@ -90,7 +91,44 @@ function companyManagerUserId(c: Company | null | undefined): string {
     (c as any).manager_id ??
     (c as any).manager ??
     '';
+  if (v != null && typeof v === 'object' && (v as any).id != null) return String((v as any).id).trim();
   return v != null ? String(v).trim() : '';
+}
+
+function employeeRowCompanyId(e: any): string {
+  const c = e?.company_id ?? e?.company;
+  if (c != null && typeof c === 'object' && (c as any).id != null) return String((c as any).id).trim();
+  if (c != null && c !== '') return String(c).trim();
+  return '';
+}
+
+function employeeRowUserId(e: any): string {
+  const u = e?.user_id ?? e?.user;
+  if (u != null && typeof u === 'object' && (u as any).id != null) return String((u as any).id).trim();
+  if (u != null && u !== '') return String(u).trim();
+  return '';
+}
+
+function assignedEmployeeDisplayName(e: any): string {
+  const fn = String(e?.first_name ?? '').trim();
+  const ln = String(e?.last_name ?? '').trim();
+  if (fn || ln) return `${fn} ${ln}`.trim();
+  const profile = e?.profile;
+  const full = profile && typeof profile === 'object' ? String((profile as any).full_name ?? '').trim() : '';
+  if (full) return full;
+  return String(e?.email ?? e?.username ?? 'Employee').trim() || 'Employee';
+}
+
+function assignedEmployeesForCompany(rows: any[], companyId: string, excludeManagerUserId: string): any[] {
+  const cid = String(companyId || '').trim();
+  const mgr = String(excludeManagerUserId || '').trim();
+  const list = Array.isArray(rows) ? rows : [];
+  return list.filter((e) => {
+    if (cid && employeeRowCompanyId(e) !== cid) return false;
+    const uid = employeeRowUserId(e);
+    if (mgr && uid && uid === mgr) return false;
+    return true;
+  });
 }
 
 function isAssignedId(v: any): boolean {
@@ -135,6 +173,64 @@ function userHasRole(u: any, roleToken: string): boolean {
   const roles = u?.roles ?? u?.role ?? u?.user_roles;
   const list = Array.isArray(roles) ? roles : roles != null ? [roles] : [];
   return list.some((r) => normalizeRoleToken(r) === roleToken);
+}
+
+/** Role strings from nested serializers (groups, role objects, primary role). */
+function collectUserRoleTokens(u: any): Set<string> {
+  const out = new Set<string>();
+  const add = (v: any) => {
+    const t = normalizeRoleToken(v);
+    if (t) out.add(t);
+  };
+  const roles = u?.roles ?? u?.user_roles;
+  if (Array.isArray(roles)) {
+    for (const r of roles) {
+      if (r != null && typeof r === 'object') {
+        add((r as any).role);
+        add((r as any).name);
+        add((r as any).role_name);
+      } else add(r);
+    }
+  }
+  if (typeof u?.role === 'string') add(u.role);
+  if (typeof u?.role_name === 'string') add(u.role_name);
+  if (typeof u?.primary_role === 'string') add(u.primary_role);
+  const groups = u?.groups;
+  if (Array.isArray(groups)) {
+    for (const g of groups) {
+      if (g != null && typeof g === 'object') add((g as any).name);
+      else add(g);
+    }
+  }
+  try {
+    add(getPrimaryRoleFromUser(u));
+  } catch {
+    /* ignore */
+  }
+  return out;
+}
+
+/** Match picker tokens (company_manager, manager, org manager, etc.) against all known role shapes. */
+function userMatchesPickTokens(u: any, tokens: string[]): boolean {
+  if (tokens.length === 0) return true;
+  if (userStatusToken(u) === 'deleted') return false;
+  const want = new Set(tokens.map((t) => normalizeRoleToken(t)));
+  const have = collectUserRoleTokens(u);
+  for (const t of tokens) {
+    if (userHasRole(u, normalizeRoleToken(t))) return true;
+  }
+  for (const h of have) {
+    if (want.has(h)) return true;
+  }
+  if (want.has('company_manager') || want.has('manager')) {
+    if (have.has('company_manager') || have.has('manager')) return true;
+    if (have.has('admin') || have.has('super_admin')) return true;
+  }
+  if (want.has('organization_manager') || want.has('operations_manager')) {
+    if (have.has('organization_manager') || have.has('operations_manager')) return true;
+    if (have.has('admin') || have.has('super_admin')) return true;
+  }
+  return false;
 }
 
 function OptionPickerModal({
@@ -272,6 +368,8 @@ export default function CompaniesScreen() {
   const [managerPicker, setManagerPicker] = useState(false);
   const [companyMenuForId, setCompanyMenuForId] = useState<string | null>(null);
   const [companyDetails, setCompanyDetails] = useState<Company | null>(null);
+  const [companyDetailsEmployees, setCompanyDetailsEmployees] = useState<any[]>([]);
+  const [companyDetailsEmployeesLoading, setCompanyDetailsEmployeesLoading] = useState(false);
   const [assignManagerCompany, setAssignManagerCompany] = useState<Company | null>(null);
   const [managerByCompany, setManagerByCompany] = useState<Record<string, string>>({});
 
@@ -281,21 +379,30 @@ export default function CompaniesScreen() {
 
   const isOrgManager = role === 'operations_manager' && user?.id;
   const canCreateOrg = role === 'super_admin';
+  const canDeleteOrg = role === 'super_admin';
   const canCreateCompany = role === 'super_admin' || role === 'operations_manager';
   const canEditCompany = role === 'super_admin' || role === 'operations_manager';
 
-  const filteredCompanies = React.useMemo(
-    () => api.filterCompaniesForCompanyManagerRole(companies, role, user?.id),
-    [companies, role, user?.id]
-  );
+  const filteredCompanies = React.useMemo(() => {
+    let list = api.filterCompaniesForCompanyManagerRole(companies, role, user?.id);
+    if (role === 'operations_manager' && user?.organization_id) {
+      const oid = String(user.organization_id);
+      list = list.filter((c) => companyOrganizationId(c) === oid);
+    }
+    return list;
+  }, [companies, role, user?.id, user?.organization_id]);
 
   const filteredOrgs = React.useMemo(() => {
+    if (role === 'operations_manager' && user?.organization_id) {
+      const oid = String(user.organization_id);
+      return organizations.filter((o) => String(o.id) === oid);
+    }
     if (role === 'manager' && filteredCompanies.length > 0) {
       const orgIds = new Set(filteredCompanies.map((c) => companyOrganizationId(c)).filter(Boolean));
       return organizations.filter((o) => orgIds.has(o.id));
     }
     return organizations;
-  }, [organizations, filteredCompanies, role]);
+  }, [organizations, filteredCompanies, role, user?.organization_id]);
 
   const activeOrgList = React.useMemo(() => filteredOrgs.filter((o) => !orgIsArchived(o)), [filteredOrgs]);
   const archivedOrgList = React.useMemo(() => filteredOrgs.filter(orgIsArchived), [filteredOrgs]);
@@ -303,10 +410,59 @@ export default function CompaniesScreen() {
 
   const load = useCallback(async () => {
     try {
-      const [orgsRaw, compRaw] = await Promise.all([
-        api.getOrganizations(isOrgManager ? { organization_manager: user?.id } : undefined),
-        api.getCompanies(),
-      ]);
+      let orgsRaw: Organization[] = [];
+      let compRaw: Company[] = [];
+
+      if (isOrgManager) {
+        const oid = user?.organization_id ? String(user.organization_id) : '';
+        if (oid) {
+          try {
+            const one = await api.getOrganization(oid);
+            if (one && typeof one === 'object') {
+              const id = String((one as any).id ?? (one as any).pk ?? oid);
+              orgsRaw = [{ ...(one as object), id } as Organization];
+            }
+          } catch {
+            /* fall through */
+          }
+          if (orgsRaw.length === 0) {
+            try {
+              const listed = await api.getOrganizations();
+              const arr = Array.isArray(listed) ? listed : [];
+              orgsRaw = arr.filter((o) => String(o.id) === oid);
+            } catch {
+              orgsRaw = [];
+            }
+          }
+          try {
+            compRaw = await api.getCompanies({ organization: oid });
+          } catch {
+            try {
+              compRaw = await api.getCompanies({ organization_id: oid });
+            } catch {
+              const all = await api.getCompanies();
+              compRaw = (Array.isArray(all) ? all : []).filter((c) => companyOrganizationId(c) === oid);
+            }
+          }
+        } else {
+          try {
+            const listed = await api.getOrganizations();
+            orgsRaw = Array.isArray(listed) ? listed : [];
+          } catch {
+            orgsRaw = [];
+          }
+          try {
+            compRaw = await api.getCompanies();
+          } catch {
+            compRaw = [];
+          }
+        }
+      } else {
+        const [o, c] = await Promise.all([api.getOrganizations(), api.getCompanies()]);
+        orgsRaw = Array.isArray(o) ? o : [];
+        compRaw = Array.isArray(c) ? c : [];
+      }
+
       setOrganizations(orgsRaw);
       setCompanies(compRaw);
     } catch (e: any) {
@@ -315,11 +471,47 @@ export default function CompaniesScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [isOrgManager, user?.id]);
+  }, [isOrgManager, user?.organization_id]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    const cid = companyDetails?.id ? String(companyDetails.id) : '';
+    if (!cid) {
+      setCompanyDetailsEmployees([]);
+      setCompanyDetailsEmployeesLoading(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setCompanyDetailsEmployeesLoading(true);
+      try {
+        let raw: any[] = [];
+        try {
+          raw = await api.getEmployees({ company: cid });
+        } catch {
+          try {
+            raw = await api.getEmployees({ company_id: cid });
+          } catch {
+            const all = await api.getEmployees().catch(() => []);
+            raw = Array.isArray(all) ? all : [];
+          }
+        }
+        const mgr = companyManagerUserId(companyDetails);
+        const next = assignedEmployeesForCompany(raw, cid, mgr);
+        if (!cancelled) setCompanyDetailsEmployees(next);
+      } catch {
+        if (!cancelled) setCompanyDetailsEmployees([]);
+      } finally {
+        if (!cancelled) setCompanyDetailsEmployeesLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [companyDetails]);
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -340,16 +532,15 @@ export default function CompaniesScreen() {
       .map((t) => normalizeRoleToken(t))
       .filter(Boolean);
     try {
-      const raw = await api.getUsers({}).catch(() => []);
-      const list = Array.isArray(raw) ? raw : [];
+      const list = await api.getAuthUsersForAdminPicker();
       const nextById: Record<string, any> = {};
       for (const u of list) {
         const id = String((u as any)?.id ?? (u as any)?.pk ?? (u as any)?.uuid ?? '').trim();
         if (id) nextById[id] = u;
       }
       setUsersById(nextById);
-      const options: PickerOption[] = list
-        .filter((u) => tokens.length === 0 || tokens.some((t) => userHasRole(u, t)))
+      const filtered = list.filter((u) => tokens.length === 0 || userMatchesPickTokens(u, tokens));
+      const options: PickerOption[] = filtered
         .map((u: any) => ({
           id: String(u?.id ?? u?.pk ?? u?.uuid ?? ''),
           label: getUserLabel(u),
@@ -596,167 +787,19 @@ export default function CompaniesScreen() {
     );
   }
 
-  if (isOrgManager) {
-    return (
-      <View style={styles.container}>
-        <View style={styles.header}>
-          <Text style={styles.title}>Companies</Text>
-          <Text style={styles.subtitle}>Your organization's companies</Text>
-          {canCreateCompany && (
-            <TouchableOpacity style={styles.primaryButton} onPress={() => handleCreateCompany()}>
-              <Text style={styles.primaryButtonText}>+ New company</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-        <FlatList
-          data={filteredCompanies}
-          keyExtractor={(item) => item.id}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-          contentContainerStyle={styles.listContent}
-          ListEmptyComponent={
-            <View style={styles.empty}>
-              <Text style={styles.emptyText}>No companies yet</Text>
-              {canCreateCompany && filteredOrgs[0]?.id && (
-                <TouchableOpacity style={styles.primaryButton} onPress={() => handleCreateCompany(filteredOrgs[0].id)}>
-                  <Text style={styles.primaryButtonText}>Create company</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-          }
-          renderItem={({ item }) => (
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>{item.name}</Text>
-              {canEditCompany && (
-                <TouchableOpacity onPress={() => openEditCompany(item)}>
-                  <Text style={styles.link}>Edit</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-          )}
-        />
-        <Modal visible={modal === 'company'} animationType="slide" transparent>
-          <View style={styles.modalOverlay}>
-            <View style={styles.modalBox}>
-              <View style={styles.modalHeaderRow}>
-                <Text style={[styles.modalTitle, { marginBottom: 0 }]}>{editCompany ? 'Edit company' : 'Create New Company'}</Text>
-                <TouchableOpacity onPress={() => setModal(null)} hitSlop={12} style={styles.modalCloseBtn} disabled={saving}>
-                  <MaterialCommunityIcons name="close" size={24} color="#64748b" />
-                </TouchableOpacity>
-              </View>
-
-              {!editCompany ? (
-                <>
-                  <Text style={styles.label}>Company Name *</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={formName}
-                    onChangeText={setFormName}
-                    placeholder="Enter company name"
-                  />
-
-                  <Text style={styles.label}>Organization (Business Type) *</Text>
-                  <TouchableOpacity style={styles.selectField} onPress={() => setCompanyOrgPicker(true)} disabled={filteredOrgs.length === 0}>
-                    <Text style={[styles.selectFieldText, !orgIdForCompany && styles.selectPlaceholder]} numberOfLines={1}>
-                      {orgIdForCompany ? filteredOrgs.find((o) => o.id === orgIdForCompany)?.name : 'Select organization'}
-                    </Text>
-                    <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
-                  </TouchableOpacity>
-
-                  <Text style={styles.label}>Brand Color</Text>
-                  <ColorControl value={brandColor} fallback="#3b82f6" onChange={setBrandColor} />
-
-                  <Text style={styles.label}>Address</Text>
-                  <TextInput style={styles.input} value={address} onChangeText={setAddress} placeholder="Enter company address" />
-
-                  <View style={styles.twoColRow}>
-                    <View style={{ flex: 1 }}>
-                      <TextInput
-                        style={[styles.input, styles.inputNoMargin]}
-                        value={phone}
-                        onChangeText={handlePhoneChange}
-                        placeholder="(555) 123-4567"
-                        keyboardType="phone-pad"
-                        maxLength={14}
-                      />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <TextInput
-                        style={[styles.input, styles.inputNoMargin]}
-                        value={email}
-                        onChangeText={setEmail}
-                        placeholder="contact@company.com"
-                        keyboardType="email-address"
-                        autoCapitalize="none"
-                      />
-                    </View>
-                  </View>
-
-                  <Text style={styles.label}>Company Manager</Text>
-                  <TouchableOpacity style={styles.selectField} onPress={() => setManagerPicker(true)}>
-                    <Text style={[styles.selectFieldText, !managerId && styles.selectPlaceholder]} numberOfLines={1}>
-                      {managerId ? managerOptions.find((o) => o.id === managerId)?.label : 'Select company manager'}
-                    </Text>
-                    <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
-                  </TouchableOpacity>
-                </>
-              ) : (
-                <>
-                  <Text style={styles.label}>Type</Text>
-                  <ScrollView horizontal style={styles.chipRow} showsHorizontalScrollIndicator={false}>
-                    {COMPANY_TYPES.map((t) => (
-                      <TouchableOpacity
-                        key={t}
-                        style={[styles.chip, formCompanyType === t && styles.chipActive]}
-                        onPress={() => setFormCompanyType(t)}
-                      >
-                        <Text style={[styles.chipText, formCompanyType === t && styles.chipTextActive]}>{t}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </ScrollView>
-                  <Text style={styles.label}>Name</Text>
-                  <TextInput style={styles.input} value={formName} onChangeText={setFormName} placeholder="Company name" />
-                </>
-              )}
-              <View style={styles.modalActions}>
-                <TouchableOpacity style={styles.modalCancelButton} onPress={() => setModal(null)}>
-                  <Text style={styles.cancelButtonText}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={[styles.modalPrimaryButton, saving && styles.disabled]} onPress={saveCompany} disabled={saving}>
-                  <Text style={styles.primaryButtonText}>
-                    {saving ? 'Saving…' : editCompany ? 'Save' : 'Create Company'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        </Modal>
-        <OptionPickerModal
-          visible={companyOrgPicker}
-          title="Organization (Business Type)"
-          options={filteredOrgs.map((o) => ({ id: o.id, label: o.name }))}
-          selectedId={orgIdForCompany}
-          onSelect={(id) => setOrgIdForCompany(id)}
-          onClose={() => setCompanyOrgPicker(false)}
-        />
-        <OptionPickerModal
-          visible={managerPicker}
-          title="Company Manager"
-          options={managerOptions}
-          selectedId={managerId ?? undefined}
-          onSelect={(id) => setManagerId(id)}
-          onClose={() => setManagerPicker(false)}
-        />
-      </View>
-    );
-  }
-
   return (
     <View style={styles.container}>
       <View style={styles.header}>
         <View style={styles.headerTopRow}>
           <View style={styles.headerTitleBlock}>
-            <Text style={styles.title}>Organizations & Companies</Text>
-            <Text style={styles.subtitle}>Manage organizations and companies</Text>
+            <Text style={styles.title}>
+              {role === 'operations_manager' ? 'Companies' : 'Organizations & Companies'}
+            </Text>
+            <Text style={styles.subtitle}>
+              {role === 'operations_manager'
+                ? "Your organization's companies"
+                : 'Manage organizations and companies'}
+            </Text>
           </View>
           <View style={styles.headerToolbar}>
             <TouchableOpacity
@@ -794,6 +837,15 @@ export default function CompaniesScreen() {
                 <Text style={styles.headerNewOrgButtonText}>+ New org</Text>
               </TouchableOpacity>
             ) : null}
+            {canCreateCompany && role === 'operations_manager' ? (
+              <TouchableOpacity
+                style={styles.headerNewOrgButton}
+                onPress={() => handleCreateCompany(filteredOrgs[0]?.id)}
+                accessibilityRole="button"
+              >
+                <Text style={styles.headerNewOrgButtonText}>+ New company</Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
         </View>
       </View>
@@ -805,13 +857,22 @@ export default function CompaniesScreen() {
         ListEmptyComponent={
           <View style={styles.empty}>
             <Text style={styles.emptyText}>
-              {orgListFilter === 'archived'
-                ? 'No archived organizations'
-                : 'No organizations yet'}
+              {role === 'operations_manager'
+                ? orgListFilter === 'archived'
+                  ? 'No archived organizations'
+                  : 'No organization loaded. Check that your profile includes an organization, then pull to refresh.'
+                : orgListFilter === 'archived'
+                  ? 'No archived organizations'
+                  : 'No organizations yet'}
             </Text>
             {canCreateOrg && orgListFilter === 'active' ? (
               <TouchableOpacity style={styles.primaryButton} onPress={handleCreateOrg}>
                 <Text style={styles.primaryButtonText}>Create organization</Text>
+              </TouchableOpacity>
+            ) : null}
+            {canCreateCompany && role === 'operations_manager' && orgListFilter === 'active' && filteredOrgs[0]?.id ? (
+              <TouchableOpacity style={styles.primaryButton} onPress={() => handleCreateCompany(filteredOrgs[0].id)}>
+                <Text style={styles.primaryButtonText}>+ New company</Text>
               </TouchableOpacity>
             ) : null}
           </View>
@@ -962,10 +1023,12 @@ export default function CompaniesScreen() {
                   The organization manager has super admin access to all companies within this organization.
                 </Text>
                 <View style={styles.modalActions}>
-                  <TouchableOpacity style={styles.deleteButton} onPress={() => void deleteOrg()} disabled={saving}>
-                    <MaterialCommunityIcons name="trash-can-outline" size={16} color="#fff" />
-                    <Text style={styles.deleteButtonText}>Delete</Text>
-                  </TouchableOpacity>
+                  {canDeleteOrg ? (
+                    <TouchableOpacity style={styles.deleteButton} onPress={() => void deleteOrg()} disabled={saving}>
+                      <MaterialCommunityIcons name="trash-can-outline" size={16} color="#fff" />
+                      <Text style={styles.deleteButtonText}>Delete</Text>
+                    </TouchableOpacity>
+                  ) : null}
                   <TouchableOpacity style={styles.modalCancelButton} onPress={() => setModal(null)}>
                     <Text style={styles.cancelButtonText}>Cancel</Text>
                   </TouchableOpacity>
@@ -1361,11 +1424,55 @@ export default function CompaniesScreen() {
               </View>
             </View>
             <View style={styles.detailsEmployeesCard}>
-              <Text style={styles.detailsCardTitle}>Assigned Employees (0)</Text>
-              <Text style={styles.emptyText}>No employees added yet</Text>
-              <TouchableOpacity style={[styles.modalCancelButton, { marginTop: 12 }]}>
-                <Text style={styles.cancelButtonText}>Add First Employee</Text>
-              </TouchableOpacity>
+              <Text style={styles.detailsCardTitle}>
+                Assigned Employees ({companyDetailsEmployees.length})
+              </Text>
+              {companyDetailsEmployeesLoading ? (
+                <ActivityIndicator style={{ marginVertical: 16 }} color="#3b82f6" />
+              ) : companyDetailsEmployees.length === 0 ? (
+                <>
+                  <Text style={styles.emptyText}>No employees assigned to this company yet</Text>
+                  <TouchableOpacity style={[styles.modalCancelButton, { marginTop: 12 }]}>
+                    <Text style={styles.cancelButtonText}>Add First Employee</Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <ScrollView
+                  style={styles.detailsEmployeesScroll}
+                  nestedScrollEnabled
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
+                >
+                  {companyDetailsEmployees.map((e, i) => {
+                    const eid = String(e?.id ?? e?.pk ?? '').trim() || `emp-${i}`;
+                    const name = assignedEmployeeDisplayName(e);
+                    const mail = String(e?.email ?? '').trim() || '—';
+                    const dept =
+                      typeof e?.department === 'object' && e?.department?.name
+                        ? String(e.department.name)
+                        : String(e?.department_name ?? e?.department ?? '').trim() || '—';
+                    const pos = String(e?.position ?? e?.job_title ?? e?.title ?? '').trim() || '—';
+                    return (
+                      <View key={eid} style={styles.assignedEmployeeRow}>
+                        <View style={styles.assignedEmployeeAvatar}>
+                          <Text style={styles.assignedEmployeeAvatarText}>{initialsFromLabel(name)}</Text>
+                        </View>
+                        <View style={styles.assignedEmployeeBody}>
+                          <Text style={styles.assignedEmployeeName} numberOfLines={1}>
+                            {name}
+                          </Text>
+                          <Text style={styles.assignedEmployeeMeta} numberOfLines={1}>
+                            {mail}
+                          </Text>
+                          <Text style={styles.assignedEmployeeMeta} numberOfLines={1}>
+                            {dept} · {pos}
+                          </Text>
+                        </View>
+                      </View>
+                    );
+                  })}
+                </ScrollView>
+              )}
             </View>
           </Pressable>
         </Pressable>
@@ -1722,14 +1829,37 @@ const styles = StyleSheet.create({
   },
   detailsEmployeesCard: {
     minHeight: 180,
+    maxHeight: 320,
     borderWidth: 1,
     borderColor: '#e2e8f0',
     borderRadius: 10,
     padding: 14,
     backgroundColor: '#fff',
+    alignSelf: 'stretch',
+    alignItems: 'stretch',
+    justifyContent: 'flex-start',
+  },
+  detailsEmployeesScroll: { maxHeight: 240, marginTop: 4 },
+  assignedEmployeeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  assignedEmployeeAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#e2e8f0',
     alignItems: 'center',
     justifyContent: 'center',
   },
+  assignedEmployeeAvatarText: { fontSize: 13, fontWeight: '800', color: '#0f172a' },
+  assignedEmployeeBody: { flex: 1, minWidth: 0 },
+  assignedEmployeeName: { fontSize: 14, fontWeight: '700', color: '#0f172a' },
+  assignedEmployeeMeta: { marginTop: 2, fontSize: 12, color: '#64748b' },
   detailsCardTitle: { alignSelf: 'flex-start', fontSize: 16, fontWeight: '700', color: '#0f172a', marginBottom: 8 },
   detailsLine: { flexDirection: 'row', alignItems: 'center', gap: 8, width: '100%', marginTop: 8 },
   detailsLineText: { flex: 1, fontSize: 13, color: '#334155' },

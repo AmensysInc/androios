@@ -74,6 +74,62 @@ function buildMonthGrid(anchorMonth: Date, today: Date): GridCell[][] {
   return rows;
 }
 
+/** Heuristic: calendar row mirrors a scheduler shift (not a generic task/event). */
+function isShiftLikeCalendarEvent(ev: any): boolean {
+  const t = String(ev?.event_type ?? ev?.type ?? '').toLowerCase();
+  if (t.includes('shift')) return true;
+  const title = String(ev?.title ?? '').trim().toLowerCase();
+  if (title === 'shift') return true;
+  if (ev?.employee != null || ev?.employee_id != null) return true;
+  if (ev?.scheduler_shift != null || ev?.shift_id != null || ev?.shift != null) return true;
+  return false;
+}
+
+function idFromRelation(v: any): string {
+  if (v == null || v === '') return '';
+  if (typeof v === 'object' && (v as any).id != null) return String((v as any).id).trim();
+  return String(v).trim();
+}
+
+function calendarEventAssignedToUser(ev: any, userId: string): boolean {
+  const uid = String(userId).trim();
+  if (!uid) return false;
+  const candidates = [
+    idFromRelation(ev.user),
+    idFromRelation((ev as any).user_id),
+    idFromRelation(ev.assigned_user),
+    idFromRelation((ev as any).assigned_user_id),
+    idFromRelation(ev.assignee),
+    idFromRelation((ev as any).assignee_id),
+    idFromRelation((ev as any).owner),
+  ];
+  return candidates.some((c) => c !== '' && c === uid);
+}
+
+/** Hide other people’s shift mirrors on calendars that are not meant to be team schedules. */
+function filterShiftLikeEventsToAssignee(events: any[], userId: string | undefined, role: string | null): any[] {
+  const list = Array.isArray(events) ? events : [];
+  if (!userId) return list;
+  if (role && ['super_admin', 'operations_manager'].includes(role)) return list;
+  const trustApiUserScope = ['employee', 'house_keeping', 'maintenance', 'user'].includes(role || '');
+  return list.filter((ev) => {
+    if (!isShiftLikeCalendarEvent(ev)) return true;
+    if (calendarEventAssignedToUser(ev, userId)) return true;
+    if (trustApiUserScope) {
+      const hasAssigneeHint = [
+        idFromRelation(ev.user),
+        idFromRelation((ev as any).user_id),
+        idFromRelation(ev.assigned_user),
+        idFromRelation((ev as any).assigned_user_id),
+        idFromRelation(ev.assignee),
+        idFromRelation((ev as any).assignee_id),
+      ].some((c) => c !== '');
+      if (!hasAssigneeHint) return true;
+    }
+    return false;
+  });
+}
+
 export default function CalendarScreen() {
   const { user, role } = useAuth();
   const { width } = useWindowDimensions();
@@ -88,15 +144,25 @@ export default function CalendarScreen() {
     return new Date(t.getFullYear(), t.getMonth(), t.getDate());
   });
 
-  const isManager = ['super_admin', 'operations_manager', 'manager'].includes(role || '');
-  const isEmployee = ['employee', 'house_keeping', 'maintenance'].includes(role || '');
+  /** Only these roles see unscoped “all shifts” in the calendar. */
+  const loadsAllShiftsUnscoped = ['super_admin', 'operations_manager'].includes(role || '');
+  /** Staff who work shifts see their own rows only — not company managers (team shifts belong on Schedule, not here). */
+  const loadOwnEmployeeShifts = ['employee', 'house_keeping', 'maintenance', 'user'].includes(role || '');
 
   const load = useCallback(async () => {
     try {
       let empId: string | null = null;
-      if (isEmployee && user?.id) {
+      let empCompanyId: string | undefined;
+      if (!loadOwnEmployeeShifts) {
+        setEmployeeId(null);
+      }
+      if (loadOwnEmployeeShifts && user?.id) {
         const emp = await api.resolveEmployeeForUser(user);
-        empId = emp?.id || null;
+        empId = emp?.id != null ? String(emp.id).trim() || null : null;
+        empCompanyId =
+          String(
+            (emp as any)?.company_id ?? (emp as any)?.company ?? user?.company_id ?? user?.assigned_company ?? ''
+          ).trim() || undefined;
         setEmployeeId(empId);
       }
       const monthStart = new Date(viewMonth.getFullYear(), viewMonth.getMonth(), 1);
@@ -108,12 +174,13 @@ export default function CalendarScreen() {
           end_time__lte: monthEnd.toISOString(),
         }),
         empId
-          ? api.getShifts({
-              employee: empId,
-              start_time__gte: monthStart.toISOString(),
-              start_time__lte: monthEnd.toISOString(),
+          ? api.getShiftsForEmployeeInRange({
+              employeeId: empId,
+              rangeStart: monthStart,
+              rangeEnd: monthEnd,
+              companyId: empCompanyId,
             })
-          : isManager
+          : loadsAllShiftsUnscoped
             ? api.getShifts({
                 start_time__gte: monthStart.toISOString(),
                 start_time__lte: monthEnd.toISOString(),
@@ -128,7 +195,7 @@ export default function CalendarScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [user?.id, isManager, isEmployee, viewMonth]);
+  }, [user?.id, user?.company_id, user?.assigned_company, loadsAllShiftsUnscoped, loadOwnEmployeeShifts, viewMonth, role]);
 
   useEffect(() => {
     load();

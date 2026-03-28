@@ -281,11 +281,109 @@ export class ApiClient {
     }
   }
 
-  async get<T>(endpoint: string, params?: Record<string, any>): Promise<T> {
-    return this.request<T>(endpoint, { method: 'GET', params });
+  async get<T>(
+    endpoint: string,
+    params?: Record<string, any>,
+    /** Use `no-store` after mutations so the browser/proxy cache cannot serve stale lists (e.g. schedule templates). */
+    options?: { cache?: RequestCache }
+  ): Promise<T> {
+    return this.request<T>(endpoint, {
+      method: 'GET',
+      params,
+      ...(options?.cache !== undefined ? { cache: options.cache } : {}),
+    });
   }
   async post<T>(endpoint: string, data?: any): Promise<T> {
     return this.request<T>(endpoint, { method: 'POST', body: data ? JSON.stringify(data) : undefined });
+  }
+
+  /**
+   * POST with access to `Location` and raw status — used when the body is empty on 201/204 but the
+   * created resource id is only in `Location`, or when DRF nests the object under `data`.
+   */
+  async postWithLocation<T>(endpoint: string, data?: any): Promise<{ json: T; location: string | null; status: number }> {
+    const path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+    const url = `${this.baseURL.replace(/\/$/, '')}${path}`;
+    const token = this.token ?? (await AsyncStorage.getItem(TOKEN_KEY));
+    if (token) this.token = token;
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: data != null ? JSON.stringify(data) : undefined,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      const text = await response.text();
+      const parseJsonSafe = (): any => {
+        if (!text || !text.trim()) return {};
+        try {
+          return JSON.parse(text);
+        } catch {
+          return null;
+        }
+      };
+
+      if (response.status === 401) {
+        await this.setToken(null);
+        await AsyncStorage.removeItem(REFRESH_KEY);
+        const err = parseJsonSafe() ?? {};
+        const msg = (err as any).detail || err?.message || 'Unauthorized';
+        throw new HttpError(typeof msg === 'string' ? msg : String(msg), 401, err);
+      }
+      if (response.status === 403) {
+        const err = parseJsonSafe() ?? {};
+        const msg = (err as any)?.detail || (err as any)?.message || "You don't have permission.";
+        throw new HttpError(typeof msg === 'string' ? msg : String(msg), 403, err);
+      }
+      if (!response.ok) {
+        const parsed = parseJsonSafe();
+        const err =
+          (parsed != null && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? parsed
+            : {}) as Record<string, unknown>;
+        const rawSnippet = text.trim().slice(0, 400);
+        const msg = extractErrorMessage(err) || rawSnippet || `HTTP ${response.status}`;
+        throw new HttpError(msg, response.status, err);
+      }
+
+      const location = response.headers.get('Location') || response.headers.get('location');
+      let json: any = {};
+      if (text.trim()) {
+        const contentType = response.headers.get('content-type') || '';
+        const looksJson =
+          contentType.includes('application/json') ||
+          contentType.includes('text/json') ||
+          contentType.includes('+json') ||
+          text.trim().startsWith('{') ||
+          text.trim().startsWith('[');
+        if (looksJson) {
+          try {
+            json = JSON.parse(text);
+          } catch {
+            json = {};
+          }
+        }
+      }
+      return { json: json as T, location, status: response.status };
+    } catch (e) {
+      clearTimeout(timeoutId);
+      if (e instanceof Error && e.name === 'AbortError') throw new Error('Request timed out.');
+      if (e instanceof TypeError && typeof e.message === 'string' && e.message.toLowerCase().includes('fetch failed')) {
+        throw new Error(`Network error: cannot reach ${url}. Check EXPO_PUBLIC_API_URL (and that the backend is running).`);
+      }
+      throw e;
+    }
   }
   async put<T>(endpoint: string, data?: any): Promise<T> {
     return this.request<T>(endpoint, { method: 'PUT', body: data ? JSON.stringify(data) : undefined });

@@ -78,9 +78,19 @@ export default function EmployeeDashboard() {
       const today = new Date();
       const weekStart = startOfWeek(today);
       const weekEnd = endOfWeek(today);
+      const empId = String(emp.id ?? (emp as any).pk ?? '').trim();
+      const companyId =
+        String(
+          (emp as any).company_id ?? (emp as any).company ?? user?.company_id ?? user?.assigned_company ?? ''
+        ).trim() || undefined;
       const [shiftList, entryList] = await Promise.all([
-        api.getShifts({ employee: emp.id, start_time__gte: weekStart.toISOString(), start_time__lte: weekEnd.toISOString() }),
-        api.getTimeClockEntriesForEmployee(emp.id),
+        api.getShiftsForEmployeeInRange({
+          employeeId: empId,
+          rangeStart: weekStart,
+          rangeEnd: weekEnd,
+          companyId,
+        }),
+        api.getTimeClockEntriesForEmployee(empId),
       ]);
       setShifts(Array.isArray(shiftList) ? shiftList : []);
       const list = Array.isArray(entryList) ? entryList : [];
@@ -131,7 +141,7 @@ export default function EmployeeDashboard() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [user?.id]);
+  }, [user?.id, user?.company_id, user?.assigned_company]);
 
   useEffect(() => {
     load();

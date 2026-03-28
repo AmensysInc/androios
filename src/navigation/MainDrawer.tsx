@@ -7,7 +7,6 @@ import { getRoleDisplayLabel } from '../types/auth';
 import { getMainDrawerInitialRoute } from './mainDrawerInitialRoute';
 
 import SuperAdminDashboard from '../screens/SuperAdminDashboard';
-import OrganizationDashboard from '../screens/OrganizationDashboard';
 import EmployeeDashboard from '../screens/EmployeeDashboard';
 import CalendarScreen from '../screens/CalendarScreen';
 import TasksScreen from '../screens/TasksScreen';
@@ -93,11 +92,6 @@ function CustomDrawerContent({ navigation }: any) {
             <Text style={styles.menuLabel}>Super Admin Dashboard</Text>
           </TouchableOpacity>
         )}
-        {role === 'operations_manager' && (
-          <TouchableOpacity style={styles.menuItem} onPress={() => navigation.navigate('OrganizationDashboard')}>
-            <Text style={styles.menuLabel}>Organization Dashboard</Text>
-          </TouchableOpacity>
-        )}
         {isEmployee && (
           <TouchableOpacity style={styles.menuItem} onPress={() => navigation.navigate('EmployeeDashboard')}>
             <Text style={styles.menuLabel}>My Dashboard</Text>
@@ -178,7 +172,6 @@ export default function MainDrawer() {
       drawerContent={(props) => <CustomDrawerContent {...props} />}
     >
       <Drawer.Screen name="SuperAdminDashboard" component={SuperAdminDashboard} options={{ title: 'Super Admin Dashboard' }} />
-      <Drawer.Screen name="OrganizationDashboard" component={OrganizationDashboard} options={{ title: 'Organization' }} />
       <Drawer.Screen name="EmployeeDashboard" component={EmployeeDashboard} options={{ title: 'My Dashboard' }} />
       <Drawer.Screen name="Calendar" component={CalendarScreen} options={{ title: 'Calendar' }} />
       <Drawer.Screen name="Tasks" component={TasksScreen} options={{ title: 'Tasks' }} />

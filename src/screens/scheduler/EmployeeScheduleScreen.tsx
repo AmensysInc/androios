@@ -318,6 +318,9 @@ export default function EmployeeScheduleScreen() {
 
   const needsOrg = role === 'super_admin' || role === 'admin' || role === 'operations_manager';
   const isOrgManager = role === 'operations_manager' && user?.id;
+  /** Company managers see only their own shifts, not the full company grid. */
+  const selfScheduleOnly =
+    ['employee', 'house_keeping', 'maintenance', 'user'].includes(role || '') || role === 'manager';
 
   const companiesFiltered = useMemo(() => {
     if (needsOrg && !selectedOrgId) return [];
@@ -376,6 +379,47 @@ export default function EmployeeScheduleScreen() {
   }, [isOrgManager, role, user?.id, needsOrg, selectedOrgId]);
 
   const loadEmployeesAndShifts = useCallback(async () => {
+    if (selfScheduleOnly && user?.id) {
+      try {
+        const emp = await api.resolveEmployeeForUser(user);
+        if (!emp) {
+          setEmployees([]);
+          setShifts([]);
+          return;
+        }
+        const eid = String(emp.id ?? (emp as any).pk ?? (emp as any).user_id ?? '').trim();
+        if (!eid) {
+          setEmployees([]);
+          setShifts([]);
+          return;
+        }
+        const companyId =
+          String(
+            (emp as any).company_id ??
+              (emp as any).company ??
+              user?.company_id ??
+              user?.assigned_company ??
+              selectedCompanyId ??
+              ''
+          ).trim() || undefined;
+        if (companyId) setSelectedCompanyId((prev) => prev || companyId);
+        const single: Employee = { ...(emp as Employee), id: eid };
+        const shiftRaw = await api.getShiftsForEmployeeInRange({
+          employeeId: eid,
+          rangeStart,
+          rangeEnd,
+          companyId,
+        });
+        setEmployees([single]);
+        setShifts(Array.isArray(shiftRaw) ? shiftRaw : []);
+      } catch (e) {
+        console.warn(e);
+        setEmployees([]);
+        setShifts([]);
+      }
+      return;
+    }
+
     if (!selectedCompanyId) {
       setEmployees([]);
       setShifts([]);
@@ -397,7 +441,7 @@ export default function EmployeeScheduleScreen() {
       setEmployees([]);
       setShifts([]);
     }
-  }, [selectedCompanyId, rangeStart, rangeEnd]);
+  }, [selfScheduleOnly, user?.id, user?.company_id, user?.assigned_company, selectedCompanyId, rangeStart, rangeEnd]);
 
   const load = useCallback(async () => {
     if (!initialLoadDone.current) setLoading(true);
