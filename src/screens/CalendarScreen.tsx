@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
+import { getPrimaryRoleFromUser } from '../types/auth';
 import * as api from '../api';
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
@@ -132,6 +133,7 @@ function filterShiftLikeEventsToAssignee(events: any[], userId: string | undefin
 
 export default function CalendarScreen() {
   const { user, role } = useAuth();
+  const effectiveRole = role ?? (user ? getPrimaryRoleFromUser(user) : null);
   const { width } = useWindowDimensions();
   const [events, setEvents] = useState<any[]>([]);
   const [shifts, setShifts] = useState<any[]>([]);
@@ -145,24 +147,39 @@ export default function CalendarScreen() {
   });
 
   /** Only these roles see unscoped “all shifts” in the calendar. */
-  const loadsAllShiftsUnscoped = ['super_admin', 'operations_manager'].includes(role || '');
-  /** Staff who work shifts see their own rows only — not company managers (team shifts belong on Schedule, not here). */
-  const loadOwnEmployeeShifts = ['employee', 'house_keeping', 'maintenance', 'user'].includes(role || '');
+  const loadsAllShiftsUnscoped = ['super_admin', 'operations_manager'].includes(effectiveRole || '');
+  /** Staff + company managers: resolve scheduler employee and load that person’s shifts (not org-wide). */
+  const loadOwnEmployeeShifts = [
+    'employee',
+    'house_keeping',
+    'maintenance',
+    'user',
+    'manager',
+  ].includes(effectiveRole || '');
 
   const load = useCallback(async () => {
     try {
       let empId: string | null = null;
       let empCompanyId: string | undefined;
+      let empUserId: string | undefined;
       if (!loadOwnEmployeeShifts) {
         setEmployeeId(null);
       }
       if (loadOwnEmployeeShifts && user?.id) {
-        const emp = await api.resolveEmployeeForUser(user);
-        empId = emp?.id != null ? String(emp.id).trim() || null : null;
-        empCompanyId =
-          String(
-            (emp as any)?.company_id ?? (emp as any)?.company ?? user?.company_id ?? user?.assigned_company ?? ''
-          ).trim() || undefined;
+        let emp = await api.findSchedulerEmployeeForAuthUser(user);
+        if (!emp) {
+          try {
+            const fresh = await api.getCurrentUser();
+            if (fresh && typeof fresh === 'object') {
+              emp = await api.findSchedulerEmployeeForAuthUser({ ...user, ...(fresh as object) });
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+        empId = emp != null ? String((emp as any).id ?? (emp as any).pk ?? '').trim() || null : null;
+        empCompanyId = api.companyIdFromSchedulerEmployee(emp, user);
+        empUserId = String((emp as any).user_id ?? (emp as any).user?.id ?? user?.id ?? '').trim() || undefined;
         setEmployeeId(empId);
       }
       const monthStart = new Date(viewMonth.getFullYear(), viewMonth.getMonth(), 1);
@@ -176,6 +193,7 @@ export default function CalendarScreen() {
         empId
           ? api.getShiftsForEmployeeInRange({
               employeeId: empId,
+              employeeUserId: empUserId,
               rangeStart: monthStart,
               rangeEnd: monthEnd,
               companyId: empCompanyId,
@@ -195,7 +213,16 @@ export default function CalendarScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [user?.id, user?.company_id, user?.assigned_company, loadsAllShiftsUnscoped, loadOwnEmployeeShifts, viewMonth, role]);
+  }, [
+    user?.id,
+    user?.email,
+    user?.company_id,
+    user?.assigned_company,
+    loadsAllShiftsUnscoped,
+    loadOwnEmployeeShifts,
+    viewMonth,
+    effectiveRole,
+  ]);
 
   useEffect(() => {
     load();
@@ -210,7 +237,16 @@ export default function CalendarScreen() {
     () =>
       [
         ...events.map((e) => ({ ...e, kind: 'event' as const, start: e.start_time, title: e.title || 'Event' })),
-        ...shifts.map((s) => ({ ...s, kind: 'shift' as const, start: s.start_time, title: 'Shift' })),
+        ...shifts.map((s) => {
+          const startRaw = s.start_time ?? s.date ?? s.shift_date ?? s.start;
+          const ms = api.shiftStartsAtMs(s);
+          return {
+            ...s,
+            kind: 'shift' as const,
+            start: ms != null ? new Date(ms).toISOString() : startRaw,
+            title: 'Shift',
+          };
+        }),
       ].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()),
     [events, shifts]
   );

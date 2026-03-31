@@ -66,10 +66,13 @@ function buildCompanyWriteBody(data: Record<string, any>, mode: 'create' | 'patc
 
 export function normalizePaginatedList<T extends Record<string, any>>(raw: any): T[] {
   if (raw == null) return [];
-  if (Array.isArray(raw)) return raw.map((x) => attachId(x));
+  if (Array.isArray(raw)) return raw.filter(Boolean).map((x) => attachId(x));
   if (typeof raw === 'object') {
     const list =
       raw.results ??
+      raw.events ??
+      raw.calendar_events ??
+      raw.employees ??
       raw.sessions ??
       raw.focus_sessions ??
       raw.organizations ??
@@ -80,15 +83,24 @@ export function normalizePaginatedList<T extends Record<string, any>>(raw: any):
       raw.items ??
       raw.records ??
       (Array.isArray(raw.data) ? raw.data : undefined);
-    if (Array.isArray(list)) return list.map((x) => attachId(x));
+    if (Array.isArray(list)) return list.filter(Boolean).map((x) => attachId(x));
+    if (raw.employee && typeof raw.employee === 'object' && !Array.isArray(raw.employee)) {
+      return [attachId(raw.employee as T)];
+    }
     if (raw.data && typeof raw.data === 'object' && !Array.isArray(raw.data)) {
       const inner =
         raw.data.results ??
+        raw.data.events ??
+        raw.data.calendar_events ??
+        raw.data.employees ??
         raw.data.sessions ??
         raw.data.items ??
         raw.data.organizations ??
         raw.data.schedule_templates;
-      if (Array.isArray(inner)) return inner.map((x) => attachId(x));
+      if (Array.isArray(inner)) return inner.filter(Boolean).map((x) => attachId(x));
+      if (raw.data.employee && typeof raw.data.employee === 'object' && !Array.isArray(raw.data.employee)) {
+        return [attachId(raw.data.employee as T)];
+      }
     }
   }
   return [attachId(raw as T)];
@@ -405,9 +417,60 @@ export async function changePassword(data: { old_password: string; new_password:
 }
 
 // —— Calendar / tasks (events) ——
+/** List normalization tuned for GET /calendar/events/ (common alternate response keys). */
+function normalizeCalendarEventsList(raw: any): any[] {
+  const fromPaginated = normalizePaginatedList(raw);
+  if (fromPaginated.length > 0) return fromPaginated;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const nested = (raw as any).data;
+    if (nested && typeof nested === 'object') {
+      const ev = (nested as any).events ?? (nested as any).calendar_events ?? (nested as any).results;
+      if (Array.isArray(ev) && ev.length) return ev.filter(Boolean).map((x) => attachId(x));
+    }
+  }
+  return fromPaginated;
+}
+
 export async function getCalendarEvents(params?: Record<string, any>) {
   const raw = await apiClient.get<any>('/calendar/events/', params);
-  return normalizePaginatedList(raw);
+  let list = normalizeCalendarEventsList(raw);
+  if (list.length > 0 || !params || Object.keys(params).length === 0) return list;
+
+  // Same path, alternate query param names (DRF / custom filters vary by deployment).
+  const alt: Record<string, any> = { ...params };
+  let changed = false;
+  if (params.start_time__gte != null) {
+    delete alt.start_time__gte;
+    alt.start__gte = params.start_time__gte;
+    const d = String(params.start_time__gte).slice(0, 10);
+    if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+      alt.date__gte = d;
+    }
+    changed = true;
+  }
+  if (params.start_time__lte != null) {
+    delete alt.start_time__lte;
+    alt.end__lte = params.start_time__lte;
+    const d = String(params.start_time__lte).slice(0, 10);
+    if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
+      alt.date__lte = d;
+    }
+    changed = true;
+  }
+  if (params.event_type != null && params.type == null) {
+    delete alt.event_type;
+    alt.type = params.event_type;
+    changed = true;
+  }
+  if (changed) {
+    try {
+      const raw2 = await apiClient.get<any>('/calendar/events/', alt);
+      list = normalizeCalendarEventsList(raw2);
+    } catch {
+      /* ignore */
+    }
+  }
+  return list;
 }
 export async function createCalendarEvent(data: any) {
   return apiClient.post<any>('/calendar/events/', data);
@@ -773,42 +836,373 @@ export async function getEmployees(params?: Record<string, any>): Promise<Schedu
   const raw = await apiClient.get<any>('/scheduler/employees/', params);
   return normalizePaginatedList<SchedulerEmployee>(raw);
 }
+
+function schedulerEmployeeCompanyId(e: Record<string, any> | null | undefined): string {
+  if (!e || typeof e !== 'object') return '';
+  const c = e.company_id ?? e.company;
+  if (c != null && typeof c === 'object') {
+    const obj = c as any;
+    const id = obj.id ?? obj.pk ?? obj.uuid ?? obj.company_id ?? obj.company;
+    if (id != null && id !== '') return String(id).trim();
+  }
+  if (c != null && c !== '') return String(c).trim();
+  return '';
+}
+
+/**
+ * Company id(s) from `/auth/user/` — many backends nest `company_id` under `profile` only,
+ * so top-level `user.company_id` is missing and employees could not be resolved.
+ */
+function companyIdHintsFromAuthUser(u: any): string[] {
+  const seen = new Set<string>();
+  const add = (raw: any) => {
+    if (raw == null || raw === '') return;
+    if (typeof raw === 'object' && !Array.isArray(raw)) {
+      const obj = raw as any;
+      const id = obj.id ?? obj.pk ?? obj.uuid ?? obj.company_id ?? obj.company;
+      const s = id != null ? String(id).trim() : '';
+      if (s && !s.toLowerCase().includes('object')) seen.add(s);
+      return;
+    }
+    const s = String(raw).trim();
+    if (s && !s.toLowerCase().includes('object')) seen.add(s);
+  };
+  if (!u || typeof u !== 'object') return [];
+  add(u.company_id);
+  add(u.assigned_company);
+  add((u as any).profile?.company_id);
+  add((u as any).profile?.assigned_company);
+  add((u as any).user_profile?.company_id);
+  add((u as any).user_profile?.assigned_company);
+  add((u as any).selected_company);
+  add(u.company);
+  add((u as any).profile?.company);
+  const ids = (u as any).company_ids;
+  if (Array.isArray(ids)) for (const x of ids) add(x);
+  const mem = (u as any).memberships ?? (u as any).company_memberships;
+  if (Array.isArray(mem)) {
+    for (const m of mem) {
+      if (m && typeof m === 'object') {
+        add((m as any).company_id);
+        add((m as any).company);
+        const co = (m as any).company;
+        if (co && typeof co === 'object') add((co as any).id);
+      }
+    }
+  }
+  return [...seen];
+}
+
+/** Company UUID for API filters — avoids `String(nestedCompany)` → "[object Object]". */
+export function companyIdFromSchedulerEmployee(emp: any, user?: any): string | undefined {
+  const fromEmp = schedulerEmployeeCompanyId(emp);
+  if (fromEmp) return fromEmp;
+  if (user) {
+    const hints = companyIdHintsFromAuthUser(user);
+    if (hints.length > 0) return hints[0];
+  }
+  return undefined;
+}
+
+/** Prefer UTC instant from API; fall back to date-only fields (YYYY-MM-DD) at local noon. */
+export function shiftStartsAtMs(s: any): number | null {
+  const stRaw = s?.start_time ?? s?.start ?? s?.start_at ?? s?.time_in ?? s?.start_datetime;
+  if (stRaw) {
+    const t = new Date(stRaw);
+    if (!Number.isNaN(t.getTime())) return t.getTime();
+  }
+  const d = s?.date ?? s?.shift_date ?? s?.work_date;
+  if (d == null || d === '') return null;
+  if (typeof d === 'string') {
+    const m = d.trim().match(/^(\d{4}-\d{2}-\d{2})/);
+    if (m) {
+      const t = new Date(`${m[1]}T12:00:00`);
+      if (!Number.isNaN(t.getTime())) return t.getTime();
+    }
+  }
+  const t2 = new Date(d as any);
+  return Number.isNaN(t2.getTime()) ? null : t2.getTime();
+}
+
+export function shiftOverlapsRange(s: any, rangeStart: Date, rangeEnd: Date): boolean {
+  const t = shiftStartsAtMs(s);
+  if (t == null) return false;
+  const lo = rangeStart.getTime();
+  const hi = rangeEnd.getTime();
+  return t >= lo - 60_000 && t <= hi + 60_000;
+}
+
+/**
+ * All employees for a company — tries large page sizes and param names, then filters a broad list.
+ * Plain `getEmployees({ company })` often returns only the first DRF page (e.g. 25 rows).
+ */
+export async function getEmployeesForCompany(companyId: string): Promise<SchedulerEmployee[]> {
+  const cid = String(companyId || '').trim();
+  if (!cid) return [];
+
+  const attempts: Record<string, any>[] = [
+    { company: cid, page_size: 1000 },
+    { company_id: cid, page_size: 1000 },
+    { company: cid, limit: 1000 },
+    { company_id: cid, limit: 1000 },
+    { company: cid },
+    { company_id: cid },
+  ];
+
+  let best: SchedulerEmployee[] = [];
+  for (const params of attempts) {
+    try {
+      const rows = await getEmployees(params);
+      if (Array.isArray(rows) && rows.length > best.length) best = rows;
+    } catch {
+      /* next */
+    }
+  }
+  if (best.length > 0) return best;
+
+  const broadAttempts: Record<string, any>[] = [{ page_size: 2000 }, { limit: 2000 }, {}];
+  for (const params of broadAttempts) {
+    try {
+      const all = await getEmployees(params);
+      const list = Array.isArray(all) ? all : [];
+      const filtered = list.filter((e) => schedulerEmployeeCompanyId(e) === cid);
+      if (filtered.length > 0) return filtered;
+    } catch {
+      /* next */
+    }
+  }
+  return [];
+}
+
+/** Some backends embed the scheduler row on `/auth/user/` or `/auth/users/:id/` under `employee`, etc. */
+function extractNestedEmployeeFromPayload(obj: any): any | null {
+  if (!obj || typeof obj !== 'object') return null;
+  const nestedKeys = ['scheduler_employee', 'employee', 'employee_record', 'employee_profile', 'staff_employee'];
+  for (const k of nestedKeys) {
+    const v = (obj as any)[k];
+    if (v && typeof v === 'object' && !Array.isArray(v) && (v.id != null || v.pk != null)) {
+      return attachId({ ...v });
+    }
+  }
+  const prof = (obj as any).profile;
+  if (prof && typeof prof === 'object') {
+    for (const k of nestedKeys) {
+      const v = (prof as any)[k];
+      if (v && typeof v === 'object' && !Array.isArray(v) && (v.id != null || v.pk != null)) {
+        return attachId({ ...v });
+      }
+    }
+  }
+  const up = (obj as any).user_profile;
+  if (up && typeof up === 'object') {
+    for (const k of nestedKeys) {
+      const v = (up as any)[k];
+      if (v && typeof v === 'object' && !Array.isArray(v) && (v.id != null || v.pk != null)) {
+        return attachId({ ...v });
+      }
+    }
+  }
+  return null;
+}
+
+async function trySchedulerEmployeeMeEndpoints(): Promise<any | null> {
+  // Cache which "me" endpoint exists to avoid repeated 404 spam on login.
+  // `null` means none exist on this backend.
+  // Persist on web so refresh doesn't re-probe.
+  const STORAGE_KEY = 'scheduler_employee_me_endpoint_cache_v1';
+  const readCache = (): string | null | undefined => {
+    try {
+      if (typeof sessionStorage === 'undefined') return undefined;
+      const raw = sessionStorage.getItem(STORAGE_KEY);
+      if (raw == null) return undefined;
+      return raw === '__none__' ? null : raw;
+    } catch {
+      return undefined;
+    }
+  };
+  const writeCache = (v: string | null) => {
+    try {
+      if (typeof sessionStorage === 'undefined') return;
+      sessionStorage.setItem(STORAGE_KEY, v == null ? '__none__' : v);
+    } catch {
+      /* ignore */
+    }
+  };
+  // module-level static via closure on first call
+  (trySchedulerEmployeeMeEndpoints as any)._cached =
+    (trySchedulerEmployeeMeEndpoints as any)._cached ?? readCache();
+  const cached: string | null | undefined = (trySchedulerEmployeeMeEndpoints as any)._cached;
+  if (cached === null) return null;
+
+  const candidates = cached
+    ? [cached]
+    : [
+        '/scheduler/employees/me/',
+        '/scheduler/employees/self/',
+        '/scheduler/employee/me/',
+        '/scheduler/employee/current/',
+        '/scheduler/employees/current/',
+      ];
+
+  for (const p of candidates) {
+    try {
+      const row = await apiClient.get<any>(p);
+      const unwrap =
+        row && typeof row === 'object'
+          ? (row as any).data ?? (row as any).result ?? (row as any).employee ?? row
+          : row;
+      if (unwrap && typeof unwrap === 'object') {
+        const id = (unwrap as any).id ?? (unwrap as any).pk;
+        if (id != null) {
+          (trySchedulerEmployeeMeEndpoints as any)._cached = p;
+          writeCache(p);
+          return attachId({ ...unwrap });
+        }
+      }
+    } catch (e: any) {
+      const st = e instanceof HttpError ? e.status : e?.status;
+      // If this endpoint doesn't exist / method is not allowed, skip it permanently.
+      if (st === 404 || st === 405) continue;
+      // Other errors: still allow caller to proceed to other strategies.
+    }
+  }
+  (trySchedulerEmployeeMeEndpoints as any)._cached = null;
+  writeCache(null);
+  return null;
+}
+
+async function tryFetchEmployeeFromAuthUserDetail(userId: string): Promise<any | null> {
+  if (!userId) return null;
+  // Some backends don't expose `/auth/users/:id/` (404). Cache that to avoid repeated probes.
+  (tryFetchEmployeeFromAuthUserDetail as any)._skip =
+    (tryFetchEmployeeFromAuthUserDetail as any)._skip ?? false;
+  if ((tryFetchEmployeeFromAuthUserDetail as any)._skip) return null;
+  try {
+    const detail = await apiClient.get<any>(`/auth/users/${encodeURIComponent(userId)}/`);
+    const inner = detail?.user && typeof detail.user === 'object' ? detail.user : detail;
+    return extractNestedEmployeeFromPayload(inner) ?? extractNestedEmployeeFromPayload(detail);
+  } catch (e: any) {
+    const st = e instanceof HttpError ? e.status : e?.status;
+    if (st === 404) (tryFetchEmployeeFromAuthUserDetail as any)._skip = true;
+    return null;
+  }
+}
+
+/** Some APIs expose only nested employee on `/auth/profile/` or user profile sub-resource. */
+async function tryFetchEmployeeFromProfileEndpoints(userId: string): Promise<any | null> {
+  // Cache unsupported profile GET endpoints (405/404) to avoid repeated login spam.
+  (tryFetchEmployeeFromProfileEndpoints as any)._skipAuthProfile =
+    (tryFetchEmployeeFromProfileEndpoints as any)._skipAuthProfile ?? false;
+  (tryFetchEmployeeFromProfileEndpoints as any)._skipUserProfile =
+    (tryFetchEmployeeFromProfileEndpoints as any)._skipUserProfile ?? false;
+  const paths: string[] = [];
+  if (!(tryFetchEmployeeFromProfileEndpoints as any)._skipAuthProfile) paths.push('/auth/profile/');
+  if (userId && !(tryFetchEmployeeFromProfileEndpoints as any)._skipUserProfile) {
+    paths.push(`/auth/users/${encodeURIComponent(userId)}/profile/`);
+  }
+  for (const p of paths) {
+    try {
+      const raw = await apiClient.get<any>(p);
+      const n = extractNestedEmployeeFromPayload(raw);
+      if (n) return n;
+      const inner = raw?.data ?? raw?.profile ?? raw?.result;
+      const n2 = extractNestedEmployeeFromPayload(inner);
+      if (n2) return n2;
+    } catch (e: any) {
+      const st = e instanceof HttpError ? e.status : e?.status;
+      if (p === '/auth/profile/' && (st === 404 || st === 405)) {
+        (tryFetchEmployeeFromProfileEndpoints as any)._skipAuthProfile = true;
+      }
+      if (p.includes('/auth/users/') && p.endsWith('/profile/') && (st === 404 || st === 405)) {
+        (tryFetchEmployeeFromProfileEndpoints as any)._skipUserProfile = true;
+      }
+    }
+  }
+  return null;
+}
+
 export async function resolveEmployeeForUser(
   user?: {
     id?: string | null;
     email?: string | null;
     company_id?: string | null;
     assigned_company?: string | null;
+    [k: string]: any;
   } | null
-) {
-  const userId = user?.id != null ? String(user.id) : '';
-  const userEmail = user?.email != null ? String(user.email).trim().toLowerCase() : '';
-  if (!userId && !userEmail) return null;
-
-  const tryFetch = async (params?: Record<string, any>) => {
-    try {
-      const rows = await getEmployees(params);
-      return Array.isArray(rows) ? rows : [];
-    } catch {
-      return [];
-    }
-  };
-
-  // Prefer Django-style FK filters. Do not send `user=…` here — common DRF setups reject it with 400.
-  if (userId) {
-    const paramAttempts: Record<string, any>[] = [
-      { user_id: userId },
-      { user__id: userId },
-      { owner: userId },
-    ];
-    for (const p of paramAttempts) {
-      const rows = await tryFetch(p);
-      if (rows.length > 0) return rows[0];
+): Promise<any | null> {
+  let resolvedUser: any = user;
+  if (user && typeof user === 'object') {
+    const uid = user.id != null ? String(user.id).trim() : '';
+    const uem =
+      user.email != null
+        ? String(user.email).trim().toLowerCase()
+        : user && typeof (user as any).profile === 'object' && (user as any).profile?.email != null
+          ? String((user as any).profile.email).trim().toLowerCase()
+          : '';
+    if (!uid && !uem) {
+      try {
+        const fresh = await getCurrentUser();
+        if (fresh && typeof fresh === 'object') {
+          resolvedUser = { ...user, ...fresh };
+        }
+      } catch {
+        /* ignore */
+      }
     }
   }
 
-  const all = await tryFetch();
-  if (all.length === 0) return null;
+  const userId = resolvedUser?.id != null ? String(resolvedUser.id).trim() : '';
+  const userEmail =
+    resolvedUser?.email != null
+      ? String(resolvedUser.email).trim().toLowerCase()
+      : resolvedUser && typeof (resolvedUser as any).profile === 'object' && (resolvedUser as any).profile?.email != null
+        ? String((resolvedUser as any).profile.email).trim().toLowerCase()
+        : '';
+  const userUsername =
+    resolvedUser?.username != null
+      ? String(resolvedUser.username).trim().toLowerCase()
+      : resolvedUser && typeof (resolvedUser as any).profile === 'object' && (resolvedUser as any).profile?.username != null
+        ? String((resolvedUser as any).profile.username).trim().toLowerCase()
+        : '';
+  if (!userId && !userEmail) return null;
+
+  const fromNested = extractNestedEmployeeFromPayload(resolvedUser);
+  if (fromNested) return fromNested;
+
+  try {
+    const fresh = await getCurrentUser();
+    if (fresh && typeof fresh === 'object') {
+      const n = extractNestedEmployeeFromPayload(fresh);
+      if (n) return n;
+    }
+  } catch {
+    /* ignore */
+  }
+
+  const meRow = await trySchedulerEmployeeMeEndpoints();
+  if (meRow) return meRow;
+
+  if (userId) {
+    const fromDetail = await tryFetchEmployeeFromAuthUserDetail(userId);
+    if (fromDetail) return fromDetail;
+  }
+
+  const fromProfile = await tryFetchEmployeeFromProfileEndpoints(userId);
+  if (fromProfile) return fromProfile;
+
+  const tryFetch = async (params?: Record<string, any>) => {
+    try {
+      const rows = await getEmployees({ page_size: 1000, ...params });
+      return Array.isArray(rows) ? rows : [];
+    } catch {
+      try {
+        const rows = await getEmployees(params);
+        return Array.isArray(rows) ? rows : [];
+      } catch {
+        return [];
+      }
+    }
+  };
 
   const rowUserId = (e: any): string =>
     String(e?.user_id ?? (typeof e?.user === 'object' && e?.user != null ? (e.user as any).id : e?.user) ?? '').trim();
@@ -819,82 +1213,316 @@ export async function resolveEmployeeForUser(
       (typeof linked === 'object' && linked ? (linked as any).email : null) ??
       e?.email ??
       e?.user_email ??
+      e?.work_email ??
+      e?.contact_email ??
+      (e?.profile && typeof e.profile === 'object' ? (e.profile as any).email : null) ??
       '';
     return String(linkedEmail).trim().toLowerCase();
   };
 
-  const hintCo = String(user?.company_id ?? user?.assigned_company ?? '').trim();
+  const rowUsername = (e: any): string => {
+    const u = e?.user;
+    const from =
+      (typeof u === 'object' && u ? (u as any).username : null) ?? e?.username ?? '';
+    return String(from).trim().toLowerCase();
+  };
 
-  const byUser = all.find((e: any) => rowUserId(e) === userId);
-  if (byUser) return byUser;
+  const normalizeGmailLocal = (e: string): string => {
+    const s = String(e || '').trim().toLowerCase();
+    if (!s.endsWith('@gmail.com') && !s.endsWith('@googlemail.com')) return s;
+    const at = s.indexOf('@');
+    if (at <= 0) return s;
+    const local = s.slice(0, at).replace(/\./g, '');
+    return `${local}@${s.slice(at + 1)}`;
+  };
 
-  if (userEmail) {
-    const byEmail = all.find((e: any) => rowEmail(e) === userEmail);
-    if (byEmail) return byEmail;
+  const pickMatch = (rows: any[]): any | null => {
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    if (userId) {
+      const byUser = rows.find((e: any) => rowUserId(e) === userId);
+      if (byUser) return byUser;
+    }
+    if (userEmail) {
+      const byEmail = rows.find((e: any) => rowEmail(e) === userEmail);
+      if (byEmail) return byEmail;
+      const nu = normalizeGmailLocal(userEmail);
+      const byGmail = rows.find((e: any) => normalizeGmailLocal(rowEmail(e)) === nu);
+      if (byGmail) return byGmail;
+    }
+    if (userUsername) {
+      const byUsername = rows.find((e: any) => rowUsername(e) === userUsername);
+      if (byUsername) return byUsername;
+    }
+    return null;
+  };
+
+  function pickByFullName(rows: any[], authUser: typeof resolvedUser): any | null {
+    if (!Array.isArray(rows) || rows.length === 0 || !authUser) return null;
+    const fn = String(
+      authUser.first_name ??
+        (authUser as any).profile?.first_name ??
+        (authUser as any).user_profile?.first_name ??
+        ''
+    )
+      .trim()
+      .toLowerCase();
+    const ln = String(
+      authUser.last_name ??
+        (authUser as any).profile?.last_name ??
+        (authUser as any).user_profile?.last_name ??
+        ''
+    )
+      .trim()
+      .toLowerCase();
+    const full = String(
+      (authUser as any).full_name ??
+        (authUser as any).profile?.full_name ??
+        (authUser as any).user_profile?.full_name ??
+        ''
+    )
+      .trim()
+      .toLowerCase();
+    const candidates: any[] = [];
+    for (const e of rows) {
+      const efn = String(e.first_name ?? '').trim().toLowerCase();
+      const eln = String(e.last_name ?? '').trim().toLowerCase();
+      if (fn && ln && efn === fn && eln === ln) candidates.push(e);
+      else if (full && `${efn} ${eln}`.trim() === full) candidates.push(e);
+    }
+    if (candidates.length === 1) return candidates[0];
+    return null;
   }
 
-  if (hintCo) {
-    const pool = all.filter((e: any) => String(e?.company_id ?? e?.company ?? '').trim() === hintCo);
-    const u = pool.find((e: any) => rowUserId(e) === userId);
-    if (u) return u;
-    if (userEmail) {
-      const em = pool.find((e: any) => rowEmail(e) === userEmail);
-      if (em) return em;
+  const pickOrName = (rows: any[]): any | null => pickMatch(rows) ?? pickByFullName(rows, resolvedUser);
+
+  const prof = resolvedUser && typeof resolvedUser.profile === 'object' ? resolvedUser.profile : null;
+  const up = resolvedUser && typeof resolvedUser.user_profile === 'object' ? resolvedUser.user_profile : null;
+  const hintedEmployeeId = String(
+    resolvedUser?.employee_id ??
+      resolvedUser?.scheduler_employee_id ??
+      (prof as any)?.employee_id ??
+      (up as any)?.employee_id ??
+      ''
+  ).trim();
+  if (hintedEmployeeId) {
+    try {
+      const row = await getEmployee(hintedEmployeeId);
+      if (row && typeof row === 'object') {
+        const r = attachId(row as any);
+        const hit = pickMatch([r]);
+        if (hit) return hit;
+        if (userEmail && rowEmail(r) === userEmail) return r;
+      }
+    } catch {
+      /* ignore */
     }
+  }
+
+  if (userId) {
+    // Cache unsupported filter keys (some backends 400 on unknown query params).
+    (resolveEmployeeForUser as any)._badEmployeeListKeys =
+      (resolveEmployeeForUser as any)._badEmployeeListKeys ?? new Set<string>();
+    const badKeys: Set<string> = (resolveEmployeeForUser as any)._badEmployeeListKeys;
+
+    const paramAttempts: Array<{ params: Record<string, any>; key: string }> = [
+      { params: { user_id: userId, page_size: 1000 }, key: 'user_id' },
+      { params: { user__id: userId, page_size: 1000 }, key: 'user__id' },
+      { params: { user: userId, page_size: 1000 }, key: 'user' },
+      { params: { auth_user: userId, page_size: 1000 }, key: 'auth_user' },
+      { params: { auth_user_id: userId, page_size: 1000 }, key: 'auth_user_id' },
+      { params: { owner: userId, page_size: 1000 }, key: 'owner' },
+    ].filter((x) => !badKeys.has(x.key));
+
+    for (const { params, key } of paramAttempts) {
+      let rows: any[] = [];
+      try {
+        rows = await tryFetch(params);
+      } catch {
+        rows = [];
+      }
+      const hit = pickMatch(rows);
+      if (hit) return hit;
+      // Detect 400 support issues by making a direct call once (tryFetch swallows status codes).
+      // If the backend 400s, mark this key as unsupported for future calls.
+      try {
+        await getEmployees({ [key]: userId, page_size: 1 });
+      } catch (e: any) {
+        const st = e instanceof HttpError ? e.status : e?.status;
+        if (st === 400) badKeys.add(key);
+      }
+    }
+  }
+
+  if (userEmail) {
+    const emailParams: Record<string, any>[] = [
+      { email: userEmail, page_size: 1000 },
+      { email__iexact: userEmail, page_size: 1000 },
+      { user__email: userEmail, page_size: 1000 },
+      { user__email__iexact: userEmail, page_size: 1000 },
+      { search: userEmail, page_size: 1000 },
+      { q: userEmail, page_size: 1000 },
+    ];
+    for (const p of emailParams) {
+      const rows = await tryFetch(p);
+      const hit = pickMatch(rows);
+      if (hit) return hit;
+    }
+  }
+
+  const orgHint =
+    (resolvedUser as any)?.organization_id ??
+    (resolvedUser as any)?.profile?.organization_id ??
+    (resolvedUser as any)?.user_profile?.organization_id;
+  if (orgHint != null && String(orgHint).trim() !== '') {
+    const oid = String(orgHint).trim();
+    const orgParams: Record<string, any>[] = [
+      { organization: oid, page_size: 1000 },
+      { organization_id: oid, page_size: 1000 },
+    ];
+    for (const p of orgParams) {
+      const rows = await tryFetch(p);
+      const hit = pickMatch(rows);
+      if (hit) return hit;
+    }
+  }
+
+  const companyHints = companyIdHintsFromAuthUser(resolvedUser);
+  for (const cid of companyHints) {
+    const companyRows = await getEmployeesForCompany(cid);
+    const hit = pickOrName(companyRows);
+    if (hit) return hit;
+  }
+
+  const broadAttempts: Record<string, any>[] = [
+    { page_size: 2000 },
+    { limit: 2000 },
+    { page_size: 500 },
+    {},
+  ];
+  for (const params of broadAttempts) {
+    const rows = await tryFetch(params);
+    const hit = pickOrName(rows);
+    if (hit) return hit;
+  }
+
+  const all = await tryFetch();
+  if (all.length > 0) {
+    const hit = pickOrName(all);
+    if (hit) return hit;
+    for (const cid of companyHints) {
+      const pool = all.filter((e: any) => schedulerEmployeeCompanyId(e) === cid);
+      const hit2 = pickOrName(pool);
+      if (hit2) return hit2;
+    }
+  }
+
+  const tryFetchShifts = async (params?: Record<string, any>) => {
+    try {
+      const rows = await getShifts({ page_size: 200, ...params });
+      return Array.isArray(rows) ? rows : [];
+    } catch {
+      try {
+        const rows = await getShifts(params);
+        return Array.isArray(rows) ? rows : [];
+      } catch {
+        return [];
+      }
+    }
+  };
+
+  try {
+    const since = new Date(Date.now() - 180 * 86400000).toISOString();
+    const shiftBatches = await Promise.all([
+      tryFetchShifts({ ordering: '-start_time' }),
+      tryFetchShifts({ start_time__gte: since, ordering: '-start_time' }),
+      tryFetchShifts({ ordering: '-id' }),
+    ]);
+    const shiftMerged = shiftBatches.flat();
+    const seenEmp = new Set<string>();
+    for (const s of shiftMerged) {
+      const eid = String(
+        s?.employee_id ??
+          (typeof s?.employee === 'object' && s?.employee != null
+            ? (s.employee as any).id ?? (s.employee as any).pk
+            : s?.employee) ??
+          ''
+      ).trim();
+      if (!eid || seenEmp.has(eid)) continue;
+      seenEmp.add(eid);
+      if (seenEmp.size > 48) break;
+      try {
+        const emp = await getEmployee(eid);
+        if (!emp || typeof emp !== 'object') continue;
+        const r = attachId(emp as any);
+        const hit = pickMatch([r]);
+        if (hit) return hit;
+      } catch {
+        /* next */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  try {
+    const companies = await getCompanies({ page_size: 500 });
+    const list = Array.isArray(companies) ? companies : [];
+    const seenCo = new Set<string>();
+    for (const c of list) {
+      const cid = String((c as any).id ?? (c as any).pk ?? '').trim();
+      if (!cid || seenCo.has(cid)) continue;
+      seenCo.add(cid);
+      const companyRows = await getEmployeesForCompany(cid);
+      const hit = pickOrName(companyRows);
+      if (hit) return hit;
+    }
+  } catch {
+    /* ignore */
   }
 
   return null;
 }
 
 /**
- * Find scheduler employee for an auth user — same as resolveEmployeeForUser, then scans
- * `getEmployees()` when list filters return nothing (common RBAC / query-param mismatch).
+ * Same resolution as {@link resolveEmployeeForUser} (company list + paginated scan).
+ * Kept for User Management and explicit “link user ↔ employee” flows.
  */
 export async function findSchedulerEmployeeForAuthUser(user?: {
   id?: string | null;
   email?: string | null;
   company_id?: string | null;
   assigned_company?: string | null;
+  [k: string]: any;
 } | null): Promise<any | null> {
-  const direct = await resolveEmployeeForUser(user);
-  if (direct) return direct;
-  const userId = user?.id != null ? String(user.id).trim() : '';
-  const userEmail = user?.email != null ? String(user.email).trim().toLowerCase() : '';
-  let all: any[] = [];
-  try {
-    all = await getEmployees();
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(all) || all.length === 0) return null;
-  const rowUserId = (e: any): string =>
-    String(e?.user_id ?? (typeof e?.user === 'object' && e?.user != null ? (e.user as any).id : e?.user) ?? '').trim();
-  const rowEmail = (e: any): string =>
-    String(
-      (typeof e?.user === 'object' && e?.user && (e.user as any).email ? (e.user as any).email : null) ??
-        e?.email ??
-        e?.user_email ??
-        ''
-    )
-      .trim()
-      .toLowerCase();
-  if (userId) {
-    const m = all.find((e) => rowUserId(e) === userId);
-    if (m) return m;
-  }
-  if (userEmail) {
-    const m = all.find((e) => rowEmail(e) === userEmail);
-    if (m) return m;
-  }
-  return null;
+  return resolveEmployeeForUser(user);
 }
 
 /** Resolve `employee` / nested employee id on a shift row for filtering. */
 function shiftRowEmployeeId(s: any): string {
   const v =
     s?.employee_id ??
-    (typeof s?.employee === 'object' && s?.employee != null ? (s.employee as any).id : s?.employee);
+    (typeof s?.employee === 'object' && s?.employee != null
+      ? (s.employee as any).id ?? (s.employee as any).pk ?? (s.employee as any).uuid ?? (s.employee as any).user_id
+      : s?.employee);
   return String(v ?? '').trim();
+}
+
+function shiftEmployeeIdsMatch(shiftRow: any, wanted: string): boolean {
+  const a = shiftRowEmployeeId(shiftRow);
+  const b = String(wanted || '').trim();
+  if (!a || !b) return false;
+  if (a.toLowerCase() === b.toLowerCase()) return true;
+  const na = Number(a);
+  const nb = Number(b);
+  if (!Number.isNaN(na) && !Number.isNaN(nb) && na === nb) return true;
+  return false;
+}
+
+function shiftEmployeeMatchesAny(shiftRow: any, wantedIds: string[]): boolean {
+  for (const w of wantedIds) {
+    if (shiftEmployeeIdsMatch(shiftRow, w)) return true;
+  }
+  return false;
 }
 
 /**
@@ -903,33 +1531,35 @@ function shiftRowEmployeeId(s: any): string {
  */
 export async function getShiftsForEmployeeInRange(params: {
   employeeId: string;
+  /**
+   * Optional: some backends store shift.employee as the auth user id (not scheduler employee id).
+   * When provided, we will query/filter by BOTH ids so employees can see assigned shifts reliably.
+   */
+  employeeUserId?: string | null;
   rangeStart: Date;
   rangeEnd: Date;
   companyId?: string | null;
 }): Promise<any[]> {
   const eid = String(params.employeeId || '').trim();
-  if (!eid) return [];
+  const uid = params.employeeUserId != null ? String(params.employeeUserId).trim() : '';
+  const wantedIds = Array.from(new Set([eid, uid].filter(Boolean)));
+  if (wantedIds.length === 0) return [];
 
-  const rangeLo = params.rangeStart.getTime();
-  const rangeHi = params.rangeEnd.getTime();
-  const eidNorm = eid.toLowerCase();
+  const employeeMatches = (s: any): boolean => shiftEmployeeMatchesAny(s, wantedIds);
 
-  const employeeMatches = (s: any): boolean => shiftRowEmployeeId(s).toLowerCase() === eidNorm;
-
-  const inRange = (s: any): boolean => {
-    const stRaw = s?.start_time ?? s?.start ?? s?.start_at ?? s?.time_in ?? s?.start_datetime;
-    const st = stRaw ? new Date(stRaw) : null;
-    if (!st || Number.isNaN(st.getTime())) return false;
-    const t = st.getTime();
-    return t >= rangeLo - 60_000 && t <= rangeHi + 60_000;
-  };
+  const inRange = (s: any): boolean => shiftOverlapsRange(s, params.rangeStart, params.rangeEnd);
 
   const tryQ = async (q: Record<string, any>) => {
     try {
-      const rows = await getShifts(q);
+      const rows = await getShifts({ page_size: 1000, ...q });
       return Array.isArray(rows) ? rows : [];
     } catch {
-      return [];
+      try {
+        const rows = await getShifts(q);
+        return Array.isArray(rows) ? rows : [];
+      } catch {
+        return [];
+      }
     }
   };
 
@@ -937,25 +1567,32 @@ export async function getShiftsForEmployeeInRange(params: {
   const re = params.rangeEnd.toISOString();
   const rsDate = rs.slice(0, 10);
   const reDate = re.slice(0, 10);
-  const cid = String(params.companyId || '').trim();
+  const cidRaw = String(params.companyId || '').trim();
+  const cid = cidRaw && !cidRaw.toLowerCase().includes('object') ? cidRaw : '';
 
   const queries: Record<string, any>[] = [];
+  const idsForQuery = wantedIds;
   if (cid) {
+    for (const id of idsForQuery) {
+      queries.push(
+        { company: cid, employee: id, start_time__gte: rs, start_time__lte: re },
+        { company_id: cid, employee_id: id, start_time__gte: rs, start_time__lte: re },
+        { company: cid, employee_id: id, start_time__gte: rs, start_time__lte: re },
+        { company: cid, employee: id, start_date: rs, end_date: re },
+        { company: cid, employee: id, start_date: rsDate, end_date: reDate },
+        { company: cid, employee: id }
+      );
+    }
+  }
+  for (const id of idsForQuery) {
     queries.push(
-      { company: cid, employee: eid, start_time__gte: rs, start_time__lte: re },
-      { company_id: cid, employee_id: eid, start_time__gte: rs, start_time__lte: re },
-      { company: cid, employee_id: eid, start_time__gte: rs, start_time__lte: re },
-      { company: cid, employee: eid, start_date: rs, end_date: re },
-      { company: cid, employee: eid, start_date: rsDate, end_date: reDate },
-      { company: cid, employee: eid }
+      { employee: id, start_time__gte: rs, start_time__lte: re },
+      { employee_id: id, start_time__gte: rs, start_time__lte: re },
+      { employee: id, start_date: rs, end_date: re },
+      { employee: id, start_date: rsDate, end_date: reDate },
+      { employee: id }
     );
   }
-  queries.push(
-    { employee: eid, start_time__gte: rs, start_time__lte: re },
-    { employee_id: eid, start_time__gte: rs, start_time__lte: re },
-    { employee: eid, start_date: rs, end_date: re },
-    { employee: eid }
-  );
 
   for (const q of queries) {
     const rows = await tryQ(q);
@@ -969,7 +1606,7 @@ export async function getShiftsForEmployeeInRange(params: {
       rangeStart: params.rangeStart,
       rangeEnd: params.rangeEnd,
     });
-    const filtered = broad.filter(employeeMatches);
+    const filtered = broad.filter((s) => employeeMatches(s) && inRange(s));
     if (filtered.length > 0) return filtered;
   }
 
@@ -977,6 +1614,29 @@ export async function getShiftsForEmployeeInRange(params: {
   const ft = timeOnly.filter((s) => employeeMatches(s) && inRange(s));
   if (ft.length > 0) return ft;
 
+  const merged: any[] = [];
+  for (const id of idsForQuery) {
+    const looseA = await tryQ({ employee: id, page_size: 2000 });
+    const looseB = await tryQ({ employee_id: id, page_size: 2000 });
+    merged.push(...looseA, ...looseB);
+  }
+  const seen = new Set<string>();
+  const looseFiltered = merged.filter((s) => {
+    const sid = String(s?.id ?? s?.pk ?? '').trim();
+    if (sid && seen.has(sid)) return false;
+    if (sid) seen.add(sid);
+    return employeeMatches(s) && inRange(s);
+  });
+  if (looseFiltered.length > 0) return looseFiltered;
+
+  if (typeof __DEV__ !== 'undefined' && __DEV__) {
+    console.warn('[shifts] none found for employee in range', {
+      wantedIds,
+      companyId: cid || null,
+      rangeStart: rsDate,
+      rangeEnd: reDate,
+    });
+  }
   return [];
 }
 export async function getEmployee(id: string) {
@@ -1156,10 +1816,15 @@ export async function getShiftsForCompanyInRange(params: {
 
   const tryQ = async (q: Record<string, any>) => {
     try {
-      const rows = await getShifts(q);
+      const rows = await getShifts({ page_size: 1000, ...q });
       return Array.isArray(rows) ? rows : [];
     } catch {
-      return [];
+      try {
+        const rows = await getShifts(q);
+        return Array.isArray(rows) ? rows : [];
+      } catch {
+        return [];
+      }
     }
   };
 
@@ -1181,20 +1846,13 @@ export async function getShiftsForCompanyInRange(params: {
   const cidNorm = normId(cid);
   const companyMatches = (s: any): boolean => {
     const c = s?.company_id ?? s?.company;
-    if (c == null || c === '') return true;
+    // When loading a specific company schedule, never accept shifts with unknown company,
+    // otherwise the UI can show other-company shifts under the selected company.
+    if (c == null || c === '') return false;
     return normId(c) === cidNorm;
   };
-  const rangeLo = params.rangeStart.getTime();
-  const rangeHi = params.rangeEnd.getTime();
-  const inRange = (s: any): boolean => {
-    const stRaw = s?.start_time ?? s?.start ?? s?.start_at ?? s?.time_in ?? s?.start_datetime;
-    const st = stRaw ? new Date(stRaw) : null;
-    if (!st || Number.isNaN(st.getTime())) return false;
-    const t = st.getTime();
-    // Small slack for timezone / DST edge cases around range boundaries.
-    return t >= rangeLo - 60_000 && t <= rangeHi + 60_000;
-  };
-  const normalizeRows = (rows: any[]): any[] => rows.filter((s: any) => companyMatches(s) && inRange(s));
+  const normalizeRows = (rows: any[]): any[] =>
+    rows.filter((s: any) => companyMatches(s) && shiftOverlapsRange(s, params.rangeStart, params.rangeEnd));
 
   const order: number[] = [];
   if (lastShiftRangeQueryIndex != null && lastShiftRangeQueryIndex >= 0 && lastShiftRangeQueryIndex < queryTries.length) {
@@ -1500,6 +2158,119 @@ export async function deleteShift(id: string) {
 }
 export async function publishShiftsWeek(data: any) {
   return apiClient.post<any>('/scheduler/shifts/publish_week/', data);
+}
+
+/**
+ * Publish a week's shifts.
+ *
+ * Some backends do not expose `/scheduler/shifts/publish_week/`, or restrict it by role (403),
+ * or require a very specific payload (400). This helper:
+ * - tries the publish endpoint with multiple payload shapes, then
+ * - falls back to PATCHing each shift to a "published" state.
+ *
+ * No backend model changes required.
+ */
+export async function publishShiftsWeekWithFallbacks(params: {
+  companyId: string;
+  rangeStart: Date;
+  rangeEnd: Date;
+  shiftIds: string[];
+}): Promise<{ ok: true; method: 'endpoint' | 'patch'; patchedCount?: number } | { ok: false; error: unknown }> {
+  const cid = String(params.companyId || '').trim();
+  if (!cid) return { ok: false, error: new Error('companyId is required') };
+  const ids = (Array.isArray(params.shiftIds) ? params.shiftIds : []).map((x) => String(x || '').trim()).filter(Boolean);
+  if (ids.length === 0) return { ok: false, error: new Error('No shift ids to publish') };
+
+  const rs = params.rangeStart.toISOString();
+  const re = params.rangeEnd.toISOString();
+  const rsDate = rs.slice(0, 10);
+  const reDate = re.slice(0, 10);
+
+  const clean = (obj: Record<string, any>) => {
+    const out: Record<string, any> = {};
+    Object.entries(obj).forEach(([k, v]) => {
+      if (v != null && v !== '') out[k] = v;
+    });
+    return out;
+  };
+
+  const attempts: Record<string, any>[] = [
+    clean({ company: cid, company_id: cid, start_date: rs, end_date: re }),
+    clean({ company: cid, company_id: cid, start_date: rsDate, end_date: reDate }),
+    clean({ company: cid, company_id: cid, week_start: rsDate, week_end: reDate }),
+    clean({ company: cid, company_id: cid, start_time__gte: rs, start_time__lte: re }),
+    clean({ company: cid, company_id: cid, shift_ids: ids }),
+    clean({ company: cid, company_id: cid, shifts: ids }),
+  ];
+
+  let lastErr: unknown = null;
+  for (const body of attempts) {
+    if (Object.keys(body).length === 0) continue;
+    try {
+      await publishShiftsWeek(body);
+      return { ok: true, method: 'endpoint' };
+    } catch (e: any) {
+      lastErr = e;
+      const st = e instanceof HttpError ? e.status : e?.status;
+      // Keep trying other payload shapes on 400. If forbidden, stop and fall back to patching.
+      if (st === 400) continue;
+      if (st === 403) break;
+    }
+  }
+
+  // Fallback: PATCH each shift into a "published" state.
+  // Use multiple possible field names; verify by reloading one row.
+  const publishBodies: Record<string, any>[] = [
+    { status: 'Published' },
+    { status: 'published' },
+    { is_published: true },
+    { published: true },
+    { status: 'Published', is_published: true },
+    { status: 'published', is_published: true },
+  ];
+
+  let chosenBody: Record<string, any> | null = null;
+  for (const body of publishBodies) {
+    const w = scrubWrite(body);
+    if (Object.keys(w).length === 0) continue;
+    try {
+      await updateShift(ids[0], w);
+    } catch (e: any) {
+      const st = e instanceof HttpError ? e.status : e?.status;
+      if (st === 400) continue;
+      if (st === 403) {
+        // No permission to publish via patch either.
+        return { ok: false, error: lastErr ?? e };
+      }
+      lastErr = e;
+      continue;
+    }
+    const verify = await apiClient.get<any>(`/scheduler/shifts/${encodeURIComponent(ids[0])}/`).catch(() => null);
+    const st = String(verify?.status ?? '').toLowerCase();
+    const pub = Boolean(verify?.is_published ?? verify?.published ?? st === 'published');
+    if (pub) {
+      chosenBody = w;
+      break;
+    }
+  }
+
+  if (!chosenBody) return { ok: false, error: lastErr ?? new Error('Could not publish shifts') };
+
+  let patched = 1;
+  for (let i = 1; i < ids.length; i++) {
+    try {
+      await updateShift(ids[i], chosenBody);
+      patched++;
+    } catch (e) {
+      lastErr = e;
+      // keep going; partial publish is still better than nothing, caller can refresh
+    }
+  }
+
+  if (typeof __DEV__ !== 'undefined' && __DEV__) {
+    console.log('[publish] fallback patch used', { companyId: cid, patchedCount: patched });
+  }
+  return { ok: true, method: 'patch', patchedCount: patched };
 }
 export async function markShiftMissed(id: string) {
   return apiClient.post<any>(`/scheduler/shifts/${id}/mark_missed/`, {});
@@ -2592,8 +3363,28 @@ function dedupePaths(paths: string[]): string[] {
 function templateIdMatchesFkValue(v: any, templateId: string): boolean {
   const tid = String(templateId).trim();
   if (v == null) return false;
-  if (typeof v === 'object' && (v as any).id != null) return String((v as any).id).trim() === tid;
-  return String(v).trim() === tid;
+  const norm = (x: any): string => {
+    if (x == null) return '';
+    if (typeof x === 'object') {
+      const obj = x as any;
+      const raw = obj.id ?? obj.pk ?? obj.uuid ?? obj.template_id ?? obj.schedule_template_id ?? obj.week_template_id;
+      if (raw != null && raw !== '') return String(raw).trim();
+      const url = obj.url ?? obj.href ?? obj.self ?? obj.detail_url;
+      if (typeof url === 'string' && url.trim()) return String(url).trim();
+      return '';
+    }
+    return String(x).trim();
+  };
+  const a = norm(v);
+  if (!a) return false;
+  if (a === tid) return true;
+  // Accept hyperlink-like strings ending in `/.../<id>/`
+  if (a.includes('/') && (a.endsWith(`/${tid}/`) || a.endsWith(`/${tid}`))) return true;
+  // Numeric id equivalence (some serializers cast pk to int)
+  const na = Number(a);
+  const nt = Number(tid);
+  if (!Number.isNaN(na) && !Number.isNaN(nt) && na === nt) return true;
+  return false;
 }
 
 /** Whether a shift row’s FK fields point at the given schedule-template id (read after PATCH). */
@@ -2792,35 +3583,14 @@ async function patchTemplateShiftsOnce(
     /* ignore */
   }
 
-  const root = detailPath.replace(/\/+$/, '');
-  const postActions = [
-    `${root}/set_shifts/`,
-    `${root}/link_shifts/`,
-    `${root}/link-shifts/`,
-    `${root}/sync_shifts/`,
-    `${root}/add_shifts/`,
-  ];
-  const postBodies: Record<string, any>[] = [
-    scrubWrite({ shift_ids: ids }),
-    scrubWrite({ shifts: ids }),
-    scrubWrite({ shift_ids: ids.map((id) => normalizePkForApi(String(id))) }),
-  ].filter((b) => Object.keys(b).length > 0);
-
-  for (const actionPath of postActions) {
-    for (const pb of postBodies) {
-      try {
-        const posted = await apiClient.post<any>(actionPath, pb);
-        if (posted && typeof posted === 'object' && countShiftsOnTemplateRow(posted)) {
-          return { linked: true, detail: posted };
-        }
-      } catch (e: any) {
-        const st = e instanceof HttpError ? e.status : e?.status;
-        if (st === 400) continue;
-        if (st === 404) break;
-        throw e;
-      }
-    }
-  }
+  /**
+   * Some backends expose custom POST actions like:
+   * `/scheduler/schedule-templates/<id>/set_shifts/` or `/link_shifts/`.
+   * When absent, they produce noisy 404s in the console. We intentionally skip these optional
+   * action routes and rely on:
+   * - PATCH bodies above (common DRF writable M2M shapes), then
+   * - shift-FK linking fallback (`linkShiftsToScheduleTemplateViaShiftFk`) in the caller.
+   */
 
   try {
     const finalRow = await apiClient.get<any>(detailPath);
@@ -3073,13 +3843,152 @@ export async function createScheduleTemplateWithFallbacks(params: {
       : new HttpError('Could not create schedule template', 400, { lastError: String(lastCreateErr ?? '') });
   }
 
-  return await finalizeTemplate(createdRaw);
+  const finalized = await finalizeTemplate(createdRaw);
+  const tid = String(finalized?.id ?? finalized?.pk ?? finalized?.uuid ?? '').trim();
+  let finalCount = countShiftsOnTemplateRow(finalized);
+  if (finalCount === 0 && tid && shiftIdsFromApi.length > 0) {
+    finalCount = await countShiftsLinkedViaShiftListFilter(tid, shiftIdsFromApi);
+  }
+  if (tid && shiftIdsFromApi.length > 0 && finalCount === 0) {
+    // Critical invariant: never leave an empty template behind.
+    try {
+      await deleteScheduleTemplate(tid, cid);
+    } catch {
+      /* best-effort rollback */
+    }
+    throw new Error('Template created without linked shifts - INVALID STATE');
+  }
+  return finalized;
 }
 
 export async function updateScheduleTemplate(id: string, data: Record<string, any>) {
   const cid = String(data.company ?? data.company_id ?? '').trim() || null;
   const path = pickScheduleTemplateDetailPatchPath(id, undefined, cid);
   return await apiClient.patch<any>(path, data);
+}
+
+/**
+ * Update an existing schedule template and (re)link shifts to it.
+ * This mirrors the create flow’s robustness (multiple writable M2M shapes + shift-FK fallback)
+ * without changing any backend models.
+ *
+ * Critical invariant: if `shiftIdsFromApi` is non-empty, the template must end up linked.
+ * Otherwise we throw (invalid state) so callers can surface the failure.
+ */
+export async function updateScheduleTemplateWithFallbacks(params: {
+  templateId: string;
+  companyId: string;
+  organizationId?: string | null;
+  rangeStart: Date;
+  rangeEnd: Date;
+  shifts: any[];
+}): Promise<any> {
+  const tid = String(params.templateId || '').trim();
+  const cid = String(params.companyId || '').trim();
+  if (!tid) throw new Error('templateId is required');
+  if (!cid) throw new Error('companyId is required');
+
+  const rsIso = params.rangeStart.toISOString();
+  const reIso = params.rangeEnd.toISOString();
+  const rsDate = rsIso.slice(0, 10);
+  const reDate = reIso.slice(0, 10);
+  const oid = params.organizationId ? String(params.organizationId).trim() : '';
+  const label = `Schedule ${rsDate} – ${reDate}`;
+
+  const shiftsIn = Array.isArray(params.shifts) ? params.shifts : [];
+  if (shiftsIn.length === 0) throw new Error('No shifts provided to update template');
+
+  const shiftIdsFromApi = shiftsIn
+    .map((s: any) => String(s?.id ?? s?.pk ?? s?.uuid ?? '').trim())
+    .filter(Boolean);
+  if (shiftIdsFromApi.length === 0) {
+    throw new Error(
+      'Cannot update template: shifts must be saved on the server first (no shift ids). Return to the schedule, ensure shifts load, then save again.'
+    );
+  }
+  const shiftIdsNumeric = normalizeShiftPkList(shiftIdsFromApi);
+
+  const metaCompany = scrubWrite({
+    company: cid,
+    name: label,
+    week_start: rsDate,
+    week_end: reDate,
+    ...(oid ? { organization: oid } : {}),
+  });
+  const metaCompanyId = scrubWrite({
+    company_id: cid,
+    name: label,
+    week_start: rsDate,
+    week_end: reDate,
+    ...(oid ? { organization_id: oid } : {}),
+  });
+
+  // Try a few PATCH shapes that various DRF serializers accept.
+  const patchAttempts: Record<string, any>[] = [
+    { ...metaCompany, shifts: shiftIdsNumeric.length ? shiftIdsNumeric : shiftIdsFromApi },
+    { ...metaCompany, shift_ids: shiftIdsNumeric.length ? shiftIdsNumeric : shiftIdsFromApi },
+    { ...metaCompanyId, shifts: shiftIdsNumeric.length ? shiftIdsNumeric : shiftIdsFromApi },
+    { ...metaCompanyId, shift_ids: shiftIdsNumeric.length ? shiftIdsNumeric : shiftIdsFromApi },
+    metaCompany,
+    metaCompanyId,
+  ];
+
+  let baseRow: any | null = null;
+  try {
+    baseRow = await getScheduleTemplateDetail(tid, cid, undefined);
+  } catch {
+    baseRow = null;
+  }
+
+  let patchedRow: any | null = null;
+  for (const attempt of patchAttempts) {
+    const body = scrubWrite(attempt);
+    if (Object.keys(body).length === 0) continue;
+    try {
+      patchedRow = await updateScheduleTemplate(tid, body);
+      break;
+    } catch (e: any) {
+      const st = e instanceof HttpError ? e.status : e?.status;
+      if (st === 400) continue;
+      throw e;
+    }
+  }
+
+  let resolved = patchedRow ?? baseRow ?? { id: tid, company: cid, name: label, week_start: rsDate, week_end: reDate };
+  let count = countShiftsOnTemplateRow(resolved);
+
+  // If still empty, try the same linking fallbacks as create.
+  if (count === 0 && shiftIdsFromApi.length > 0) {
+    const { linked, detail } = await patchTemplateShiftsOnce(tid, shiftIdsFromApi, resolved, cid);
+    if (linked && detail) {
+      resolved = detail;
+      count = countShiftsOnTemplateRow(detail);
+    }
+  }
+
+  if (count === 0 && shiftIdsFromApi.length > 0) {
+    const fkOk = await linkShiftsToScheduleTemplateViaShiftFk(tid, shiftIdsFromApi);
+    if (fkOk) {
+      const after = await getScheduleTemplateDetail(tid, cid, resolved);
+      if (after) {
+        resolved = after;
+        count = countShiftsOnTemplateRow(after);
+      }
+      if (count === 0) {
+        const n = await countShiftsLinkedViaShiftListFilter(tid, shiftIdsFromApi);
+        if (n > 0) {
+          count = n;
+          resolved = { ...resolved, shift_ids: shiftIdsFromApi, shift_count: n };
+        }
+      }
+    }
+  }
+
+  if (shiftIdsFromApi.length > 0 && count === 0) {
+    throw new Error('Template updated without linked shifts - INVALID STATE');
+  }
+
+  return resolved;
 }
 
 function normalizeScheduleTemplateDeleteEndpoint(pathOrUrl: string): string | null {

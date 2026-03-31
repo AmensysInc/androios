@@ -206,6 +206,70 @@ function taskPriority(t: any): string {
 
 type TaskScope = 'personal' | 'admin_assigned' | 'template';
 
+function isTaskLikeEvent(t: any): boolean {
+  if (!t || typeof t !== 'object') return false;
+  if (t.is_task === true || t.for_task === true) return true;
+  const etRaw = t.event_type ?? t.type ?? t.kind;
+  if (etRaw && typeof etRaw === 'object') {
+    const nested = String(
+      (etRaw as any).name ?? (etRaw as any).slug ?? (etRaw as any).label ?? ''
+    ).toLowerCase();
+    if (nested.includes('task')) return true;
+  }
+  const et = String(etRaw ?? '').toLowerCase();
+  if (et.includes('task')) return true;
+  // Some backends store tasks as calendar "events" with a subtype/category.
+  const sub = String(t.event_subtype ?? t.task_category ?? t.category ?? '').toLowerCase();
+  if (sub.includes('task')) return true;
+  // Heuristic: if task-specific fields exist, treat as task.
+  if (t.priority != null && String(t.priority).trim() !== '') return true;
+  if (t.completed === true || t.is_completed === true || t.done === true || t.is_done === true) return true;
+  // Assigned work items often omit event_type but include title + assignee FKs.
+  const hasAssignee =
+    t.assigned_user_id != null ||
+    t.assignee_id != null ||
+    (typeof t.assigned_user === 'object' && t.assigned_user != null) ||
+    (typeof t.assignee === 'object' && t.assignee != null);
+  const title = String(t.title ?? t.name ?? '').trim();
+  if (title && hasAssignee) {
+    const avoid = (s: string) =>
+      s.includes('meeting') || s.includes('focus') || s.includes('habit') || s.includes('routine');
+    if (typeof etRaw === 'object' && etRaw != null) {
+      const nest = String((etRaw as any).name ?? (etRaw as any).slug ?? '').toLowerCase();
+      if (avoid(nest)) return false;
+    }
+    if (avoid(et) || avoid(sub)) return false;
+    return true;
+  }
+  return false;
+}
+
+function eventOverlapsRange(ev: any, start: Date, end: Date): boolean {
+  const stRaw =
+    ev?.start_time ??
+    ev?.start ??
+    ev?.scheduled_at ??
+    ev?.date ??
+    ev?.start_date ??
+    ev?.created_at ??
+    ev?.created;
+  if (!stRaw) {
+    const enOnly = ev?.end_time ?? ev?.end ?? ev?.end_date;
+    if (!enOnly) return false;
+    const en = new Date(enOnly);
+    if (Number.isNaN(en.getTime())) return false;
+    return en.getTime() >= start.getTime() && en.getTime() <= end.getTime();
+  }
+  const st = new Date(stRaw);
+  if (Number.isNaN(st.getTime())) return false;
+  const enRaw = ev?.end_time ?? ev?.end ?? ev?.end_date;
+  const en = enRaw ? new Date(enRaw) : null;
+  if (en && !Number.isNaN(en.getTime())) {
+    return st.getTime() <= end.getTime() && en.getTime() >= start.getTime();
+  }
+  return st.getTime() >= start.getTime() && st.getTime() <= end.getTime();
+}
+
 function taskScopeCategory(t: any): TaskScope {
   if (t.template_id != null && String(t.template_id).trim() !== '') return 'template';
   if (t.template && typeof t.template === 'object') return 'template';
@@ -642,12 +706,15 @@ export default function TasksScreen() {
 
   const load = useCallback(async () => {
     try {
+      console.log('[tasks] Fetching tasks...');
       const { start, end } = getDateRangeForPreset(filterDate);
-      const baseParams: Record<string, any> = {
-        event_type: 'task',
+      // Prefer server-side filtering, but fall back to broader queries and client filtering
+      // because many backends do not support `event_type=task` or time-range filters consistently.
+      const rangeParams: Record<string, any> = {
         start_time__gte: start.toISOString(),
-        end_time__lte: end.toISOString(),
+        start_time__lte: end.toISOString(),
       };
+      const taskRangeParams: Record<string, any> = { event_type: 'task', ...rangeParams };
       const mergeUnique = (items: any[]) => {
         const seen = new Set<string>();
         const out: any[] = [];
@@ -659,41 +726,109 @@ export default function TasksScreen() {
         }
         return out;
       };
-      const fetchBy = async (extra?: Record<string, any>) => {
-        const res = await api.getCalendarEvents({ ...baseParams, ...(extra || {}) });
+      const fetchBy = async (base: Record<string, any>, extra?: Record<string, any>) => {
+        const params = { ...(base || {}), ...(extra || {}) };
+        if (typeof __DEV__ !== 'undefined' && __DEV__) {
+          console.log('[tasks] GET /calendar/events/', params);
+        }
+        const res = await api.getCalendarEvents(params);
         return Array.isArray(res) ? res : [];
       };
+
+      const applyClientTaskFilter = (items: any[]) =>
+        items.filter(Boolean).filter((t) => isTaskLikeEvent(t) && eventOverlapsRange(t, start, end));
+
+      const userScopeParams = (id: string) => [
+        { user: id },
+        { assigned_user: id },
+        { assignee: id },
+        { owner: id },
+        { user__id: id },
+        { assigned_user__id: id },
+      ];
 
       let raw: any[] = [];
       try {
         if (canViewAllMembers && filterMember !== 'all') {
-          const [byUser, byAssigned, byAssignee] = await Promise.all([
-            fetchBy({ user: filterMember }),
-            fetchBy({ assigned_user: filterMember }),
-            fetchBy({ assignee: filterMember }),
-          ]);
-          raw = mergeUnique([...byUser, ...byAssigned, ...byAssignee]);
+          const scoped = userScopeParams(filterMember);
+          const first = await Promise.all(scoped.map((extra) => fetchBy(taskRangeParams, extra)));
+          raw = mergeUnique(first.flat());
         } else if (!canViewAllMembers) {
           const uid = user?.id;
           if (!uid) {
             raw = [];
           } else {
-            const [byUser, byAssigned, byAssignee] = await Promise.all([
-              fetchBy({ user: uid }),
-              fetchBy({ assigned_user: uid }),
-              fetchBy({ assignee: uid }),
-            ]);
-            raw = mergeUnique([...byUser, ...byAssigned, ...byAssignee]);
+            const first = await Promise.all(userScopeParams(uid).map((extra) => fetchBy(taskRangeParams, extra)));
+            raw = mergeUnique(first.flat());
           }
         } else {
-          raw = await fetchBy();
+          raw = await fetchBy(taskRangeParams);
         }
       } catch {
-        const fallback = await fetchBy(user?.id ? { user: user.id } : undefined);
-        raw = mergeUnique(fallback);
+        raw = [];
       }
 
-      setTasks(raw);
+      let tasksOnly = applyClientTaskFilter(raw);
+      if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        console.log('[tasks] initial fetch results', { raw: raw.length, tasksOnly: tasksOnly.length });
+      }
+
+      // If nothing matches as a task in range, broaden the query (ignore event_type / bad filters) and filter client-side.
+      if (tasksOnly.length === 0) {
+        const uid = user?.id;
+        const extraSets: Array<Record<string, any> | undefined> = [];
+        if (canViewAllMembers && filterMember !== 'all') {
+          for (const p of userScopeParams(filterMember)) extraSets.push(p);
+        } else if (!canViewAllMembers && uid) {
+          for (const p of userScopeParams(uid)) extraSets.push(p);
+        } else if (uid) {
+          extraSets.push(undefined, { user: uid });
+        } else {
+          extraSets.push(undefined);
+        }
+
+        const batches = await Promise.all(
+          extraSets.map(async (extra) => {
+            const a = await fetchBy(rangeParams, extra).catch(() => []);
+            if (a.length > 0) return a;
+            const b = await fetchBy({}, extra).catch(() => []);
+            return b;
+          })
+        );
+        raw = mergeUnique(batches.flat());
+        tasksOnly = applyClientTaskFilter(raw);
+        if (typeof __DEV__ !== 'undefined' && __DEV__) {
+          console.log('[tasks] broadened fetch results', { raw: raw.length, tasksOnly: tasksOnly.length });
+        }
+      }
+      // Admin view: if the backend enforces scoping and we still got nothing, fetch per-user and merge.
+      // This keeps "All Tasks" working without backend model/API changes.
+      if (tasksOnly.length === 0 && canViewAllMembers && filterMember === 'all') {
+        const ids = memberOptions.map((o) => o.id).filter((id) => id !== 'all');
+        const subset = ids.slice(0, 40); // safety cap
+        if (subset.length > 0) {
+          const perUser = await Promise.all(
+            subset.map(async (id) => {
+              const rp = { start_time__gte: start.toISOString(), start_time__lte: end.toISOString() };
+              const batches = await Promise.all(
+                userScopeParams(id).map((extra) => fetchBy(rp, extra).catch(() => []))
+              );
+              return batches.flat();
+            })
+          );
+          const merged = mergeUnique(perUser.flat());
+          const tasksFromUsers = merged.filter((t) => isTaskLikeEvent(t) && eventOverlapsRange(t, start, end));
+          setTasks(tasksFromUsers);
+          return;
+        }
+      }
+      if (typeof __DEV__ !== 'undefined' && __DEV__ && tasksOnly.length === 0) {
+        console.warn('[tasks] no task-like events returned', { filterDate, canViewAllMembers, filterMember });
+      }
+      if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        console.log('[tasks] setTasks', { count: tasksOnly.length });
+      }
+      setTasks(tasksOnly);
     } catch (e) {
       console.warn(e);
       setTasks([]);
@@ -701,7 +836,7 @@ export default function TasksScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [user?.id, canViewAllMembers, filterMember, filterDate]);
+  }, [user?.id, canViewAllMembers, filterMember, filterDate, memberOptions]);
 
   useEffect(() => {
     loadMembers();

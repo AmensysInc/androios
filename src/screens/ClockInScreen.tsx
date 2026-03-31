@@ -47,7 +47,7 @@ export default function ClockInScreen() {
       return;
     }
     try {
-      const emp = await api.resolveEmployeeForUser(user);
+      const emp = await api.findSchedulerEmployeeForAuthUser(user);
       setEmployee(emp);
       if (!emp) {
         setLoading(false);
@@ -75,7 +75,7 @@ export default function ClockInScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [user?.id]);
+  }, [user?.id, user?.email, user?.company_id, user?.assigned_company]);
 
   useEffect(() => {
     load();

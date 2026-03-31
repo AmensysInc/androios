@@ -12,6 +12,7 @@ import {
 export interface User {
   id: string;
   email: string;
+  username?: string;
   full_name?: string;
   avatar_url?: string;
   status?: string;
@@ -19,6 +20,8 @@ export interface User {
   company_id?: string | null;
   assigned_company?: string | null;
   organization_id?: string | null;
+  profile?: Record<string, unknown>;
+  user_profile?: Record<string, unknown>;
 }
 
 type AuthState = {

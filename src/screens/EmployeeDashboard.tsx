@@ -47,11 +47,42 @@ function endOfWeek(d: Date) {
   return s;
 }
 
+function isTaskLikeEvent(t: any): boolean {
+  if (!t || typeof t !== 'object') return false;
+  const etRaw = t.event_type ?? t.type ?? t.kind;
+  if (etRaw && typeof etRaw === 'object') {
+    const nested = String((etRaw as any).name ?? (etRaw as any).slug ?? (etRaw as any).label ?? '').toLowerCase();
+    if (nested.includes('task')) return true;
+  }
+  const et = String(etRaw ?? '').toLowerCase();
+  if (et.includes('task')) return true;
+  const sub = String(t.event_subtype ?? t.task_category ?? t.category ?? '').toLowerCase();
+  if (sub.includes('task')) return true;
+  if (t.is_task === true || t.for_task === true) return true;
+  if (t.priority != null && String(t.priority).trim() !== '') return true;
+  return false;
+}
+
+function eventStartMs(ev: any): number | null {
+  const stRaw =
+    ev?.start_time ??
+    ev?.start ??
+    ev?.scheduled_at ??
+    ev?.date ??
+    ev?.start_date ??
+    ev?.created_at ??
+    ev?.created;
+  if (!stRaw) return null;
+  const ms = new Date(stRaw).getTime();
+  return Number.isNaN(ms) ? null : ms;
+}
+
 export default function EmployeeDashboard() {
   const { user } = useAuth();
   const [employee, setEmployee] = useState<any>(null);
   const [shifts, setShifts] = useState<any[]>([]);
   const [entries, setEntries] = useState<any[]>([]);
+  const [tasks, setTasks] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
@@ -68,7 +99,17 @@ export default function EmployeeDashboard() {
   const load = useCallback(async () => {
     if (!user?.id) return;
     try {
-      const emp = await api.resolveEmployeeForUser(user);
+      let emp = await api.findSchedulerEmployeeForAuthUser(user);
+      if (!emp) {
+        try {
+          const fresh = await api.getCurrentUser();
+          if (fresh && typeof fresh === 'object') {
+            emp = await api.findSchedulerEmployeeForAuthUser({ ...user, ...(fresh as object) });
+          }
+        } catch {
+          /* ignore */
+        }
+      }
       setEmployee(emp);
       if (!emp) {
         setLoading(false);
@@ -79,22 +120,51 @@ export default function EmployeeDashboard() {
       const weekStart = startOfWeek(today);
       const weekEnd = endOfWeek(today);
       const empId = String(emp.id ?? (emp as any).pk ?? '').trim();
-      const companyId =
-        String(
-          (emp as any).company_id ?? (emp as any).company ?? user?.company_id ?? user?.assigned_company ?? ''
-        ).trim() || undefined;
-      const [shiftList, entryList] = await Promise.all([
+      const empUserId = String((emp as any).user_id ?? (emp as any).user?.id ?? '').trim() || undefined;
+      const companyId = api.companyIdFromSchedulerEmployee(emp, user);
+      console.log('[employee-dashboard] Fetching tasks...');
+      const [shiftList, entryList, tasksList] = await Promise.all([
         api.getShiftsForEmployeeInRange({
           employeeId: empId,
+          employeeUserId: empUserId,
           rangeStart: weekStart,
           rangeEnd: weekEnd,
           companyId,
         }),
         api.getTimeClockEntriesForEmployee(empId),
+        (async () => {
+          const startIso = weekStart.toISOString();
+          const endIso = weekEnd.toISOString();
+          const uid = empUserId || String(user.id);
+          const base = { event_type: 'task', start_time__gte: startIso, start_time__lte: endIso };
+          const tries: Record<string, any>[] = [
+            { ...base, assigned_user: uid },
+            { ...base, assignee: uid },
+            { ...base, user: uid },
+            { ...base, owner: uid },
+            { start_time__gte: startIso, start_time__lte: endIso, assigned_user: uid },
+            { start_time__gte: startIso, start_time__lte: endIso, user: uid },
+          ];
+          for (const params of tries) {
+            try {
+              if (typeof __DEV__ !== 'undefined' && __DEV__) {
+                console.log('[employee-dashboard] GET /calendar/events/', params);
+              }
+              const res = await api.getCalendarEvents(params);
+              const list = Array.isArray(res) ? res : [];
+              const tasksOnly = list.filter(Boolean).filter(isTaskLikeEvent);
+              if (tasksOnly.length > 0) return tasksOnly;
+            } catch {
+              /* try next */
+            }
+          }
+          return [];
+        })(),
       ]);
       setShifts(Array.isArray(shiftList) ? shiftList : []);
       const list = Array.isArray(entryList) ? entryList : [];
       setEntries(list);
+      setTasks(Array.isArray(tasksList) ? tasksList : []);
       const active = api.pickActiveTimeClockEntry(list);
       setActiveEntry(active);
       const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
@@ -141,7 +211,7 @@ export default function EmployeeDashboard() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [user?.id, user?.company_id, user?.assigned_company]);
+  }, [user?.id, user?.email, user?.company_id, user?.assigned_company]);
 
   useEffect(() => {
     load();
@@ -170,7 +240,13 @@ export default function EmployeeDashboard() {
     return () => clearInterval(interval);
   }, [clockInTime, breakStartTime, breakEndTime, clockOutTime, totalBreakTime]);
 
-  const todayShift = shifts.find((s) => isToday(new Date(s.start_time))) || null;
+  const todayShift =
+    shifts.find((s) => {
+      const t = api.shiftStartsAtMs(s);
+      if (t == null) return false;
+      const d = new Date(t);
+      return isToday(d);
+    }) || null;
 
   const handleClockIn = async () => {
     if (!employee?.id) return;
@@ -286,7 +362,15 @@ export default function EmployeeDashboard() {
         <Text style={styles.name}>{[employee.first_name, employee.last_name].filter(Boolean).join(' ') || 'Employee'}</Text>
         {todayShift && (
           <Text style={styles.shiftText}>
-            Today: {formatTime(new Date(todayShift.start_time).getTime())} – {todayShift.end_time ? formatTime(new Date(todayShift.end_time).getTime()) : '—'}
+            Today:{' '}
+            {(() => {
+              const ms =
+                api.shiftStartsAtMs(todayShift) ??
+                (todayShift.start_time ? new Date(todayShift.start_time).getTime() : null);
+              return ms != null && !Number.isNaN(ms) ? formatTime(ms) : '—';
+            })()}
+            {' – '}
+            {todayShift.end_time ? formatTime(new Date(todayShift.end_time).getTime()) : '—'}
           </Text>
         )}
       </View>
@@ -331,14 +415,44 @@ export default function EmployeeDashboard() {
       {shifts.length > 0 && (
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Upcoming shifts</Text>
-          {shifts.slice(0, 7).map((s) => (
-            <Text key={s.id} style={styles.shiftRow}>
-              {new Date(s.start_time).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} – {formatTime(new Date(s.start_time).getTime())}
-              {s.end_time ? ` – ${formatTime(new Date(s.end_time).getTime())}` : ''}
-            </Text>
-          ))}
+          {shifts.slice(0, 7).map((s) => {
+            const startMs =
+              api.shiftStartsAtMs(s) ?? (s.start_time ? new Date(s.start_time).getTime() : null);
+            return (
+              <Text key={String(s.id ?? s.pk ?? startMs)} style={styles.shiftRow}>
+                {startMs != null
+                  ? `${new Date(startMs).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} – ${formatTime(startMs)}`
+                  : 'Shift'}
+                {s.end_time ? ` – ${formatTime(new Date(s.end_time).getTime())}` : ''}
+              </Text>
+            );
+          })}
         </View>
       )}
+      <View style={styles.card}>
+        <Text style={styles.sectionTitle}>Upcoming tasks</Text>
+        {tasks.length === 0 ? (
+          <Text style={styles.shiftRow}>No tasks found</Text>
+        ) : (
+          tasks
+            .slice()
+            .sort((a, b) => (eventStartMs(a) ?? 0) - (eventStartMs(b) ?? 0))
+            .slice(0, 6)
+            .map((t) => (
+              <Text
+                key={String(
+                  t?.id ??
+                    t?.pk ??
+                    t?.uuid ??
+                    `${String(t?.title ?? t?.name ?? '')}|${String(t?.start_time ?? t?.created_at ?? '')}`
+                )}
+                style={styles.shiftRow}
+              >
+                {String(t?.title ?? t?.name ?? 'Task')}
+              </Text>
+            ))
+        )}
+      </View>
     </ScrollView>
   );
 }

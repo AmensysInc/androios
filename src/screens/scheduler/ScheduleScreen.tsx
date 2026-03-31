@@ -28,7 +28,8 @@ import * as api from '../../api';
 type Organization = { id: string; name: string; [k: string]: any };
 type Company = { id: string; name: string; organization_id?: string; company_manager_id?: string; [k: string]: any };
 
-function companyOrganizationId(c: Company): string {
+function companyOrganizationId(c: Company | null | undefined): string {
+  if (c == null) return '';
   const v = c.organization_id ?? (c as any).organization;
   return v != null ? String(v) : '';
 }
@@ -751,6 +752,7 @@ export default function ScheduleScreen() {
   const [shiftStatus, setShiftStatus] = useState('Scheduled');
   const [scheduleEditMode, setScheduleEditMode] = useState(false);
   const [savedTemplates, setSavedTemplates] = useState<SavedWeekTemplate[]>([]);
+  const [editingTemplate, setEditingTemplate] = useState<SavedWeekTemplate | null>(null);
   const initialScheduleLoadDone = useRef(false);
   const [timePickerField, setTimePickerField] = useState<'start' | 'end' | null>(null);
   const [timePickerHour, setTimePickerHour] = useState(6);
@@ -921,7 +923,24 @@ export default function ScheduleScreen() {
       const drop = new Set(opts.dropTemplateIds.map((x) => String(x)));
       mapped = mapped.filter((m) => !drop.has(String(m.id)));
     }
-    setSavedTemplates(mapped);
+    // Some backends return empty shift lists on template LIST responses (even though detail has them).
+    // Preserve any previously-known non-empty template content so the UI doesn't show "empty template"
+    // right after saving.
+    setSavedTemplates((prev) => {
+      const prevById = new Map(prev.map((t) => [String(t.id), t] as const));
+      const merged = mapped.map((t) => {
+        const prior = prevById.get(String(t.id));
+        if (!prior) return t;
+        const tHasRealShifts = Array.isArray(t.shifts) && t.shifts.some((s) => String(s?.start_time || '').trim() !== '');
+        const priorHasRealShifts =
+          Array.isArray(prior.shifts) && prior.shifts.some((s) => String(s?.start_time || '').trim() !== '');
+        if ((!tHasRealShifts || t.shiftCount === 0) && priorHasRealShifts && prior.shiftCount > 0) {
+          return { ...t, shiftCount: prior.shiftCount, shifts: prior.shifts };
+        }
+        return t;
+      });
+      return merged;
+    });
   }, [selectedCompanyId, selectedOrgName, selectedCompanyName, selectedOrgId, needsOrg]);
 
   const load = useCallback(async () => {
@@ -1272,25 +1291,103 @@ export default function ScheduleScreen() {
         shifts: weekShiftsSnapshot,
       });
       await loadEmployeesAndShifts();
-      await api.createScheduleTemplateWithFallbacks({
-        companyId: cid,
-        organizationId: orgId,
-        rangeStart,
-        rangeEnd,
-        shifts: ensured,
-      });
+      const isEditingExistingTemplate =
+        editingTemplate != null &&
+        String(editingTemplate.companyId) === cid &&
+        new Date(editingTemplate.weekStartISO).toISOString().slice(0, 10) === rangeStart.toISOString().slice(0, 10) &&
+        new Date(editingTemplate.weekEndISO).toISOString().slice(0, 10) === rangeEnd.toISOString().slice(0, 10);
 
-      await removeWeekShiftsAndAdvance(ensured, { skipServerDelete: true });
-      Alert.alert(
-        'Saved',
-        'Schedule saved as a template. Moved to the next week — your shifts stay in the database for those dates (they are not deleted).'
-      );
+      const templateRow = isEditingExistingTemplate
+        ? await api.updateScheduleTemplateWithFallbacks({
+            templateId: editingTemplate!.id,
+            companyId: cid,
+            organizationId: orgId,
+            rangeStart,
+            rangeEnd,
+            shifts: ensured,
+          })
+        : await api.createScheduleTemplateWithFallbacks({
+            companyId: cid,
+            organizationId: orgId,
+            rangeStart,
+            rangeEnd,
+            shifts: ensured,
+          });
+
+      // Immediately reflect saved template with its shifts, even if the list serializer omits them.
+      try {
+        const mapped = mapScheduleTemplateApiToSaved(
+          templateRow,
+          selectedOrgName || 'Organization',
+          selectedCompanyName || 'Company',
+          cid
+        );
+        if (mapped) {
+          const shiftCountFallback = ensured.length;
+          const shiftsFallback = ensured
+            .map((s: any) => ({
+              employee: String(s?.employee_id ?? (typeof s?.employee === 'object' && s?.employee ? (s.employee as any).id : s?.employee) ?? '').trim(),
+              start_time: String(s?.start_time ?? s?.start ?? s?.start_at ?? '').trim(),
+              end_time: s?.end_time != null ? String(s.end_time).trim() : undefined,
+              break_duration_minutes: Number(s?.break_duration_minutes ?? s?.break_minutes ?? 0) || 0,
+              notes: s?.notes ? String(s.notes) : undefined,
+              shift_type: s?.shift_type ? String(s.shift_type) : undefined,
+              hourly_rate: s?.hourly_rate != null ? String(s.hourly_rate) : undefined,
+              status: s?.status ? String(s.status) : undefined,
+            }))
+            .filter((x: any) => x.employee && x.start_time);
+          const merged = {
+            ...mapped,
+            shiftCount: mapped.shiftCount > 0 ? mapped.shiftCount : shiftCountFallback,
+            shifts:
+              Array.isArray(mapped.shifts) && mapped.shifts.some((x) => String(x.start_time || '').trim() !== '')
+                ? mapped.shifts
+                : shiftsFallback,
+          };
+          setSavedTemplates((prev) => {
+            const tid = String(merged.id);
+            const next = [merged, ...prev.filter((t) => String(t.id) !== tid)];
+            return next;
+          });
+          setEditingTemplate(merged);
+        }
+      } catch {
+        /* optional */
+      }
+
+      // When updating an existing template, stay on the same week and do not create a new template id.
+      if (isEditingExistingTemplate) {
+        await loadScheduleTemplatesFromApi({ bustCache: true });
+        Alert.alert('Updated', 'Saved changes to the existing template.');
+      } else {
+        await removeWeekShiftsAndAdvance(ensured, { skipServerDelete: true });
+        Alert.alert(
+          'Saved',
+          'Schedule saved as a template. Moved to the next week — your shifts stay in the database for those dates (they are not deleted).'
+        );
+      }
     } catch (e: any) {
       Alert.alert('Save failed', api.formatSchedulerApiError(e));
     } finally {
       setSaveTemplateLoading(false);
     }
   };
+
+  // If the user navigates away from the edited week/company, stop treating Save as "update template".
+  useEffect(() => {
+    if (!editingTemplate) return;
+    if (!selectedCompanyId || String(editingTemplate.companyId) !== String(selectedCompanyId)) {
+      setEditingTemplate(null);
+      return;
+    }
+    const ws = new Date(editingTemplate.weekStartISO).toISOString().slice(0, 10);
+    const we = new Date(editingTemplate.weekEndISO).toISOString().slice(0, 10);
+    const curWs = rangeStart.toISOString().slice(0, 10);
+    const curWe = rangeEnd.toISOString().slice(0, 10);
+    if (ws !== curWs || we !== curWe) {
+      setEditingTemplate(null);
+    }
+  }, [editingTemplate, selectedCompanyId, rangeStart, rangeEnd]);
 
   const handlePublishTemplate = async () => {
     if (!selectedCompanyId || publishWeekLoading) return;
@@ -1351,25 +1448,23 @@ export default function ScheduleScreen() {
     }
 
     setPublishWeekLoading(true);
-    let lastErr: any = null;
     try {
-      for (const body of attempts) {
-        if (Object.keys(body).length === 0) continue;
-        try {
-          await api.publishShiftsWeek(body);
-          lastErr = null;
-          break;
-        } catch (e: any) {
-          lastErr = e;
-        }
-      }
-      if (lastErr) throw lastErr;
+      const res = await api.publishShiftsWeekWithFallbacks({
+        companyId: cid,
+        rangeStart,
+        rangeEnd,
+        shiftIds,
+      });
+      if (!res.ok) throw res.error;
 
       // Publishing should keep shifts in place so employees dashboards (which read `/scheduler/shifts/`)
       // can immediately reflect the published schedule. We only move the builder forward to the next week.
+      await loadEmployeesAndShifts();
       Alert.alert(
         'Published',
-        'Schedule published. Employees will see these shifts on their dashboard and calendar. The builder is moved to next week — add shifts there.'
+        res.method === 'patch'
+          ? `Schedule published (fallback). Updated ${res.patchedCount ?? shiftIds.length} shift(s). Employees will see these shifts on their dashboard and calendar. The builder is moved to next week — add shifts there.`
+          : 'Schedule published. Employees will see these shifts on their dashboard and calendar. The builder is moved to next week — add shifts there.'
       );
       goNextWeek();
     } catch (e: any) {
@@ -1820,6 +1915,7 @@ export default function ScheduleScreen() {
                             setWeekAnchor(ws);
                             setCustomRangeEnd(isStandardMondaySundayWeek(ws, we) ? null : we);
                             setScheduleEditMode(true);
+                            setEditingTemplate(t);
                           }}
                         >
                           <MaterialCommunityIcons name="pencil-outline" size={14} color="#fff" />

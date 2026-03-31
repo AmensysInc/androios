@@ -1372,6 +1372,61 @@ export default function UserManagementScreen() {
           }),
           clean({ company_id: nextCompany, first_name: firstName, last_name: lastName || undefined }),
         ]);
+
+        // If the backend created a NEW employee row on reassignment (instead of moving the old one),
+        // remove any lingering previous-company employee record so the user doesn't appear in both.
+        if (companyChanged && prevCompany) {
+          try {
+            let prevRows: any[] = [];
+            try {
+              prevRows = await api.getEmployees({ company: prevCompany });
+            } catch {
+              prevRows = [];
+            }
+            if (!Array.isArray(prevRows) || prevRows.length === 0) {
+              try {
+                prevRows = await api.getEmployees({ company_id: prevCompany });
+              } catch {
+                prevRows = [];
+              }
+            }
+            if (!Array.isArray(prevRows) || prevRows.length === 0) {
+              const all = await api.getEmployees().catch(() => []);
+              prevRows = Array.isArray(all)
+                ? all.filter((e: any) => String(e?.company_id ?? e?.company ?? '').trim() === String(prevCompany).trim())
+                : [];
+            }
+            const uid = String(editModal.id).trim();
+            const emailNorm = String(editForm.email || '').trim().toLowerCase();
+            for (const e of prevRows) {
+              const eid = String(e?.id ?? e?.pk ?? '').trim();
+              if (!eid) continue;
+              if (String(employeeId).trim() === eid) continue;
+              const linkedUid = employeeSchedulerUserId(e);
+              const linkedEmail = String(
+                (typeof e?.user === 'object' && e?.user && (e.user as any).email ? (e.user as any).email : null) ??
+                  e?.email ??
+                  e?.user_email ??
+                  ''
+              )
+                .trim()
+                .toLowerCase();
+              const matches = (linkedUid && linkedUid === uid) || (emailNorm && linkedEmail && linkedEmail === emailNorm);
+              if (!matches) continue;
+              try {
+                await api.deleteEmployee(eid);
+              } catch {
+                try {
+                  await api.updateEmployee(eid, { status: 'inactive' });
+                } catch {
+                  /* ignore cleanup failures */
+                }
+              }
+            }
+          } catch {
+            /* optional cleanup */
+          }
+        }
       } else if (employeeId && jt) {
         try {
           await api.updateSchedulerEmployeeWithFallbacks(employeeId, [

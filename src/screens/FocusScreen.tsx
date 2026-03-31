@@ -337,6 +337,24 @@ function formatSessionWhen(s: any): string {
   return start.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
 }
 
+function isTaskLikeEvent(ev: any): boolean {
+  if (!ev || typeof ev !== 'object') return false;
+  const et = String(ev.event_type ?? ev.type ?? ev.kind ?? '').toLowerCase();
+  if (et.includes('task')) return true;
+  const sub = String(ev.event_subtype ?? ev.task_category ?? ev.category ?? '').toLowerCase();
+  if (sub.includes('task')) return true;
+  if (ev.priority != null) return true;
+  if (ev.completed === true || ev.is_completed === true || ev.done === true || ev.is_done === true) return true;
+  return false;
+}
+
+function taskStartMs(ev: any): number | null {
+  const raw = ev?.start_time ?? ev?.start ?? ev?.created_at ?? ev?.created;
+  if (!raw) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d.getTime();
+}
+
 function PickerModal({
   visible,
   title,
@@ -874,8 +892,11 @@ export default function FocusScreen() {
     setTaskModal(true);
     setTasksLoading(true);
     try {
-      const raw = await api.getCalendarEvents({});
-      setTasks(Array.isArray(raw) ? raw : []);
+      const raw = await api.getCalendarEvents({}).catch(() => []);
+      const list = Array.isArray(raw) ? raw : [];
+      const tasksOnly = list.filter((t) => isTaskLikeEvent(t));
+      tasksOnly.sort((a, b) => (taskStartMs(b) ?? 0) - (taskStartMs(a) ?? 0));
+      setTasks(tasksOnly);
     } catch {
       setTasks([]);
     } finally {
@@ -979,8 +1000,11 @@ export default function FocusScreen() {
     setPlanModal(true);
     void (async () => {
       try {
-        const raw = await api.getCalendarEvents({});
-        if (Array.isArray(raw) && raw.length) setTasks(raw);
+        const raw = await api.getCalendarEvents({}).catch(() => []);
+        const list = Array.isArray(raw) ? raw : [];
+        const tasksOnly = list.filter((t) => isTaskLikeEvent(t));
+        tasksOnly.sort((a, b) => (taskStartMs(b) ?? 0) - (taskStartMs(a) ?? 0));
+        if (tasksOnly.length) setTasks(tasksOnly);
       } catch {
         /* keep existing task list */
       }

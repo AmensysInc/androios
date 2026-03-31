@@ -17,7 +17,8 @@ import * as api from '../../api';
 type Organization = { id: string; name: string; [k: string]: any };
 type Company = { id: string; name: string; organization_id?: string; company_manager_id?: string; [k: string]: any };
 
-function companyOrganizationId(c: Company): string {
+function companyOrganizationId(c: Company | null | undefined): string {
+  if (c == null) return '';
   const v = c.organization_id ?? (c as any).organization;
   return v != null ? String(v) : '';
 }

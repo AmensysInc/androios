@@ -23,9 +23,26 @@ import * as api from '../../api';
 type Organization = { id: string; name: string; [k: string]: any };
 type Company = { id: string; name: string; organization_id?: string; company_manager_id?: string; [k: string]: any };
 
-function companyOrganizationId(c: Company): string {
+function companyOrganizationId(c: Company | null | undefined): string {
+  if (c == null) return '';
   const v = c.organization_id ?? (c as any).organization;
   return v != null ? String(v) : '';
+}
+
+function organizationIdFromAuthUser(u: any): string {
+  if (!u || typeof u !== 'object') return '';
+  const raw =
+    u.organization_id ??
+    (typeof u.organization === 'object' && u.organization != null && (u.organization as any).id != null
+      ? (u.organization as any).id
+      : u.organization) ??
+    u.profile?.organization_id ??
+    u.user_profile?.organization_id ??
+    (typeof u.profile?.organization === 'object' && u.profile?.organization?.id != null
+      ? u.profile.organization.id
+      : u.profile?.organization);
+  const s = raw != null ? String(raw).trim() : '';
+  return s;
 }
 
 /** Backend `POST /scheduler/companies/` expects `type` (e.g. IT, Hospitality). */
@@ -77,6 +94,13 @@ function orgIsArchived(o: Organization): boolean {
   return st === 'archived' || st === 'inactive';
 }
 
+function companyIsArchived(c: Company): boolean {
+  const a = (c as any).archived ?? (c as any).is_archived ?? (c as any).deleted;
+  if (a === true || a === 'true' || a === 1 || a === '1') return true;
+  const st = String((c as any).status ?? '').toLowerCase();
+  return st === 'archived' || st === 'inactive';
+}
+
 function normalizeRoleToken(r: any): string {
   if (r == null) return '';
   const s = typeof r === 'string' ? r : r?.role || r?.name || '';
@@ -93,6 +117,23 @@ function companyManagerUserId(c: Company | null | undefined): string {
     '';
   if (v != null && typeof v === 'object' && (v as any).id != null) return String((v as any).id).trim();
   return v != null ? String(v).trim() : '';
+}
+
+/** Nested `company_manager` / `manager` object from API (not only an id). */
+function nestedCompanyManagerUser(c: Company | null | undefined): any | null {
+  if (!c) return null;
+  const m = (c as any).company_manager ?? (c as any).manager;
+  if (m && typeof m === 'object' && !Array.isArray(m)) {
+    if (
+      (m as any).id != null ||
+      (m as any).email ||
+      (m as any).username ||
+      (m as any).first_name
+    ) {
+      return m;
+    }
+  }
+  return null;
 }
 
 function employeeRowCompanyId(e: any): string {
@@ -147,11 +188,22 @@ function getUserLabel(u: any): string {
   return u?.username ?? u?.email ?? 'User';
 }
 
+function displayNameFromUserLike(u: any): string {
+  if (!u) return '';
+  const fn = String(u.first_name ?? '').trim();
+  const ln = String(u.last_name ?? '').trim();
+  if (fn || ln) return `${fn} ${ln}`.trim();
+  return getUserLabel(u);
+}
+
 function userEmail(u: any): string {
   return String(u?.email ?? u?.username ?? '').trim();
 }
 
 function userStatusToken(u: any): string {
+  if (u && typeof u === 'object' && typeof u.is_active === 'boolean') {
+    return u.is_active ? 'active' : 'inactive';
+  }
   const raw = u?.profile?.status ?? u?.status ?? '';
   const s = String(raw || '').trim().toLowerCase();
   if (!s) return 'active';
@@ -340,6 +392,9 @@ function ColorControl({
 
 export default function CompaniesScreen() {
   const { user, role } = useAuth();
+  /** Context `role` can lag one frame; align with web sidebar resolution. */
+  const effectiveRole = role ?? (user ? getPrimaryRoleFromUser(user) : null);
+  const authOrgId = React.useMemo(() => organizationIdFromAuthUser(user), [user]);
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [loading, setLoading] = useState(true);
@@ -370,6 +425,7 @@ export default function CompaniesScreen() {
   const [companyDetails, setCompanyDetails] = useState<Company | null>(null);
   const [companyDetailsEmployees, setCompanyDetailsEmployees] = useState<any[]>([]);
   const [companyDetailsEmployeesLoading, setCompanyDetailsEmployeesLoading] = useState(false);
+  const [companyDetailsManagerLoading, setCompanyDetailsManagerLoading] = useState(false);
   const [assignManagerCompany, setAssignManagerCompany] = useState<Company | null>(null);
   const [managerByCompany, setManagerByCompany] = useState<Record<string, string>>({});
 
@@ -377,36 +433,62 @@ export default function CompaniesScreen() {
     setPhone(formatUsPhoneDisplay(digitsOnly(text)));
   }, []);
 
-  const isOrgManager = role === 'operations_manager' && user?.id;
+  const isOrgManager = effectiveRole === 'operations_manager' && user?.id;
   const canCreateOrg = role === 'super_admin';
   const canDeleteOrg = role === 'super_admin';
   const canCreateCompany = role === 'super_admin' || role === 'operations_manager';
   const canEditCompany = role === 'super_admin' || role === 'operations_manager';
 
   const filteredCompanies = React.useMemo(() => {
-    let list = api.filterCompaniesForCompanyManagerRole(companies, role, user?.id);
-    if (role === 'operations_manager' && user?.organization_id) {
-      const oid = String(user.organization_id);
+    let list = api.filterCompaniesForCompanyManagerRole(companies, effectiveRole, user?.id);
+    const oid = authOrgId || (user?.organization_id ? String(user.organization_id) : '');
+    if (effectiveRole === 'operations_manager' && oid) {
       list = list.filter((c) => companyOrganizationId(c) === oid);
     }
     return list;
-  }, [companies, role, user?.id, user?.organization_id]);
+  }, [companies, effectiveRole, user?.id, user?.organization_id, authOrgId]);
 
   const filteredOrgs = React.useMemo(() => {
-    if (role === 'operations_manager' && user?.organization_id) {
-      const oid = String(user.organization_id);
-      return organizations.filter((o) => String(o.id) === oid);
+    if (effectiveRole === 'operations_manager') {
+      const oid = authOrgId || (user?.organization_id ? String(user.organization_id) : '');
+      if (oid) return organizations.filter((o) => String(o.id) === oid);
+      if (organizations.length === 1) return organizations;
+      return organizations;
     }
     if (role === 'manager' && filteredCompanies.length > 0) {
       const orgIds = new Set(filteredCompanies.map((c) => companyOrganizationId(c)).filter(Boolean));
       return organizations.filter((o) => orgIds.has(o.id));
     }
     return organizations;
-  }, [organizations, filteredCompanies, role, user?.organization_id]);
+  }, [organizations, filteredCompanies, role, user?.organization_id, effectiveRole, authOrgId]);
 
   const activeOrgList = React.useMemo(() => filteredOrgs.filter((o) => !orgIsArchived(o)), [filteredOrgs]);
   const archivedOrgList = React.useMemo(() => filteredOrgs.filter(orgIsArchived), [filteredOrgs]);
   const orgsForList = orgListFilter === 'active' ? activeOrgList : archivedOrgList;
+
+  const orgIdForOrgManagerActions = React.useMemo(() => {
+    if (effectiveRole !== 'operations_manager') return '';
+    return String(
+      authOrgId || user?.organization_id || filteredOrgs[0]?.id || companyOrganizationId(filteredCompanies[0]) || ''
+    ).trim();
+  }, [effectiveRole, authOrgId, user?.organization_id, filteredOrgs, filteredCompanies]);
+
+  /** Org managers only manage one org — show companies in a flat grid (no org wrapper row). */
+  const orgManagerFlatView = effectiveRole === 'operations_manager';
+  const orgManagerCompaniesForList = React.useMemo(() => {
+    if (!orgManagerFlatView) return [];
+    const active = filteredCompanies.filter((c) => !companyIsArchived(c));
+    const archived = filteredCompanies.filter(companyIsArchived);
+    return orgListFilter === 'active' ? active : archived;
+  }, [orgManagerFlatView, filteredCompanies, orgListFilter]);
+  const orgManagerActiveCompanyCount = React.useMemo(
+    () => filteredCompanies.filter((c) => !companyIsArchived(c)).length,
+    [filteredCompanies]
+  );
+  const orgManagerArchivedCompanyCount = React.useMemo(
+    () => filteredCompanies.filter(companyIsArchived).length,
+    [filteredCompanies]
+  );
 
   const load = useCallback(async () => {
     try {
@@ -414,7 +496,7 @@ export default function CompaniesScreen() {
       let compRaw: Company[] = [];
 
       if (isOrgManager) {
-        const oid = user?.organization_id ? String(user.organization_id) : '';
+        const oid = authOrgId || (user?.organization_id ? String(user.organization_id) : '');
         if (oid) {
           try {
             const one = await api.getOrganization(oid);
@@ -527,7 +609,7 @@ export default function CompaniesScreen() {
     });
   };
 
-  const loadManagers = async (roleTokens: string | string[]) => {
+  const loadManagers = useCallback(async (roleTokens: string | string[]) => {
     const tokens = (Array.isArray(roleTokens) ? roleTokens : [roleTokens])
       .map((t) => normalizeRoleToken(t))
       .filter(Boolean);
@@ -547,11 +629,54 @@ export default function CompaniesScreen() {
         }))
         .filter((o) => o.id !== '');
       setManagerOptions(options);
+      return nextById;
     } catch {
       setManagerOptions([]);
       setUsersById({});
+      return null;
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (!companyDetails) {
+      setCompanyDetailsManagerLoading(false);
+      return;
+    }
+    const nested = nestedCompanyManagerUser(companyDetails);
+    if (nested) {
+      setCompanyDetailsManagerLoading(false);
+      return;
+    }
+    const mid = companyManagerUserId(companyDetails);
+    if (!mid) {
+      setCompanyDetailsManagerLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setCompanyDetailsManagerLoading(true);
+    void (async () => {
+      try {
+        const map = await loadManagers(['company_manager', 'manager']);
+        if (cancelled) return;
+        const key = String(mid);
+        if (map && !map[key]) {
+          try {
+            const u = await api.getUser(mid);
+            if (!cancelled && u) {
+              setUsersById((prev) => ({ ...prev, [key]: u }));
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      } finally {
+        if (!cancelled) setCompanyDetailsManagerLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [companyDetails?.id, loadManagers]);
 
   const handleCreateOrg = () => {
     setEditOrg(null);
@@ -779,6 +904,45 @@ export default function CompaniesScreen() {
     }
   };
 
+  const renderCompanyCard = (c: Company) => {
+    const companyBubbleColor = normalizeHexColor((c as any).brand_color ?? (c as any).color, '#3b82f6');
+    const companyManagerAssigned = isAssignedId(
+      (c as any).company_manager_id ??
+        (c as any).company_manager ??
+        (c as any).manager_id ??
+        (c as any).manager
+    );
+    return (
+      <Pressable style={styles.companyCard} onPress={() => setCompanyDetails(c)}>
+        <View style={styles.companyTitleRow}>
+          <View style={[styles.companyIconBubble, { backgroundColor: companyBubbleColor }]}>
+            <MaterialCommunityIcons name="domain" size={16} color={iconColorOnBrandBg(companyBubbleColor)} />
+          </View>
+          <Text style={styles.cardTitle} numberOfLines={1}>
+            {c.name}
+          </Text>
+        </View>
+        <Text style={styles.companyTypeText}>{String((c as any).type || 'general').toLowerCase()}</Text>
+        {companyManagerAssigned ? (
+          <View style={styles.companyAssignedBadge}>
+            <Text style={styles.assignedBadgeText}>Manager Assigned</Text>
+          </View>
+        ) : null}
+        {canEditCompany && (
+          <TouchableOpacity
+            style={styles.companyEditBtn}
+            onPress={(e) => {
+              (e as any)?.stopPropagation?.();
+              setCompanyMenuForId(c.id);
+            }}
+          >
+            <MaterialCommunityIcons name="cog-outline" size={15} color="#0f172a" />
+          </TouchableOpacity>
+        )}
+      </Pressable>
+    );
+  };
+
   if (loading) {
     return (
       <View style={styles.centered}>
@@ -814,7 +978,7 @@ export default function CompaniesScreen() {
                 color={orgListFilter === 'active' ? '#0f172a' : '#94a3b8'}
               />
               <Text style={[styles.statusPillText, orgListFilter === 'active' && styles.statusPillTextSelected]}>
-                Active ({activeOrgList.length})
+                Active ({orgManagerFlatView ? orgManagerActiveCompanyCount : activeOrgList.length})
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -829,7 +993,7 @@ export default function CompaniesScreen() {
                 color={orgListFilter === 'archived' ? '#0f172a' : '#94a3b8'}
               />
               <Text style={[styles.statusPillText, orgListFilter === 'archived' && styles.statusPillTextSelected]}>
-                Archived ({archivedOrgList.length})
+                Archived ({orgManagerFlatView ? orgManagerArchivedCompanyCount : archivedOrgList.length})
               </Text>
             </TouchableOpacity>
             {canCreateOrg ? (
@@ -840,7 +1004,13 @@ export default function CompaniesScreen() {
             {canCreateCompany && role === 'operations_manager' ? (
               <TouchableOpacity
                 style={styles.headerNewOrgButton}
-                onPress={() => handleCreateCompany(filteredOrgs[0]?.id)}
+                onPress={() =>
+                  handleCreateCompany(
+                    orgManagerFlatView && orgIdForOrgManagerActions
+                      ? orgIdForOrgManagerActions
+                      : filteredOrgs[0]?.id
+                  )
+                }
                 accessibilityRole="button"
               >
                 <Text style={styles.headerNewOrgButtonText}>+ New company</Text>
@@ -849,129 +1019,134 @@ export default function CompaniesScreen() {
           </View>
         </View>
       </View>
-      <FlatList
-        data={orgsForList}
-        keyExtractor={(item) => item.id}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-        contentContainerStyle={styles.listContent}
-        ListEmptyComponent={
-          <View style={styles.empty}>
-            <Text style={styles.emptyText}>
-              {role === 'operations_manager'
-                ? orgListFilter === 'archived'
-                  ? 'No archived organizations'
-                  : 'No organization loaded. Check that your profile includes an organization, then pull to refresh.'
-                : orgListFilter === 'archived'
-                  ? 'No archived organizations'
-                  : 'No organizations yet'}
-            </Text>
-            {canCreateOrg && orgListFilter === 'active' ? (
-              <TouchableOpacity style={styles.primaryButton} onPress={handleCreateOrg}>
-                <Text style={styles.primaryButtonText}>Create organization</Text>
-              </TouchableOpacity>
-            ) : null}
-            {canCreateCompany && role === 'operations_manager' && orgListFilter === 'active' && filteredOrgs[0]?.id ? (
-              <TouchableOpacity style={styles.primaryButton} onPress={() => handleCreateCompany(filteredOrgs[0].id)}>
-                <Text style={styles.primaryButtonText}>+ New company</Text>
-              </TouchableOpacity>
-            ) : null}
-          </View>
-        }
-        renderItem={({ item: org }) => {
-          const orgCompanies = filteredCompanies.filter((c) => companyOrganizationId(c) === org.id);
-          const isCollapsed = collapsedOrgIds.has(org.id);
-          const orgBubbleColor = normalizeHexColor((org as any).brand_color ?? (org as any).color, '#6366f1');
-          const orgManagerAssigned = isAssignedId((org as any).organization_manager_id ?? (org as any).organization_manager);
-          return (
-            <View style={styles.section}>
-              <View style={styles.orgCard}>
-                <View style={styles.orgHeader}>
-                  <View style={styles.orgTitleWrap}>
-                    <View style={[styles.orgIconBubble, { backgroundColor: orgBubbleColor }]}>
-                      <MaterialCommunityIcons name="office-building-outline" size={20} color={iconColorOnBrandBg(orgBubbleColor)} />
-                    </View>
-                    <View style={{ flex: 1, minWidth: 0 }}>
-                      <Text style={styles.sectionTitle}>{org.name}</Text>
-                      <View style={styles.orgSubRow}>
-                        <Text style={styles.orgSub}>
-                          {orgCompanies.length} compan{orgCompanies.length === 1 ? 'y' : 'ies'}
-                        </Text>
-                        {orgManagerAssigned ? (
-                          <View style={styles.assignedBadge}>
-                            <Text style={styles.assignedBadgeText}>Organization Manager Assigned</Text>
-                          </View>
-                        ) : null}
-                      </View>
-                    </View>
-                  </View>
-                  <View style={styles.orgHeaderActions}>
-                    {canEditCompany && (
-                      <TouchableOpacity style={styles.orgActionBtn} onPress={() => handleEditOrg(org)}>
-                        <MaterialCommunityIcons name="cog-outline" size={16} color="#0f172a" />
-                      </TouchableOpacity>
-                    )}
-                    <TouchableOpacity style={styles.orgActionBtn} onPress={() => toggleOrgCollapsed(org.id)}>
-                      <MaterialCommunityIcons
-                        name={isCollapsed ? 'chevron-down' : 'chevron-up'}
-                        size={18}
-                        color="#0f172a"
-                      />
-                    </TouchableOpacity>
-                  </View>
-                </View>
-                {!isCollapsed && (
-                  <View style={styles.companyGrid}>
-                    {orgCompanies.map((c) => {
-                      const companyBubbleColor = normalizeHexColor((c as any).brand_color ?? (c as any).color, '#3b82f6');
-                      const companyManagerAssigned = isAssignedId(
-                        (c as any).company_manager_id ??
-                          (c as any).company_manager ??
-                          (c as any).manager_id ??
-                          (c as any).manager
-                      );
-                      return (
-                      <Pressable key={c.id} style={styles.companyCard} onPress={() => setCompanyDetails(c)}>
-                        <View style={styles.companyTitleRow}>
-                          <View style={[styles.companyIconBubble, { backgroundColor: companyBubbleColor }]}>
-                            <MaterialCommunityIcons name="domain" size={16} color={iconColorOnBrandBg(companyBubbleColor)} />
-                          </View>
-                          <Text style={styles.cardTitle} numberOfLines={1}>
-                            {c.name}
-                          </Text>
-                        </View>
-                        <Text style={styles.companyTypeText}>{String((c as any).type || 'general').toLowerCase()}</Text>
-                        {companyManagerAssigned ? (
-                          <View style={styles.companyAssignedBadge}>
-                            <Text style={styles.assignedBadgeText}>Manager Assigned</Text>
-                          </View>
-                        ) : null}
-                        {canEditCompany && (
-                          <TouchableOpacity
-                            style={styles.companyEditBtn}
-                            onPress={(e) => {
-                              (e as any)?.stopPropagation?.();
-                              setCompanyMenuForId(c.id);
-                            }}
-                          >
-                            <MaterialCommunityIcons name="cog-outline" size={15} color="#0f172a" />
-                          </TouchableOpacity>
-                        )}
-                      </Pressable>
-                    );
-                    })}
-                    {canCreateCompany && (
-                      <TouchableOpacity style={styles.addCompanyGhost} onPress={() => handleCreateCompany(org.id)}>
-                        <MaterialCommunityIcons name="plus" size={28} color="#64748b" />
-                        <Text style={styles.addCompanyGhostText}>Add Company</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-                )}
+      {orgManagerFlatView ? (
+        <ScrollView
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          contentContainerStyle={styles.listContent}
+        >
+          {orgManagerCompaniesForList.length === 0 ? (
+            <View style={styles.empty}>
+              <Text style={styles.emptyText}>
+                {orgListFilter === 'archived' ? 'No archived companies' : 'No companies yet'}
+              </Text>
+              {canCreateCompany && orgListFilter === 'active' && orgIdForOrgManagerActions ? (
+                <TouchableOpacity
+                  style={styles.primaryButton}
+                  onPress={() => handleCreateCompany(orgIdForOrgManagerActions)}
+                >
+                  <Text style={styles.primaryButtonText}>+ New company</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : (
+            <View style={styles.orgCard}>
+              <View style={styles.companyGrid}>
+                {orgManagerCompaniesForList.map((c) => (
+                  <React.Fragment key={c.id}>{renderCompanyCard(c)}</React.Fragment>
+                ))}
+                {canCreateCompany && orgIdForOrgManagerActions ? (
+                  <TouchableOpacity
+                    style={styles.addCompanyGhost}
+                    onPress={() => handleCreateCompany(orgIdForOrgManagerActions)}
+                  >
+                    <MaterialCommunityIcons name="plus" size={28} color="#64748b" />
+                    <Text style={styles.addCompanyGhostText}>Add Company</Text>
+                  </TouchableOpacity>
+                ) : null}
               </View>
             </View>
-          );
-        }}
-      />
+          )}
+        </ScrollView>
+      ) : (
+        <FlatList
+          data={orgsForList}
+          keyExtractor={(item) => item.id}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          contentContainerStyle={styles.listContent}
+          ListEmptyComponent={
+            <View style={styles.empty}>
+              <Text style={styles.emptyText}>
+                {role === 'operations_manager'
+                  ? orgListFilter === 'archived'
+                    ? 'No archived organizations'
+                    : 'No organization loaded. Check that your profile includes an organization, then pull to refresh.'
+                  : orgListFilter === 'archived'
+                    ? 'No archived organizations'
+                    : 'No organizations yet'}
+              </Text>
+              {canCreateOrg && orgListFilter === 'active' ? (
+                <TouchableOpacity style={styles.primaryButton} onPress={handleCreateOrg}>
+                  <Text style={styles.primaryButtonText}>Create organization</Text>
+                </TouchableOpacity>
+              ) : null}
+              {canCreateCompany && role === 'operations_manager' && orgListFilter === 'active' && filteredOrgs[0]?.id ? (
+                <TouchableOpacity style={styles.primaryButton} onPress={() => handleCreateCompany(filteredOrgs[0].id)}>
+                  <Text style={styles.primaryButtonText}>+ New company</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          }
+          renderItem={({ item: org }) => {
+            const orgCompanies = filteredCompanies.filter((c) => companyOrganizationId(c) === org.id);
+            const isCollapsed = collapsedOrgIds.has(org.id);
+            const orgBubbleColor = normalizeHexColor((org as any).brand_color ?? (org as any).color, '#6366f1');
+            const orgManagerAssigned = isAssignedId((org as any).organization_manager_id ?? (org as any).organization_manager);
+            return (
+              <View style={styles.section}>
+                <View style={styles.orgCard}>
+                  <View style={styles.orgHeader}>
+                    <View style={styles.orgTitleWrap}>
+                      <View style={[styles.orgIconBubble, { backgroundColor: orgBubbleColor }]}>
+                        <MaterialCommunityIcons name="office-building-outline" size={20} color={iconColorOnBrandBg(orgBubbleColor)} />
+                      </View>
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={styles.sectionTitle}>{org.name}</Text>
+                        <View style={styles.orgSubRow}>
+                          <Text style={styles.orgSub}>
+                            {orgCompanies.length} compan{orgCompanies.length === 1 ? 'y' : 'ies'}
+                          </Text>
+                          {orgManagerAssigned ? (
+                            <View style={styles.assignedBadge}>
+                              <Text style={styles.assignedBadgeText}>Organization Manager Assigned</Text>
+                            </View>
+                          ) : null}
+                        </View>
+                      </View>
+                    </View>
+                    <View style={styles.orgHeaderActions}>
+                      {canEditCompany && (
+                        <TouchableOpacity style={styles.orgActionBtn} onPress={() => handleEditOrg(org)}>
+                          <MaterialCommunityIcons name="cog-outline" size={16} color="#0f172a" />
+                        </TouchableOpacity>
+                      )}
+                      <TouchableOpacity style={styles.orgActionBtn} onPress={() => toggleOrgCollapsed(org.id)}>
+                        <MaterialCommunityIcons
+                          name={isCollapsed ? 'chevron-down' : 'chevron-up'}
+                          size={18}
+                          color="#0f172a"
+                        />
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                  {!isCollapsed && (
+                    <View style={styles.companyGrid}>
+                      {orgCompanies.map((c) => (
+                        <React.Fragment key={c.id}>{renderCompanyCard(c)}</React.Fragment>
+                      ))}
+                      {canCreateCompany && (
+                        <TouchableOpacity style={styles.addCompanyGhost} onPress={() => handleCreateCompany(org.id)}>
+                          <MaterialCommunityIcons name="plus" size={28} color="#64748b" />
+                          <Text style={styles.addCompanyGhostText}>Add Company</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  )}
+                </View>
+              </View>
+            );
+          }}
+        />
+      )}
       <Modal visible={modal === 'org'} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalBox}>
@@ -1392,34 +1567,72 @@ export default function CompaniesScreen() {
                 <Text style={styles.detailsCardTitle}>Manager</Text>
                 {(() => {
                   const mid = companyManagerUserId(companyDetails);
-                  const u = mid ? usersById[mid] : null;
-                  const label = u ? getUserLabel(u) : '';
+                  const nested = nestedCompanyManagerUser(companyDetails);
+                  const u = nested ?? (mid ? usersById[String(mid)] : null);
+                  const cachedName =
+                    companyDetails?.id != null
+                      ? managerByCompany[String(companyDetails.id)]
+                      : '';
+                  const label = u ? displayNameFromUserLike(u) : '';
                   const email = u ? userEmail(u) : '';
                   const st = u ? userStatusToken(u) : '';
                   const badgeText = st ? st.charAt(0).toUpperCase() + st.slice(1) : 'Active';
-                  if (!mid || !u) {
+                  if (companyDetailsManagerLoading && mid && !nested) {
+                    return <ActivityIndicator style={{ marginVertical: 12 }} color="#3b82f6" />;
+                  }
+                  if (!mid && !nested) {
                     return <Text style={styles.emptyText}>No manager assigned</Text>;
                   }
-                  return (
-                    <View style={styles.managerCard}>
-                      <View style={styles.managerAvatar}>
-                        <Text style={styles.managerAvatarText}>{initialsFromLabel(label)}</Text>
-                      </View>
-                      <View style={styles.managerInfo}>
-                        <Text style={styles.managerName} numberOfLines={1}>
-                          {label}
-                        </Text>
-                        <Text style={styles.managerEmail} numberOfLines={1}>
-                          {email || '—'}
-                        </Text>
-                        <View style={[styles.managerStatusPill, st === 'inactive' && styles.managerStatusPillInactive]}>
-                          <Text style={[styles.managerStatusText, st === 'inactive' && styles.managerStatusTextInactive]}>
-                            {badgeText}
+                  if (u) {
+                    return (
+                      <View style={styles.managerCard}>
+                        <View style={styles.managerAvatar}>
+                          <Text style={styles.managerAvatarText}>{initialsFromLabel(label)}</Text>
+                        </View>
+                        <View style={styles.managerInfo}>
+                          <Text style={styles.managerName} numberOfLines={1}>
+                            {label}
                           </Text>
+                          <Text style={styles.managerEmail} numberOfLines={1}>
+                            {email || '—'}
+                          </Text>
+                          <View style={[styles.managerStatusPill, st === 'inactive' && styles.managerStatusPillInactive]}>
+                            <Text style={[styles.managerStatusText, st === 'inactive' && styles.managerStatusTextInactive]}>
+                              {badgeText}
+                            </Text>
+                          </View>
                         </View>
                       </View>
-                    </View>
-                  );
+                    );
+                  }
+                  if (cachedName && cachedName !== 'No company manager') {
+                    return (
+                      <View style={styles.managerCard}>
+                        <View style={styles.managerAvatar}>
+                          <Text style={styles.managerAvatarText}>{initialsFromLabel(cachedName)}</Text>
+                        </View>
+                        <View style={styles.managerInfo}>
+                          <Text style={styles.managerName} numberOfLines={1}>
+                            {cachedName}
+                          </Text>
+                          <Text style={styles.managerEmail} numberOfLines={1}>
+                            —
+                          </Text>
+                          <View style={styles.managerStatusPill}>
+                            <Text style={styles.managerStatusText}>Active</Text>
+                          </View>
+                        </View>
+                      </View>
+                    );
+                  }
+                  if (mid) {
+                    return (
+                      <Text style={styles.emptyText}>
+                        Manager assigned — profile details could not be loaded.
+                      </Text>
+                    );
+                  }
+                  return <Text style={styles.emptyText}>No manager assigned</Text>;
                 })()}
               </View>
             </View>

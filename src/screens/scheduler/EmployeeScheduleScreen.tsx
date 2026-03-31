@@ -18,6 +18,7 @@ import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
+import { getPrimaryRoleFromUser } from '../../types/auth';
 import * as api from '../../api';
 
 type Organization = { id: string; name: string; [k: string]: any };
@@ -33,9 +34,54 @@ type Employee = {
 
 type ViewMode = 'daily' | 'weekly';
 
-function companyOrganizationId(c: Company): string {
-  const v = c.organization_id ?? (c as any).organization;
-  return v != null ? String(v) : '';
+function companyOrganizationId(c: Company | null | undefined): string {
+  if (c == null) return '';
+  const raw = (c as any).organization_id ?? (c as any).organization;
+  if (raw == null || raw === '') return '';
+  if (typeof raw === 'object' && raw !== null && (raw as any).id != null) {
+    return String((raw as any).id).trim();
+  }
+  return String(raw).trim();
+}
+
+function employeeCompanyId(e: any): string {
+  if (!e || typeof e !== 'object') return '';
+  const c = (e as any).company_id ?? (e as any).company;
+  if (c == null || c === '') return '';
+  if (typeof c === 'object' && c !== null) {
+    const id = (c as any).id ?? (c as any).pk ?? (c as any).uuid ?? (c as any).company_id ?? (c as any).company;
+    return id != null ? String(id).trim() : '';
+  }
+  return String(c).trim();
+}
+
+/** Compare org ids when API mixes int/string/uuid shapes. */
+function organizationIdsMatch(a: string, b: string): boolean {
+  const x = String(a || '').trim();
+  const y = String(b || '').trim();
+  if (!x || !y) return false;
+  if (x === y) return true;
+  const nx = Number(x);
+  const ny = Number(y);
+  if (!Number.isNaN(nx) && !Number.isNaN(ny) && nx === ny) return true;
+  return false;
+}
+
+/** Backend may nest org id under profile / user_profile only. */
+function organizationIdFromAuthUser(u: any): string {
+  if (!u || typeof u !== 'object') return '';
+  const raw =
+    u.organization_id ??
+    (typeof u.organization === 'object' && u.organization != null && (u.organization as any).id != null
+      ? (u.organization as any).id
+      : u.organization) ??
+    (u as any).profile?.organization_id ??
+    (u as any).user_profile?.organization_id ??
+    (typeof (u as any).profile?.organization === 'object' && (u as any).profile?.organization?.id != null
+      ? (u as any).profile.organization.id
+      : (u as any).profile?.organization);
+  const s = raw != null ? String(raw).trim() : '';
+  return s;
 }
 
 function startOfWeekMonday(d: Date): Date {
@@ -247,16 +293,21 @@ type PickerModalProps = {
 function PickerModal({ visible, title, options, onSelect, onClose }: PickerModalProps) {
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <View style={modalStyles.overlay}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
-        <View style={modalStyles.box}>
+      <View style={modalStyles.overlay} pointerEvents="box-none">
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityRole="button" />
+        <View style={modalStyles.box} pointerEvents="auto">
           <Text style={modalStyles.title}>{title}</Text>
           <FlatList
             data={options}
-            keyExtractor={(i) => i.id}
+            keyExtractor={(i) => `opt-${i.id}`}
+            style={modalStyles.list}
             keyboardShouldPersistTaps="handled"
+            nestedScrollEnabled
+            ListEmptyComponent={
+              <Text style={modalStyles.emptyList}>No options available. Pull to refresh or check permissions.</Text>
+            }
             renderItem={({ item }) => (
-              <TouchableOpacity
+              <Pressable
                 style={modalStyles.row}
                 onPress={() => {
                   onSelect(item.id);
@@ -264,7 +315,7 @@ function PickerModal({ visible, title, options, onSelect, onClose }: PickerModal
                 }}
               >
                 <Text style={modalStyles.rowText}>{item.label}</Text>
-              </TouchableOpacity>
+              </Pressable>
             )}
           />
         </View>
@@ -278,15 +329,22 @@ const modalStyles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'rgba(15,23,42,0.45)',
     justifyContent: 'center',
+    alignItems: 'center',
     padding: 24,
   },
   box: {
+    width: '100%',
+    maxWidth: 420,
     backgroundColor: '#fff',
     borderRadius: 14,
     maxHeight: '70%',
     paddingVertical: 8,
+    zIndex: 2,
+    ...(Platform.OS === 'web' ? ({ elevation: 8 } as object) : {}),
   },
+  list: { maxHeight: 360 },
   title: { fontSize: 17, fontWeight: '700', color: '#0f172a', paddingHorizontal: 16, paddingBottom: 8 },
+  emptyList: { padding: 12, paddingHorizontal: 16, color: '#64748b', fontSize: 14 },
   row: { paddingVertical: 14, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
   rowText: { fontSize: 16, color: '#0f172a' },
 });
@@ -296,6 +354,7 @@ const KeyedFragment = Fragment as React.ComponentType<{ children?: React.ReactNo
 
 export default function EmployeeScheduleScreen() {
   const { user, role } = useAuth();
+  const effectiveRole = role ?? (user ? getPrimaryRoleFromUser(user) : null);
   const { width } = useWindowDimensions();
 
   const [viewMode, setViewMode] = useState<ViewMode>('weekly');
@@ -316,35 +375,164 @@ export default function EmployeeScheduleScreen() {
   const [companyModal, setCompanyModal] = useState(false);
   const initialLoadDone = useRef(false);
 
-  const needsOrg = role === 'super_admin' || role === 'admin' || role === 'operations_manager';
-  const isOrgManager = role === 'operations_manager' && user?.id;
-  /** Company managers see only their own shifts, not the full company grid. */
-  const selfScheduleOnly =
-    ['employee', 'house_keeping', 'maintenance', 'user'].includes(role || '') || role === 'manager';
+  /** Super admin / admin pick org explicitly; org manager is scoped to their org (no picker). */
+  const needsOrgPicker = role === 'super_admin' || role === 'admin';
+  const authOrgId = useMemo(() => {
+    const from = organizationIdFromAuthUser(user);
+    if (from) return from;
+    return user?.organization_id != null ? String(user.organization_id).trim() : '';
+  }, [user]);
+  /** Resolved org for filtering when profile omits top-level `organization_id`. */
+  const resolvedOrgScopeId = useMemo(() => {
+    if (needsOrgPicker) return selectedOrgId ? String(selectedOrgId) : null;
+    if (effectiveRole !== 'operations_manager') return null;
+    if (authOrgId) return authOrgId;
+    if (organizations.length === 1) {
+      const o = organizations[0];
+      return String((o as any).id ?? (o as any).pk ?? '').trim() || null;
+    }
+    const orgIds = new Set(companies.map((c) => companyOrganizationId(c)).filter(Boolean));
+    if (orgIds.size === 1) return [...orgIds][0] as string;
+    return null;
+  }, [needsOrgPicker, selectedOrgId, effectiveRole, authOrgId, organizations, companies]);
+  const isOrgManager = effectiveRole === 'operations_manager' && user?.id;
+  /** Staff roles (not managers/admins) see only their own row when linked to an employee record. */
+  const selfScheduleOnly = ['employee', 'house_keeping', 'maintenance', 'user'].includes(
+    effectiveRole || ''
+  );
 
   const companiesFiltered = useMemo(() => {
-    if (needsOrg && !selectedOrgId) return [];
+    if (needsOrgPicker && !selectedOrgId) return [];
     let list = companies;
-    list = api.filterCompaniesForCompanyManagerRole(list, role, user?.id);
-    if (selectedOrgId) {
-      const oid = String(selectedOrgId);
-      list = list.filter((c) => companyOrganizationId(c) === oid);
+    list = api.filterCompaniesForCompanyManagerRole(list, effectiveRole, user?.id);
+    const oid = needsOrgPicker ? selectedOrgId : resolvedOrgScopeId;
+    if (oid) {
+      const want = String(oid);
+      let filtered = list.filter((c) => {
+        const cid = companyOrganizationId(c);
+        return cid !== '' && organizationIdsMatch(cid, want);
+      });
+      if (
+        filtered.length === 0 &&
+        effectiveRole === 'operations_manager' &&
+        list.length > 0
+      ) {
+        filtered = list;
+      }
+      return filtered;
     }
     return list;
-  }, [companies, role, user?.id, selectedOrgId, needsOrg]);
+  }, [companies, effectiveRole, user?.id, selectedOrgId, needsOrgPicker, resolvedOrgScopeId]);
 
   const selectedOrgName = organizations.find((o) => o.id === selectedOrgId)?.name;
-  const selectedCompanyName = companies.find((c) => c.id === selectedCompanyId)?.name;
+  const implicitOrgName =
+    resolvedOrgScopeId && !selectedOrgId
+      ? organizations.find((o) =>
+          organizationIdsMatch(String((o as any).id ?? (o as any).pk ?? ''), String(resolvedOrgScopeId))
+        )?.name
+      : undefined;
+  const displayOrgName = selectedOrgName || implicitOrgName;
+  const selectedCompanyName =
+    companiesFiltered.find((c) => String(c.id) === String(selectedCompanyId))?.name ??
+    companies.find((c) => String(c.id) === String(selectedCompanyId))?.name;
 
   const loadMeta = useCallback(async () => {
     try {
-      const orgsRaw = await api.getOrganizations(isOrgManager ? { organization_manager: user?.id } : undefined);
-      setOrganizations(Array.isArray(orgsRaw) ? orgsRaw : []);
+      if (isOrgManager) {
+        const authOid = organizationIdFromAuthUser(user);
+        const orgFromUser = user?.organization_id != null ? String(user.organization_id).trim() : '';
+        const oidPreferred = authOid || orgFromUser;
+
+        let orgList: Organization[] = [];
+        let compRaw: any[] = [];
+
+        if (oidPreferred) {
+          const oid = String(oidPreferred);
+          try {
+            const one = await api.getOrganization(oid);
+            if (one && typeof one === 'object') {
+              const id = String((one as any).id ?? (one as any).pk ?? oid);
+              orgList = [{ ...(one as object), id } as Organization];
+            }
+          } catch {
+            /* fall through */
+          }
+          if (orgList.length === 0) {
+            // Some backends do not support `organization_manager` filtering (400 Bad Request).
+            // Load the list and filter client-side by the org id we already have.
+            try {
+              const listed = await api.getOrganizations();
+              const arr = Array.isArray(listed) ? listed : [];
+              orgList = arr.filter((o) => String((o as any).id ?? (o as any).pk) === oid);
+              if (orgList.length === 0) orgList = arr;
+            } catch {
+              orgList = [];
+            }
+          }
+          try {
+            compRaw = await api.getCompanies({ organization: oid });
+          } catch {
+            compRaw = [];
+          }
+          if (!Array.isArray(compRaw)) compRaw = [];
+          if (compRaw.length === 0) {
+            try {
+              const byId = await api.getCompanies({ organization_id: oid });
+              compRaw = Array.isArray(byId) ? byId : [];
+            } catch {
+              compRaw = [];
+            }
+          }
+          if (compRaw.length === 0) {
+            const all = await api.getCompanies().catch(() => []);
+            const rows = Array.isArray(all) ? all : [];
+            compRaw = rows.filter(
+              (c: Company) => companyOrganizationId(c) !== '' && organizationIdsMatch(companyOrganizationId(c), oid)
+            );
+          }
+        } else {
+          try {
+            // Avoid unsupported filter keys (some APIs 400 on unknown query params).
+            const listed = await api.getOrganizations();
+            orgList = Array.isArray(listed) ? listed : [];
+          } catch {
+            orgList = [];
+          }
+          if (orgList.length === 0) {
+            try {
+              const listed = await api.getOrganizations();
+              orgList = Array.isArray(listed) ? listed : [];
+            } catch {
+              orgList = [];
+            }
+          }
+          try {
+            compRaw = await api.getCompanies();
+          } catch {
+            compRaw = [];
+          }
+          if (!Array.isArray(compRaw)) compRaw = [];
+          const orgIds = new Set(compRaw.map((c: Company) => companyOrganizationId(c)).filter(Boolean));
+          if (orgIds.size === 1) {
+            const only = [...orgIds][0] as string;
+            compRaw = compRaw.filter(
+              (c: Company) => companyOrganizationId(c) !== '' && organizationIdsMatch(companyOrganizationId(c), only)
+            );
+          }
+        }
+        setOrganizations(orgList);
+        setCompanies(Array.isArray(compRaw) ? compRaw : []);
+        return;
+      }
+
+      const orgsRaw = await api.getOrganizations(undefined);
+      const orgList = Array.isArray(orgsRaw) ? orgsRaw : [];
+      setOrganizations(orgList);
 
       let compRaw: any[] = [];
-      if (isOrgManager || role === 'manager') {
+      if (effectiveRole === 'manager') {
         compRaw = await api.getCompanies();
-      } else if (needsOrg) {
+      } else if (needsOrgPicker) {
         if (selectedOrgId) {
           const oid = String(selectedOrgId);
           try {
@@ -364,7 +552,9 @@ export default function EmployeeScheduleScreen() {
           if (compRaw.length === 0) {
             const all = await api.getCompanies();
             const rows = Array.isArray(all) ? all : [];
-            compRaw = rows.filter((c: Company) => companyOrganizationId(c) === oid);
+            compRaw = rows.filter(
+              (c: Company) => companyOrganizationId(c) !== '' && organizationIdsMatch(companyOrganizationId(c), oid)
+            );
           }
         } else {
           compRaw = [];
@@ -376,12 +566,12 @@ export default function EmployeeScheduleScreen() {
     } catch (e) {
       console.warn(e);
     }
-  }, [isOrgManager, role, user?.id, needsOrg, selectedOrgId]);
+  }, [isOrgManager, effectiveRole, user, needsOrgPicker, selectedOrgId]);
 
   const loadEmployeesAndShifts = useCallback(async () => {
     if (selfScheduleOnly && user?.id) {
       try {
-        const emp = await api.resolveEmployeeForUser(user);
+        const emp = await api.findSchedulerEmployeeForAuthUser(user);
         if (!emp) {
           setEmployees([]);
           setShifts([]);
@@ -404,8 +594,10 @@ export default function EmployeeScheduleScreen() {
           ).trim() || undefined;
         if (companyId) setSelectedCompanyId((prev) => prev || companyId);
         const single: Employee = { ...(emp as Employee), id: eid };
+        const empUserId = String((emp as any).user_id ?? (emp as any).user?.id ?? user?.id ?? '').trim() || undefined;
         const shiftRaw = await api.getShiftsForEmployeeInRange({
           employeeId: eid,
+          employeeUserId: empUserId,
           rangeStart,
           rangeEnd,
           companyId,
@@ -426,16 +618,41 @@ export default function EmployeeScheduleScreen() {
       return;
     }
     try {
+      const cid = String(selectedCompanyId);
       const [empRaw, shiftRaw] = await Promise.all([
-        api.getEmployees({ company: selectedCompanyId }),
-        api.getShifts({
-          company: selectedCompanyId,
-          start_date: rangeStart.toISOString(),
-          end_date: rangeEnd.toISOString(),
+        api.getEmployeesForCompany(cid),
+        api.getShiftsForCompanyInRange({
+          companyId: cid,
+          rangeStart,
+          rangeEnd,
         }),
       ]);
-      setEmployees(Array.isArray(empRaw) ? empRaw : []);
-      setShifts(Array.isArray(shiftRaw) ? shiftRaw : []);
+      const normalizedEmployees = (Array.isArray(empRaw) ? empRaw : [])
+        .map((e: any) => {
+          const fromRecord =
+            e?.id ??
+            e?.pk ??
+            e?.uuid ??
+            e?.employee_id ??
+            (e?.employee && typeof e.employee === 'object' ? (e.employee as any).id : null);
+          let id = String(fromRecord ?? '').trim();
+          if (!id && e?.user_id != null) id = String(e.user_id).trim();
+          return { ...e, id };
+        })
+        .filter((e: any) => String(e.id || '').trim() !== '');
+      // Defensive: ensure the UI only renders employees for the selected company.
+      const companyFilteredEmployees = normalizedEmployees.filter((e: any) => employeeCompanyId(e) === cid);
+      setEmployees(companyFilteredEmployees);
+      // Defensive: ensure the UI only renders shifts for the selected company.
+      const companyFilteredShifts = (Array.isArray(shiftRaw) ? shiftRaw : []).filter((s: any) => {
+        const c = s?.company_id ?? s?.company;
+        const raw =
+          c && typeof c === 'object'
+            ? (c as any).id ?? (c as any).pk ?? (c as any).uuid
+            : c;
+        return String(raw ?? '').trim() === cid;
+      });
+      setShifts(companyFilteredShifts);
     } catch (e) {
       console.warn(e);
       setEmployees([]);
@@ -455,31 +672,30 @@ export default function EmployeeScheduleScreen() {
   }, [load]);
 
   useEffect(() => {
-    if (!needsOrg || selectedOrgId || organizations.length !== 1) return;
-    setSelectedOrgId(organizations[0].id);
-  }, [needsOrg, selectedOrgId, organizations]);
+    if (!needsOrgPicker || selectedOrgId || organizations.length !== 1) return;
+    const o = organizations[0];
+    const id = String((o as any).id ?? (o as any).pk ?? '').trim();
+    if (id) setSelectedOrgId(id);
+  }, [needsOrgPicker, selectedOrgId, organizations]);
 
   useEffect(() => {
-    if (!needsOrg && companiesFiltered.length > 0 && !selectedCompanyId) {
-      setSelectedCompanyId(companiesFiltered[0].id);
+    if (needsOrgPicker && !selectedOrgId) return;
+    if (companiesFiltered.length > 0 && !selectedCompanyId) {
+      const first = companiesFiltered[0];
+      const id = String((first as any).id ?? (first as any).pk ?? '').trim();
+      if (id) setSelectedCompanyId(id);
     }
-  }, [needsOrg, companiesFiltered, selectedCompanyId]);
+  }, [needsOrgPicker, selectedOrgId, companiesFiltered, selectedCompanyId]);
 
   useEffect(() => {
-    if (needsOrg && selectedOrgId && companiesFiltered.length > 0 && !selectedCompanyId) {
-      setSelectedCompanyId(companiesFiltered[0].id);
-    }
-  }, [needsOrg, selectedOrgId, companiesFiltered, selectedCompanyId]);
-
-  useEffect(() => {
-    if (needsOrg && !selectedOrgId) {
+    if (needsOrgPicker && !selectedOrgId) {
       setSelectedCompanyId(null);
       return;
     }
     if (!selectedCompanyId || companiesFiltered.length === 0) return;
-    const stillValid = companiesFiltered.some((c) => c.id === selectedCompanyId);
+    const stillValid = companiesFiltered.some((c) => String(c.id) === String(selectedCompanyId));
     if (!stillValid) setSelectedCompanyId(null);
-  }, [needsOrg, selectedOrgId, selectedCompanyId, companiesFiltered]);
+  }, [needsOrgPicker, selectedOrgId, selectedCompanyId, companiesFiltered]);
 
   useEffect(() => {
     loadEmployeesAndShifts();
@@ -508,11 +724,20 @@ export default function EmployeeScheduleScreen() {
 
   const goToday = () => setAnchor(new Date());
 
-  const orgOptions = useMemo(() => organizations.map((o) => ({ id: o.id, label: o.name })), [organizations]);
-  const companyOptions = useMemo(
-    () => companiesFiltered.map((c) => ({ id: c.id, label: c.name })),
-    [companiesFiltered]
-  );
+  const orgOptions = useMemo(() => organizations.map((o) => ({ id: String(o.id), label: String(o.name || 'Organization') })), [organizations]);
+  const companyOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const rows: { id: string; label: string }[] = [];
+    for (const c of [...companiesFiltered].sort((a, b) =>
+      String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base' })
+    )) {
+      const id = String((c as any).id ?? (c as any).pk ?? '').trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      rows.push({ id, label: String(c.name || 'Company').trim() || 'Company' });
+    }
+    return rows;
+  }, [companiesFiltered]);
 
   const employeeStats = useMemo(() => {
     return employees.map((emp) => {
@@ -551,7 +776,7 @@ export default function EmployeeScheduleScreen() {
     setExporting(true);
     try {
       const csv = buildScheduleCsv({
-        orgName: selectedOrgName || '—',
+        orgName: displayOrgName || '—',
         companyName: selectedCompanyName || '—',
         viewLabel: viewLabelCapital,
         rangeStart,
@@ -613,7 +838,7 @@ export default function EmployeeScheduleScreen() {
               <Text style={styles.filtersLabel}>Filters:</Text>
             </View>
             <View style={styles.filterDropdowns}>
-              {needsOrg && (
+              {needsOrgPicker && (
                 <TouchableOpacity style={styles.filterSelect} onPress={() => setOrgModal(true)} activeOpacity={0.85}>
                   <MaterialCommunityIcons name="office-building-outline" size={18} color="#64748b" />
                   <Text style={styles.filterSelectText} numberOfLines={1}>
@@ -623,23 +848,22 @@ export default function EmployeeScheduleScreen() {
                 </TouchableOpacity>
               )}
               <TouchableOpacity
-                style={[styles.filterSelect, needsOrg && !selectedOrgId && styles.filterSelectMuted]}
+                style={[styles.filterSelect, needsOrgPicker && !selectedOrgId && styles.filterSelectMuted]}
                 onPress={() => {
-                  if (needsOrg && !selectedOrgId) return;
-                  if (companiesFiltered.length === 0) return;
+                  if (needsOrgPicker && !selectedOrgId) return;
                   setCompanyModal(true);
                 }}
                 activeOpacity={0.85}
-                disabled={needsOrg && !selectedOrgId}
+                disabled={needsOrgPicker && !selectedOrgId}
               >
                 <MaterialCommunityIcons name="office-building-outline" size={18} color="#64748b" />
                 <Text
-                  style={[styles.filterSelectText, needsOrg && !selectedOrgId && styles.mutedText]}
+                  style={[styles.filterSelectText, needsOrgPicker && !selectedOrgId && styles.mutedText]}
                   numberOfLines={1}
                 >
-                  {needsOrg && !selectedOrgId
+                  {needsOrgPicker && !selectedOrgId
                     ? 'Select organization first'
-                    : companiesFiltered.length === 0 && selectedOrgId
+                    : companiesFiltered.length === 0 && (selectedOrgId || resolvedOrgScopeId)
                       ? 'No companies'
                       : selectedCompanyId
                         ? selectedCompanyName || 'Company'
@@ -684,7 +908,7 @@ export default function EmployeeScheduleScreen() {
         {!selectedCompanyId ? (
           <View style={styles.emptyCard}>
             <Text style={styles.emptyText}>
-              {needsOrg && !selectedOrgId
+              {needsOrgPicker && !selectedOrgId
                 ? 'Select an organization and company to view employee schedules.'
                 : 'Select a company to view employee schedules.'}
             </Text>
@@ -781,9 +1005,9 @@ export default function EmployeeScheduleScreen() {
       />
       <PickerModal
         visible={companyModal}
-        title="Company"
+        title={effectiveRole === 'operations_manager' ? 'Companies (your organization)' : 'Company'}
         options={companyOptions}
-        onSelect={(id) => setSelectedCompanyId(id)}
+        onSelect={(id) => setSelectedCompanyId(String(id))}
         onClose={() => setCompanyModal(false)}
       />
     </View>

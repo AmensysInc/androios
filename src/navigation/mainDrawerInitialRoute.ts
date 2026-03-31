@@ -6,6 +6,8 @@ export function getMainDrawerInitialRoute(role: UserRole | null | undefined): st
   if (role === 'super_admin' || role === 'admin') return 'SuperAdminDashboard';
   if (role === 'operations_manager') return 'Companies';
   if (role === 'manager') return 'Calendar';
-  if (role === 'employee' || role === 'house_keeping' || role === 'maintenance') return 'EmployeeDashboard';
+  if (role === 'employee' || role === 'house_keeping' || role === 'maintenance' || role === 'user') {
+    return 'EmployeeDashboard';
+  }
   return 'Calendar';
 }

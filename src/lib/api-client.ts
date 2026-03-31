@@ -109,10 +109,21 @@ function getRefreshToken(data: any): string | undefined {
 function normalizeUserPayload(raw: any): any {
   if (raw == null) return null;
   if (typeof raw !== 'object') return null;
-  const inner = (raw as any).user ?? (raw as any).profile ?? (raw as any).data;
-  const u = inner && typeof inner === 'object' ? inner : raw;
-  if (typeof u !== 'object') return null;
-  const withId = { ...u } as any;
+  const r = raw as any;
+  const fromUser = r.user && typeof r.user === 'object' ? r.user : null;
+  const fromData = r.data && typeof r.data === 'object' ? r.data : null;
+  const profile = r.profile && typeof r.profile === 'object' ? r.profile : {};
+  const userProfile = r.user_profile && typeof r.user_profile === 'object' ? r.user_profile : {};
+  const base = fromUser ?? fromData ?? r;
+  const merged =
+    fromUser || fromData
+      ? { ...base, ...profile, ...userProfile }
+      : (() => {
+          const { profile: _p, user_profile: _up, user: _u, data: _d, ...rest } = r;
+          return { ...rest, ...profile, ...userProfile };
+        })();
+  if (typeof merged !== 'object' || merged == null) return null;
+  const withId = { ...merged } as any;
   if (withId.id == null && withId.pk != null) withId.id = String(withId.pk);
   const hasIdentity =
     withId.id != null || withId.email != null || withId.username != null;
@@ -160,6 +171,7 @@ export class HttpError extends Error {
 export class ApiClient {
   private baseURL: string = API_URL;
   private token: string | null = null;
+  private inFlightGets: Map<string, Promise<unknown>> = new Map();
 
   async setToken(token: string | null) {
     this.token = token;
@@ -185,9 +197,11 @@ export class ApiClient {
     return `${url}?${search.toString()}`;
   }
 
-  private async request<T>(endpoint: string, options: RequestInit & { params?: Record<string, any> } = {}): Promise<T> {
+  private async requestRaw<T>(endpoint: string, options: RequestInit & { params?: Record<string, any> } = {}): Promise<T> {
     const { params, ...init } = options;
     const url = this.buildURL(endpoint, params);
+    const method = String(init.method || 'GET').toUpperCase();
+
     const token = this.token ?? (await AsyncStorage.getItem(TOKEN_KEY));
     if (token) this.token = token;
 
@@ -240,7 +254,6 @@ export class ApiClient {
         throw new HttpError(msg, response.status, err);
       }
 
-      const method = String(init.method || 'GET').toUpperCase();
       const isMutation = method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
 
       const trimmed = text.trim();
@@ -279,6 +292,25 @@ export class ApiClient {
       }
       throw e;
     }
+  }
+
+  private async request<T>(endpoint: string, options: RequestInit & { params?: Record<string, any> } = {}): Promise<T> {
+    const { params, ...init } = options;
+    const url = this.buildURL(endpoint, params);
+    const method = String(init.method || 'GET').toUpperCase();
+
+    // De-dupe identical GETs (login navigation often triggers multiple mounts/effects).
+    if (method === 'GET') {
+      const existing = this.inFlightGets.get(url) as Promise<T> | undefined;
+      if (existing) return existing;
+      const p = this.requestRaw<T>(endpoint, options).finally(() => {
+        this.inFlightGets.delete(url);
+      });
+      this.inFlightGets.set(url, p as Promise<unknown>);
+      return p;
+    }
+
+    return this.requestRaw<T>(endpoint, options);
   }
 
   async get<T>(
