@@ -13,9 +13,31 @@ import {
 import apiClient from '../lib/api-client';
 import { useAuth } from '../context/AuthContext';
 
+const FORCE_PASSWORD_ROLES = new Set([
+  'super_admin',
+  'operations_manager',
+  'organization_manager',
+  'manager',
+  'company_manager',
+  'employee',
+]);
+
+function shouldForcePasswordChange(user: any): boolean {
+  const must = !!user?.profile?.must_change_password;
+  if (!must) return false;
+  const roleNames = (Array.isArray(user?.roles) ? user.roles : [])
+    .map((r: any) => String(r?.role ?? r?.name ?? '').toLowerCase())
+    .filter(Boolean);
+  return roleNames.some((r: string) => FORCE_PASSWORD_ROLES.has(r));
+}
+
 export default function AuthScreen({ navigation }: any) {
+  const [mode, setMode] = useState<'login' | 'reset' | 'firstLogin'>('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const { setSessionFromLogin } = useAuth();
 
@@ -28,6 +50,14 @@ export default function AuthScreen({ navigation }: any) {
     setLoading(true);
     try {
       const { user, access, refresh } = await apiClient.loginWithSession(trimmed, password);
+      if (shouldForcePasswordChange(user)) {
+        setMode('firstLogin');
+        setCurrentPassword(password);
+        setNewPassword('');
+        setConfirmPassword('');
+        Alert.alert('Password update required', 'For first login, change your password to continue.');
+        return;
+      }
       await setSessionFromLogin({
         user,
         access,
@@ -40,6 +70,37 @@ export default function AuthScreen({ navigation }: any) {
     }
   };
 
+  const handleResetPassword = async () => {
+    const trimmed = username.trim();
+    if (!trimmed || !currentPassword || !newPassword || !confirmPassword) {
+      Alert.alert('Validation', 'Please fill all password fields.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      Alert.alert('Validation', 'New password and confirm password do not match.');
+      return;
+    }
+    setLoading(true);
+    try {
+      await apiClient.resetPasswordWithCurrent(trimmed, currentPassword, newPassword);
+      if (mode === 'firstLogin') {
+        const { user, access, refresh } = await apiClient.loginWithSession(trimmed, newPassword);
+        await setSessionFromLogin({ user, access, refresh });
+      } else {
+        Alert.alert('Success', 'Password reset successful. Please sign in.');
+        setMode('login');
+        setPassword('');
+        setCurrentPassword('');
+        setNewPassword('');
+        setConfirmPassword('');
+      }
+    } catch (e: any) {
+      Alert.alert('Reset failed', e?.message || 'Failed to reset password.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -47,7 +108,9 @@ export default function AuthScreen({ navigation }: any) {
     >
       <View style={styles.card}>
         <Text style={styles.title}>Zeno Time Flow</Text>
-        <Text style={styles.subtitle}>Sign in</Text>
+        <Text style={styles.subtitle}>
+          {mode === 'login' ? 'Sign in' : mode === 'firstLogin' ? 'First login: change password' : 'Reset password'}
+        </Text>
         <TextInput
           style={styles.input}
           placeholder="Username or email"
@@ -55,25 +118,73 @@ export default function AuthScreen({ navigation }: any) {
           onChangeText={setUsername}
           autoCapitalize="none"
           autoCorrect={false}
+          editable={mode !== 'firstLogin'}
         />
-        <TextInput
-          style={styles.input}
-          placeholder="Password"
-          value={password}
-          onChangeText={setPassword}
-          secureTextEntry
-        />
-        <TouchableOpacity
-          style={[styles.button, loading && styles.buttonDisabled]}
-          onPress={handleSignIn}
-          disabled={loading}
-        >
-          {loading ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.buttonText}>Sign in</Text>
-          )}
-        </TouchableOpacity>
+        {mode === 'login' ? (
+          <>
+            <TextInput
+              style={styles.input}
+              placeholder="Password"
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry
+            />
+            <TouchableOpacity
+              style={[styles.button, loading && styles.buttonDisabled]}
+              onPress={handleSignIn}
+              disabled={loading}
+            >
+              {loading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.buttonText}>Sign in</Text>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.link} onPress={() => setMode('reset')}>
+              <Text style={styles.linkText}>Reset Password</Text>
+            </TouchableOpacity>
+          </>
+        ) : (
+          <>
+            <TextInput
+              style={styles.input}
+              placeholder="Current Password"
+              value={currentPassword}
+              onChangeText={setCurrentPassword}
+              secureTextEntry
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="New Password"
+              value={newPassword}
+              onChangeText={setNewPassword}
+              secureTextEntry
+            />
+            <TextInput
+              style={styles.input}
+              placeholder="Confirm New Password"
+              value={confirmPassword}
+              onChangeText={setConfirmPassword}
+              secureTextEntry
+            />
+            <TouchableOpacity
+              style={[styles.button, loading && styles.buttonDisabled]}
+              onPress={handleResetPassword}
+              disabled={loading}
+            >
+              {loading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.buttonText}>{mode === 'firstLogin' ? 'Change and Continue' : 'Reset Password'}</Text>
+              )}
+            </TouchableOpacity>
+            {mode !== 'firstLogin' && (
+              <TouchableOpacity style={styles.link} onPress={() => setMode('login')}>
+                <Text style={styles.linkText}>Back to sign in</Text>
+              </TouchableOpacity>
+            )}
+          </>
+        )}
         <TouchableOpacity
           style={styles.link}
           onPress={() => navigation.navigate('AdminAuth')}

@@ -476,6 +476,15 @@ export class ApiClient {
     return { user, access, refresh, response };
   }
 
+  async resetPasswordWithCurrent(usernameOrEmail: string, currentPassword: string, newPassword: string) {
+    const trimmed = usernameOrEmail.trim();
+    return this.post<any>('/auth/reset-password/', {
+      username: trimmed,
+      current_password: currentPassword,
+      new_password: newPassword,
+    });
+  }
+
   async employeeLogin(usernameOrEmail: string, pin: string) {
     const trimmed = usernameOrEmail.trim();
     let response: any;
