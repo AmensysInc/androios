@@ -330,6 +330,83 @@ export class ApiClient {
   }
 
   /**
+   * Multipart POST (e.g. face enrollment). Do not set Content-Type — the runtime sets the boundary.
+   */
+  async postFormData<T>(endpoint: string, formData: FormData): Promise<T> {
+    const path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+    const url = `${this.baseURL.replace(/\/$/, '')}${path}`;
+    const token = this.token ?? (await AsyncStorage.getItem(TOKEN_KEY));
+    if (token) this.token = token;
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const controller = new AbortController();
+    const uploadTimeoutMs = Math.max(API_TIMEOUT_MS * 2, 60000);
+    const timeoutId = setTimeout(() => controller.abort(), uploadTimeoutMs);
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: formData,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      const text = await response.text();
+      const parseJsonSafe = (): any => {
+        if (!text || !text.trim()) return {};
+        try {
+          return JSON.parse(text);
+        } catch {
+          return null;
+        }
+      };
+      if (response.status === 401) {
+        await this.setToken(null);
+        await AsyncStorage.removeItem(REFRESH_KEY);
+        const err = parseJsonSafe() ?? {};
+        const msg = (err as any).detail || err?.message || 'Unauthorized';
+        throw new HttpError(typeof msg === 'string' ? msg : String(msg), 401, err);
+      }
+      if (response.status === 403) {
+        const err = parseJsonSafe() ?? {};
+        const msg = (err as any)?.detail || (err as any)?.message || "You don't have permission.";
+        throw new HttpError(typeof msg === 'string' ? msg : String(msg), 403, err);
+      }
+      if (!response.ok) {
+        const parsed = parseJsonSafe();
+        const err =
+          (parsed != null && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? parsed
+            : {}) as Record<string, unknown>;
+        const rawSnippet = text.trim().slice(0, 400);
+        const msg = extractErrorMessage(err) || rawSnippet || `HTTP ${response.status}`;
+        throw new HttpError(msg, response.status, err);
+      }
+      const trimmed = text.trim();
+      if (!trimmed) return {} as T;
+      const contentType = response.headers.get('content-type') || '';
+      const looksJson =
+        contentType.includes('application/json') ||
+        trimmed.startsWith('{') ||
+        trimmed.startsWith('[');
+      if (looksJson) {
+        try {
+          return JSON.parse(trimmed) as T;
+        } catch {
+          return {} as T;
+        }
+      }
+      return {} as T;
+    } catch (e) {
+      clearTimeout(timeoutId);
+      if (e instanceof Error && e.name === 'AbortError') throw new Error('Upload timed out.');
+      if (e instanceof TypeError && typeof e.message === 'string' && e.message.toLowerCase().includes('fetch failed')) {
+        throw new Error(`Network error: cannot reach ${url}. Check EXPO_PUBLIC_API_URL (and that the backend is running).`);
+      }
+      throw e;
+    }
+  }
+
+  /**
    * POST with access to `Location` and raw status — used when the body is empty on 201/204 but the
    * created resource id is only in `Location`, or when DRF nests the object under `data`.
    */

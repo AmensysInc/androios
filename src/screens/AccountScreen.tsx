@@ -13,12 +13,21 @@ import {
 } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
+import {
+  deleteFaceEnrollment,
+  enrollFaceWithUri,
+  getFaceEnrollmentStatus,
+  pickFacePhotoFromCamera,
+} from '../lib/accountFaceAuth';
 
 export default function AccountScreen() {
   const { user } = useAuth();
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
   const [changingPassword, setChangingPassword] = useState(false);
+  const [hasEmployee, setHasEmployee] = useState(false);
+  const [faceEnrolled, setFaceEnrolled] = useState(false);
+  const [faceBusy, setFaceBusy] = useState(false);
   const [profile, setProfile] = useState({
     full_name: '',
     email: '',
@@ -43,6 +52,16 @@ export default function AccountScreen() {
         email: data.email || '',
         mobile_number: profileData.mobile_number || '',
       });
+      if (user) {
+        const emp = await api.findSchedulerEmployeeForAuthUser({ ...user, ...data });
+        setHasEmployee(!!emp);
+        if (emp) {
+          const st = await getFaceEnrollmentStatus();
+          setFaceEnrolled(st.enrolled);
+        } else {
+          setFaceEnrolled(false);
+        }
+      }
     } catch (e) {
       console.warn(e);
     } finally {
@@ -64,6 +83,49 @@ export default function AccountScreen() {
     } finally {
       setUpdating(false);
     }
+  };
+
+  const enrollOrReplaceFace = async () => {
+    setFaceBusy(true);
+    try {
+      const uri = await pickFacePhotoFromCamera();
+      if (!uri) return;
+      await enrollFaceWithUri(uri);
+      setFaceEnrolled(true);
+      Alert.alert('Saved', 'Your face is stored for verification on any device when you clock in or out.');
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Could not save face enrollment.');
+    } finally {
+      setFaceBusy(false);
+    }
+  };
+
+  const removeFaceEnrollment = async () => {
+    Alert.alert(
+      'Remove face enrollment?',
+      'Clock actions will no longer require a matching photo on the server. Device Face ID / fingerprint settings are unchanged.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              setFaceBusy(true);
+              try {
+                await deleteFaceEnrollment();
+                setFaceEnrolled(false);
+                Alert.alert('Removed', 'Account face enrollment was deleted.');
+              } catch (e: any) {
+                Alert.alert('Error', e?.message || 'Could not remove enrollment.');
+              } finally {
+                setFaceBusy(false);
+              }
+            })();
+          },
+        },
+      ],
+    );
   };
 
   const changePassword = async () => {
@@ -173,6 +235,32 @@ export default function AccountScreen() {
             <Text style={styles.btnText}>{changingPassword ? 'Changing…' : 'Change password'}</Text>
           </TouchableOpacity>
         </View>
+
+        {hasEmployee ? (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Face verification (account)</Text>
+            <Text style={styles.helpText}>
+              Enroll once here; the server checks a live photo when you clock in or out on any phone or tablet. This is
+              separate from device Face ID in Settings.
+            </Text>
+            <TouchableOpacity
+              style={[styles.btn, faceBusy && styles.btnDisabled]}
+              onPress={enrollOrReplaceFace}
+              disabled={faceBusy}
+            >
+              <Text style={styles.btnText}>{faceEnrolled ? 'Replace face photo' : 'Enroll face'}</Text>
+            </TouchableOpacity>
+            {faceEnrolled ? (
+              <TouchableOpacity
+                style={[styles.btn, styles.btnDanger, faceBusy && styles.btnDisabled]}
+                onPress={removeFaceEnrollment}
+                disabled={faceBusy}
+              >
+                <Text style={styles.btnText}>Remove enrollment</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+        ) : null}
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -198,6 +286,8 @@ const styles = StyleSheet.create({
   },
   btn: { backgroundColor: '#3b82f6', padding: 14, borderRadius: 10, alignItems: 'center' },
   btnSecondary: { backgroundColor: '#64748b' },
+  btnDanger: { backgroundColor: '#b91c1c', marginTop: 10 },
   btnDisabled: { opacity: 0.7 },
+  helpText: { fontSize: 14, color: '#64748b', marginBottom: 12, lineHeight: 20 },
   btnText: { color: '#fff', fontWeight: '600', fontSize: 16 },
 });

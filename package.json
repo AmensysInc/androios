@@ -9,7 +9,11 @@
     "start:online": "expo start",
     "android": "expo start --offline --android",
     "ios": "expo start --offline --ios",
-    "web": "expo start --offline --web"
+    "web": "expo start --offline --web",
+    "build:android:apk": "eas build --platform android --profile preview",
+    "build:android:aab": "eas build --platform android --profile production",
+    "eas:login": "eas login",
+    "eas:configure": "eas build:configure"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "1.23.1",
@@ -20,6 +24,7 @@
     "expo": "~52.0.0",
     "expo-constants": "~17.0.8",
     "expo-file-system": "~18.0.12",
+    "expo-image-picker": "~16.0.6",
     "expo-linear-gradient": "~14.0.2",
     "expo-local-authentication": "~15.0.2",
     "expo-router": "~4.0.0",
@@ -38,6 +43,7 @@
   "devDependencies": {
     "@babel/core": "^7.25.2",
     "@types/react": "~18.3.12",
+    "eas-cli": "^18.4.0",
     "http-proxy-middleware": "^3.0.5",
     "typescript": "~5.3.0"
   },

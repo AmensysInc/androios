@@ -3,6 +3,7 @@ import { StatusBar } from 'expo-status-bar';
 import { AuthProvider } from './src/context/AuthContext';
 import RootNavigator from './src/navigation/RootNavigator';
 import BiometricRegistrationHost from './src/components/BiometricRegistrationHost';
+import PostLoginFaceHost from './src/components/PostLoginFaceHost';
 import apiClient from './src/lib/api-client';
 
 export default function App() {
@@ -15,6 +16,7 @@ export default function App() {
       <StatusBar style="auto" />
       <AuthProvider>
         <BiometricRegistrationHost />
+        <PostLoginFaceHost />
         <RootNavigator />
       </AuthProvider>
     </>

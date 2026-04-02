@@ -69,7 +69,7 @@ export async function promptFirstTimeDeviceRegistration(userId: string): Promise
   const label = await humanReadableBiometricTypes();
   Alert.alert(
     'Register this device',
-    `Use ${label} on this device so we can verify it’s you when you clock in or out. Each phone or tablet is registered separately. Nothing is sent to the server — your device confirms your identity.`,
+    `Use ${label} on this device for an extra check when you clock in or out. Each device is separate. For account-wide face verification (any device), enroll under Account → Face verification.`,
     [
       {
         text: 'Not now',

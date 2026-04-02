@@ -1,6 +1,7 @@
 /**
  * Device biometrics (Face ID / Touch ID / fingerprint) for the mobile app.
  * Uses the OS biometric gate + SecureStore for the access token when "biometric login" is enabled.
+ * Account-wide face (camera + server) is handled in accountFaceAuth.ts — independent of OS biometrics.
  * Backend auth is unchanged: JWT from existing login; refresh via /api/auth/token/refresh/.
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';

@@ -12,6 +12,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
 import { confirmClockBiometricOrAlert } from '../lib/biometricAuth';
+import { confirmAccountFaceForClockOrAlert } from '../lib/accountFaceAuth';
 
 function formatTime(ms: number) {
   const d = new Date(ms);
@@ -250,6 +251,7 @@ export default function EmployeeDashboard() {
 
   const handleClockIn = async () => {
     if (!employee?.id) return;
+    if (!(await confirmAccountFaceForClockOrAlert())) return;
     if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {
@@ -267,6 +269,7 @@ export default function EmployeeDashboard() {
       Alert.alert('Error', 'No active time entry to clock out.');
       return;
     }
+    if (!(await confirmAccountFaceForClockOrAlert())) return;
     if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {
@@ -281,6 +284,7 @@ export default function EmployeeDashboard() {
   const handleStartBreak = async () => {
     const entryId = api.timeClockEntryId(activeEntry);
     if (!entryId) return;
+    if (!(await confirmAccountFaceForClockOrAlert())) return;
     if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {
@@ -295,6 +299,7 @@ export default function EmployeeDashboard() {
   const handleEndBreak = async () => {
     const entryId = api.timeClockEntryId(activeEntry);
     if (!entryId) return;
+    if (!(await confirmAccountFaceForClockOrAlert())) return;
     if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {

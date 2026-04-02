@@ -17,6 +17,7 @@ import {
   setClockBiometricEnabled,
   confirmClockBiometricOrAlert,
 } from '../lib/biometricAuth';
+import { confirmAccountFaceForClockOrAlert } from '../lib/accountFaceAuth';
 
 function parseMs(iso: string | null): number | null {
   if (!iso) return null;
@@ -97,6 +98,7 @@ export default function ClockInScreen() {
 
   const onClockIn = async () => {
     if (!employee) return;
+    if (!(await confirmAccountFaceForClockOrAlert())) return;
     if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {
@@ -115,6 +117,7 @@ export default function ClockInScreen() {
       Alert.alert('Error', 'No active time entry to clock out.');
       return;
     }
+    if (!(await confirmAccountFaceForClockOrAlert())) return;
     if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {
@@ -130,6 +133,7 @@ export default function ClockInScreen() {
   const onStartBreak = async () => {
     const entryId = api.timeClockEntryId(activeEntry);
     if (!entryId) return;
+    if (!(await confirmAccountFaceForClockOrAlert())) return;
     if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {
@@ -145,6 +149,7 @@ export default function ClockInScreen() {
   const onEndBreak = async () => {
     const entryId = api.timeClockEntryId(activeEntry);
     if (!entryId) return;
+    if (!(await confirmAccountFaceForClockOrAlert())) return;
     if (!(await confirmClockBiometricOrAlert())) return;
     setActionLoading(true);
     try {

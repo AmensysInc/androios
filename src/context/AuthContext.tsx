@@ -8,6 +8,7 @@ import {
   loadAccessTokenAfterBiometric,
   clearBiometricLogin,
 } from '../lib/biometricAuth';
+import { clearFaceSessionFlags } from '../lib/accountFaceAuth';
 
 export interface User {
   id: string;
@@ -125,6 +126,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = useCallback(async () => {
     await clearBiometricLogin();
+    await clearFaceSessionFlags();
     await apiClient.logout();
     setUser(null);
     setRole(null);
