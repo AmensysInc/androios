@@ -376,7 +376,7 @@ export default function EmployeeScheduleScreen() {
   const initialLoadDone = useRef(false);
 
   /** Super admin / admin pick org explicitly; org manager is scoped to their org (no picker). */
-  const needsOrgPicker = role === 'super_admin' || role === 'admin';
+  const needsOrgPicker = role === 'super_admin';
   const authOrgId = useMemo(() => {
     const from = organizationIdFromAuthUser(user);
     if (from) return from;
@@ -385,7 +385,7 @@ export default function EmployeeScheduleScreen() {
   /** Resolved org for filtering when profile omits top-level `organization_id`. */
   const resolvedOrgScopeId = useMemo(() => {
     if (needsOrgPicker) return selectedOrgId ? String(selectedOrgId) : null;
-    if (effectiveRole !== 'operations_manager') return null;
+    if (effectiveRole !== 'organization_manager') return null;
     if (authOrgId) return authOrgId;
     if (organizations.length === 1) {
       const o = organizations[0];
@@ -395,9 +395,9 @@ export default function EmployeeScheduleScreen() {
     if (orgIds.size === 1) return [...orgIds][0] as string;
     return null;
   }, [needsOrgPicker, selectedOrgId, effectiveRole, authOrgId, organizations, companies]);
-  const isOrgManager = effectiveRole === 'operations_manager' && user?.id;
+  const isOrgManager = effectiveRole === 'organization_manager' && user?.id;
   /** Staff roles (not managers/admins) see only their own row when linked to an employee record. */
-  const selfScheduleOnly = ['employee', 'house_keeping', 'maintenance', 'user'].includes(
+  const selfScheduleOnly = ['employee'].includes(
     effectiveRole || ''
   );
 
@@ -414,7 +414,7 @@ export default function EmployeeScheduleScreen() {
       });
       if (
         filtered.length === 0 &&
-        effectiveRole === 'operations_manager' &&
+        effectiveRole === 'organization_manager' &&
         list.length > 0
       ) {
         filtered = list;
@@ -530,7 +530,7 @@ export default function EmployeeScheduleScreen() {
       setOrganizations(orgList);
 
       let compRaw: any[] = [];
-      if (effectiveRole === 'manager') {
+      if (effectiveRole === 'company_manager') {
         compRaw = await api.getCompanies();
       } else if (needsOrgPicker) {
         if (selectedOrgId) {
@@ -1005,7 +1005,7 @@ export default function EmployeeScheduleScreen() {
       />
       <PickerModal
         visible={companyModal}
-        title={effectiveRole === 'operations_manager' ? 'Companies (your organization)' : 'Company'}
+        title={effectiveRole === 'organization_manager' ? 'Companies (your organization)' : 'Company'}
         options={companyOptions}
         onSelect={(id) => setSelectedCompanyId(String(id))}
         onClose={() => setCompanyModal(false)}

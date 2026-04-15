@@ -111,8 +111,8 @@ function calendarEventAssignedToUser(ev: any, userId: string): boolean {
 function filterShiftLikeEventsToAssignee(events: any[], userId: string | undefined, role: string | null): any[] {
   const list = Array.isArray(events) ? events : [];
   if (!userId) return list;
-  if (role && ['super_admin', 'operations_manager'].includes(role)) return list;
-  const trustApiUserScope = ['employee', 'house_keeping', 'maintenance', 'user'].includes(role || '');
+  if (role && ['super_admin', 'organization_manager'].includes(role)) return list;
+  const trustApiUserScope = role === 'employee';
   return list.filter((ev) => {
     if (!isShiftLikeCalendarEvent(ev)) return true;
     if (calendarEventAssignedToUser(ev, userId)) return true;
@@ -146,16 +146,8 @@ export default function CalendarScreen() {
     return new Date(t.getFullYear(), t.getMonth(), t.getDate());
   });
 
-  /** Only these roles see unscoped “all shifts” in the calendar. */
-  const loadsAllShiftsUnscoped = ['super_admin', 'operations_manager'].includes(effectiveRole || '');
   /** Staff + company managers: resolve scheduler employee and load that person’s shifts (not org-wide). */
-  const loadOwnEmployeeShifts = [
-    'employee',
-    'house_keeping',
-    'maintenance',
-    'user',
-    'manager',
-  ].includes(effectiveRole || '');
+  const loadOwnEmployeeShifts = ['employee', 'company_manager'].includes(effectiveRole || '');
 
   const load = useCallback(async () => {
     try {
@@ -198,12 +190,7 @@ export default function CalendarScreen() {
               rangeEnd: monthEnd,
               companyId: empCompanyId,
             })
-          : loadsAllShiftsUnscoped
-            ? api.getShifts({
-                start_time__gte: monthStart.toISOString(),
-                start_time__lte: monthEnd.toISOString(),
-              })
-            : Promise.resolve([]),
+          : Promise.resolve([]),
       ]);
       setEvents(eventsRaw);
       setShifts(Array.isArray(shiftsRaw) ? shiftsRaw : []);
@@ -218,7 +205,6 @@ export default function CalendarScreen() {
     user?.email,
     user?.company_id,
     user?.assigned_company,
-    loadsAllShiftsUnscoped,
     loadOwnEmployeeShifts,
     viewMonth,
     effectiveRole,

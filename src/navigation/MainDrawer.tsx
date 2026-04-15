@@ -2,8 +2,8 @@ import React from 'react';
 import { createDrawerNavigator } from '@react-navigation/drawer';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useAuth } from '../context/AuthContext';
-import { getRoleDisplayLabel } from '../types/auth';
+import { useAuth, type User } from '../context/AuthContext';
+import { getPrimaryRoleFromUser, getRoleDisplayLabel, mergeNestedAuthUserPayload } from '../types/auth';
 import { getMainDrawerInitialRoute } from './mainDrawerInitialRoute';
 
 import SuperAdminDashboard from '../screens/SuperAdminDashboard';
@@ -23,6 +23,9 @@ import EmployeesScreen from '../screens/scheduler/EmployeesScreen';
 import TimeClockScreen from '../screens/scheduler/TimeClockScreen';
 import EmployeeScheduleScreen from '../screens/scheduler/EmployeeScheduleScreen';
 import MissedShiftsScreen from '../screens/scheduler/MissedShiftsScreen';
+import HotelCleaningScreen from '../screens/hotel/HotelCleaningScreen';
+import EmployeeHotelScreen from '../screens/hotel/EmployeeHotelScreen';
+import { useHotelCleaningAccess } from '../hooks/useHotelCleaningAccess';
 
 const Drawer = createDrawerNavigator();
 
@@ -44,14 +47,24 @@ type SchedulerDrawerItem = (typeof SCHEDULER_DRAWER_ITEMS)[number];
  */
 function getSchedulerItemsForRole(role: string | null | undefined): SchedulerDrawerItem[] {
   const all = [...SCHEDULER_DRAWER_ITEMS];
-  if (role === 'super_admin' || role === 'admin') return all;
-  if (role === 'manager') return all.filter((i) => i.name !== 'Companies');
-  if (role === 'operations_manager') return all.filter((i) => i.name !== 'Schedule');
+  if (role === 'super_admin') return all;
+  if (role === 'company_manager') return all.filter((i) => i.name !== 'Companies');
+  if (role === 'organization_manager') return all.filter((i) => i.name !== 'Schedule');
   return all;
 }
 
 function CustomDrawerContent({ navigation }: any) {
-  const { user, role, signOut } = useAuth();
+  const { user, role, signOut, isLoading } = useAuth();
+  const mergedDrawerUser = user ? (mergeNestedAuthUserPayload(user) as User) : null;
+  /** Merged + raw: some envelopes keep `roles[]` only on the outer `/auth/user/` object. */
+  const primaryFromMerged = mergedDrawerUser ? getPrimaryRoleFromUser(mergedDrawerUser as any) : null;
+  const primaryFromRaw = user ? getPrimaryRoleFromUser(user as any) : null;
+  const primaryFromSessionUser = primaryFromMerged ?? primaryFromRaw;
+  const {
+    allowed: hotelAllowed,
+    resolved: hotelAccessResolved,
+    variant: hotelVariant,
+  } = useHotelCleaningAccess(user, role ?? primaryFromSessionUser);
 
   const mainItems = [
     { name: 'Calendar', label: 'Calendar' },
@@ -64,12 +77,28 @@ function CustomDrawerContent({ navigation }: any) {
 
   /** Matches web `AppSidebar`: Check Lists for these roles only (not plain `admin`). */
   const canSeeCheckLists =
-    role === 'super_admin' || role === 'manager' || role === 'operations_manager';
+    role === 'super_admin' || role === 'company_manager' || role === 'organization_manager';
 
-  const isAdmin = role && ['super_admin', 'admin', 'operations_manager', 'manager'].includes(role);
-  const isEmployee = role && ['employee', 'house_keeping', 'maintenance'].includes(role);
+  const isAdmin = role && ['super_admin', 'organization_manager', 'company_manager'].includes(role);
+  /** Canonical employee: auth context, merged user, or raw payload (covers merge / timing edge cases). */
+  const isEmployeeUser =
+    role === 'employee' ||
+    primaryFromMerged === 'employee' ||
+    primaryFromRaw === 'employee';
 
-  const adminDashboard = role === 'super_admin' || role === 'admin';
+  const canSeeEmployeeRooms =
+    Boolean(user) &&
+    !isLoading &&
+    hotelAccessResolved &&
+    hotelAllowed &&
+    hotelVariant === 'employee_cleaning';
+
+  const canSeeUserManagement =
+    primaryFromSessionUser === 'super_admin' ||
+    primaryFromSessionUser === 'organization_manager' ||
+    primaryFromSessionUser === 'company_manager';
+
+  const adminDashboard = role === 'super_admin';
 
   return (
     <View style={styles.drawer}>
@@ -92,10 +121,26 @@ function CustomDrawerContent({ navigation }: any) {
             <Text style={styles.menuLabel}>Super Admin Dashboard</Text>
           </TouchableOpacity>
         )}
-        {isEmployee && (
+        {isEmployeeUser && (
           <TouchableOpacity style={styles.menuItem} onPress={() => navigation.navigate('EmployeeDashboard')}>
             <Text style={styles.menuLabel}>My Dashboard</Text>
           </TouchableOpacity>
+        )}
+        {canSeeEmployeeRooms && (
+          <>
+            <Text style={styles.sectionLabel}>Motel</Text>
+            <TouchableOpacity style={styles.menuItem} onPress={() => navigation.navigate('EmployeeHotel')}>
+              <Text style={styles.menuLabel}>Rooms</Text>
+            </TouchableOpacity>
+          </>
+        )}
+        {!isLoading && user && hotelAccessResolved && hotelAllowed && hotelVariant === 'admin_rooms' && (
+          <>
+            <Text style={styles.sectionLabel}>Motel</Text>
+            <TouchableOpacity style={styles.menuItem} onPress={() => navigation.navigate('Hotel')}>
+              <Text style={styles.menuLabel}>Hotel</Text>
+            </TouchableOpacity>
+          </>
         )}
         {isAdmin && (
           <>
@@ -116,7 +161,7 @@ function CustomDrawerContent({ navigation }: any) {
             <Text style={styles.menuLabel}>Check Lists</Text>
           </TouchableOpacity>
         )}
-        {role === 'super_admin' && (
+        {canSeeUserManagement && (
           <TouchableOpacity style={styles.menuItem} onPress={() => navigation.navigate('UserManagement')}>
             <Text style={styles.menuLabel}>User Management</Text>
           </TouchableOpacity>
@@ -187,6 +232,8 @@ export default function MainDrawer() {
       <Drawer.Screen name="TimeClock" component={TimeClockScreen} options={{ title: 'Time Clock' }} />
       <Drawer.Screen name="EmployeeSchedule" component={EmployeeScheduleScreen} options={{ title: 'Employee Schedule' }} />
       <Drawer.Screen name="MissedShifts" component={MissedShiftsScreen} options={{ title: 'Missed Shifts' }} />
+      <Drawer.Screen name="Hotel" component={HotelCleaningScreen} options={{ title: 'Hotel' }} />
+      <Drawer.Screen name="EmployeeHotel" component={EmployeeHotelScreen} options={{ title: 'Rooms' }} />
     </Drawer.Navigator>
   );
 }

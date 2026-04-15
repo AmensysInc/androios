@@ -357,7 +357,7 @@ export default function HabitsScreen() {
   const [formColor, setFormColor] = useState(COLOR_SWATCHES[0].hex);
   const [saving, setSaving] = useState(false);
 
-  const canListAll = role === 'super_admin' || role === 'admin';
+  const canListAll = role === 'super_admin';
 
   const load = useCallback(async () => {
     try {

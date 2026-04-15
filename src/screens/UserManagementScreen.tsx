@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -20,6 +20,17 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import { getPrimaryRoleFromUser, getRoleDisplayLabel, type UserRole } from '../types/auth';
 import * as api from '../api';
+import {
+  loadDepartmentOptions,
+  persistEmployeeDepartment,
+  type DepartmentOption,
+} from '../lib/departmentOptions';
+import {
+  departmentNameFromCatalog,
+  departmentPrimaryId,
+  isLikelyUuid,
+  normalizeDeptIdsEqual,
+} from '../lib/departmentEmployeeMatch';
 
 const BLUE = '#2563eb';
 
@@ -32,10 +43,25 @@ function normalizeRoleToken(r: any): string {
     .replace(/[\s-]+/g, '_');
 }
 
-/** Matches web sidebar: User Management is only for `super_admin`. */
-function canAccessUserManagement(roles: any[]): boolean {
-  if (!Array.isArray(roles)) return false;
-  return roles.some((r) => normalizeRoleToken(r) === 'super_admin');
+/**
+ * `/auth/user/` may return a nested `{ user: {...} }` shape or top-level `roles` / `is_superuser`
+ * (same cases as `getPrimaryRoleFromUser`). Merge before role checks so super admins are not denied.
+ */
+function resolveUserPayloadForRole(userPayload: any): any {
+  if (!userPayload || typeof userPayload !== 'object') return userPayload;
+  const inner = userPayload.user;
+  if (inner && typeof inner === 'object') {
+    return { ...inner, ...userPayload, roles: userPayload.roles ?? inner.roles };
+  }
+  return userPayload;
+}
+
+/** User Management: super admins, organization managers, and company managers. */
+function canAccessUserManagement(userPayload: any): boolean {
+  const u = resolveUserPayloadForRole(userPayload);
+  if (!u || typeof u !== 'object') return false;
+  const r = getPrimaryRoleFromUser(u);
+  return r === 'super_admin' || r === 'organization_manager' || r === 'company_manager';
 }
 
 type RowUser = {
@@ -45,7 +71,10 @@ type RowUser = {
   full_name: string;
   phone: string;
   title: string;
+  /** Squad / internal team label only (not org or company). */
   team: string;
+  /** Company and/or organization display for admins (see web "Organization / Company" column). */
+  organizationCompany: string;
   department: string;
   pin: string;
   dateAdded: string;
@@ -58,9 +87,9 @@ type RowUser = {
 /**
  * Admins tab: elevated roles (same resolution as session / web sidebar).
  * Uses full `raw` user so list APIs that omit `roles[]` but send `role` / `primary_role` still classify correctly.
- * Users tab: employee, house_keeping, maintenance, user, and unknown.
+ * Users tab: everyone not classified as admins (canonical role `employee` includes legacy API staff roles).
  */
-const ADMIN_TAB_PRIMARY_ROLES = new Set<UserRole>(['super_admin', 'admin', 'operations_manager', 'manager']);
+const ADMIN_TAB_PRIMARY_ROLES = new Set<UserRole>(['super_admin', 'organization_manager', 'company_manager']);
 
 function rowBelongsToAdminsTab(r: RowUser): boolean {
   const u = r.raw;
@@ -68,6 +97,35 @@ function rowBelongsToAdminsTab(r: RowUser): boolean {
   if ((u as any).is_superuser === true) return true;
   const primary = getPrimaryRoleFromUser(u);
   return ADMIN_TAB_PRIMARY_ROLES.has(primary);
+}
+
+/**
+ * Organization Manager: Admins tab lists only their own row plus company managers in scope.
+ * Super Admin / Django superuser rows are hidden (no API or model changes).
+ */
+function filterAdminTabRowsForOrganizationManagerViewer(adminRows: RowUser[], viewerPayload: any): RowUser[] {
+  const u = resolveUserPayloadForRole(viewerPayload);
+  if (!u || typeof u !== 'object') return adminRows;
+  if (getPrimaryRoleFromUser(u) !== 'organization_manager') return adminRows;
+
+  const meId = String(u.id ?? u.pk ?? (u as any).user_id ?? '').trim();
+
+  return adminRows.filter((r) => {
+    const raw = r.raw;
+    if (!raw || typeof raw !== 'object') return false;
+    if ((raw as any).is_superuser === true) return false;
+    const primary = getPrimaryRoleFromUser(raw);
+    if (primary === 'super_admin') return false;
+    const titleLow = String(r.title || '').toLowerCase();
+    if (titleLow.includes('super admin')) return false;
+
+    if (primary === 'organization_manager') {
+      if (!meId) return false;
+      return String(r.id ?? '').trim() === meId;
+    }
+    if (primary === 'company_manager') return true;
+    return false;
+  });
 }
 
 function initialsFromName(name: string, email: string): string {
@@ -198,12 +256,515 @@ async function persistAuthUserRole(userId: string, desiredRole: string): Promise
   return false;
 }
 
-function mapApiUser(u: any): RowUser {
+function userRowDisplayName(u: any): string {
+  if (!u || typeof u !== 'object') return '';
+  const profile = u.profile || u.user_profile || {};
+  return pickFirstNonEmpty(
+    profile.full_name,
+    u.full_name,
+    [profile.first_name, profile.last_name].filter(Boolean).join(' '),
+    [u.first_name, u.last_name].filter(Boolean).join(' '),
+    u.username,
+    u.email
+  );
+}
+
+function registerNameLookup(acc: Map<string, string>, idRaw: string, name: string) {
+  const id = String(idRaw || '').trim();
+  const nm = String(name || '').trim();
+  if (!id || !nm) return;
+  acc.set(id, nm);
+  acc.set(id.replace(/-/g, '').toLowerCase(), nm);
+}
+
+function buildUserAddedByLookup(users: any[]): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const u of users) {
+    const id = String(u?.id ?? u?.pk ?? u?.uuid ?? '').trim();
+    if (!id) continue;
+    const nm = userRowDisplayName(u);
+    if (nm) registerNameLookup(m, id, nm);
+  }
+  return m;
+}
+
+function nestedCreatorDisplayName(obj: any): string {
+  if (!obj || typeof obj !== 'object') return '';
+  return pickFirstNonEmpty(
+    obj.full_name,
+    [obj.first_name, obj.last_name].filter(Boolean).join(' '),
+    obj.name,
+    obj.username,
+    obj.email
+  );
+}
+
+function lookupName(nameById: Map<string, string>, rawId: string): string {
+  const s = String(rawId || '').trim();
+  if (!s) return '';
+  return nameById.get(s) || nameById.get(s.replace(/-/g, '').toLowerCase()) || '';
+}
+
+/** Resolve "Added by" from nested objects, string ids, or *_id fields against the user list. */
+function resolveAddedByDisplay(u: any, nameById: Map<string, string>): string {
+  const fromNested =
+    nestedCreatorDisplayName(
+      u.created_by && typeof u.created_by === 'object' ? u.created_by : null
+    ) ||
+    nestedCreatorDisplayName(u.added_by && typeof u.added_by === 'object' ? u.added_by : null);
+  if (fromNested) return fromNested;
+
+  const idCandidates: any[] = [
+    u.created_by_id,
+    u.added_by_id,
+    typeof u.created_by === 'string' || typeof u.created_by === 'number' ? u.created_by : null,
+    typeof u.added_by === 'string' || typeof u.added_by === 'number' ? u.added_by : null,
+    u.invited_by_id,
+    u.invited_by,
+    u.inviter_id,
+    u.inviter,
+    u.owner_id,
+  ];
+
+  for (const raw of idCandidates) {
+    if (raw == null || raw === '') continue;
+    if (typeof raw === 'object') {
+      const n = nestedCreatorDisplayName(raw);
+      if (n) return n;
+      const oid = String((raw as any).id ?? (raw as any).pk ?? '').trim();
+      if (oid) {
+        const hit = lookupName(nameById, oid);
+        if (hit) return hit;
+      }
+      continue;
+    }
+    const hit = lookupName(nameById, String(raw));
+    if (hit) return hit;
+  }
+
+  return pickFirstNonEmpty(
+    u.added_by_name,
+    u.added_by_display,
+    u.creator_name,
+    u.created_by_name,
+    u.created_by_email,
+    u.added_by_email
+  );
+}
+
+function resolveDepartmentDisplay(employee: any, profile: any, deptCatalog: any[]): string {
+  const deptObj = employee?.department;
+  if (deptObj && typeof deptObj === 'object' && (deptObj as any).name) {
+    return String((deptObj as any).name);
+  }
+  const profDep = profile?.department;
+  if (profDep && typeof profDep === 'object' && (profDep as any).name) {
+    return String((profDep as any).name);
+  }
+
+  const stringCandidates = [
+    typeof profDep === 'string' ? profDep : null,
+    profile?.department_name,
+    employee?.department_name,
+    typeof deptObj === 'string' ? deptObj : null,
+  ];
+  for (const c of stringCandidates) {
+    if (c == null || String(c).trim() === '') continue;
+    const s = String(c).trim();
+    if (isLikelyUuid(s)) {
+      const hit = departmentNameFromCatalog(deptCatalog, s);
+      if (hit) return hit;
+      continue;
+    }
+    return s;
+  }
+
+  const id = departmentPrimaryId({
+    department: employee?.department,
+    department_id: employee?.department_id ?? profile?.department_id,
+  });
+  if (id) {
+    const hit = departmentNameFromCatalog(deptCatalog, id);
+    if (hit) return hit;
+  }
+  return '—';
+}
+
+function lookupEntityName(catalog: any[], idRaw: string): string | null {
+  const tid = String(idRaw || '').trim();
+  if (!tid) return null;
+  const row = catalog.find((r) =>
+    normalizeDeptIdsEqual(String(r?.id ?? r?.pk ?? r?.uuid ?? ''), tid)
+  );
+  if (row && typeof row === 'object') {
+    const n = String((row as any).name ?? '').trim();
+    if (n) return n;
+  }
+  return null;
+}
+
+function collectCompanyIdCandidates(employee: any, profile: any, u: any): string[] {
+  const out: string[] = [];
+  const push = (v: any) => {
+    if (v == null || v === '') return;
+    if (typeof v === 'object') {
+      const id = (v as any).id ?? (v as any).pk ?? (v as any).uuid;
+      if (id != null && String(id).trim() !== '') out.push(String(id).trim());
+      return;
+    }
+    const s = String(v).trim();
+    if (s) out.push(s);
+  };
+  push(employee?.company_id);
+  push(employee?.company);
+  push(profile?.company_id);
+  push(profile?.company);
+  push(employee?.assigned_company);
+  push(profile?.assigned_company);
+  push((u as any)?.company_id);
+  push((u as any)?.company);
+  push((u as any)?.assigned_company);
+  return [...new Set(out)];
+}
+
+function pushOrgFromNestedCompany(push: (v: any) => void, companyField: any) {
+  if (!companyField || typeof companyField !== 'object' || Array.isArray(companyField)) return;
+  push((companyField as any).organization_id);
+  push((companyField as any).organization);
+}
+
+function collectOrganizationIdCandidates(employee: any, profile: any, u: any): string[] {
+  const out: string[] = [];
+  const push = (v: any) => {
+    if (v == null || v === '') return;
+    if (typeof v === 'object') {
+      const id = (v as any).id ?? (v as any).pk ?? (v as any).uuid;
+      if (id != null && String(id).trim() !== '') out.push(String(id).trim());
+      return;
+    }
+    const s = String(v).trim();
+    if (s) out.push(s);
+  };
+  push(employee?.organization_id);
+  push(employee?.organization);
+  push(profile?.organization_id);
+  push(profile?.organization);
+  push(profile?.org_id);
+  push((u as any)?.organization_id);
+  push((u as any)?.organization);
+  push((u as any)?.org_id);
+  push((u as any)?.assigned_organization);
+  pushOrgFromNestedCompany(push, employee?.company);
+  pushOrgFromNestedCompany(push, profile?.company);
+  pushOrgFromNestedCompany(push, (u as any)?.company);
+  return [...new Set(out)];
+}
+
+type OrgCompanyOption = { id: string; name: string };
+
+/** Auth hints first; then org rows where this user is assigned organization manager (Django FK shapes). */
+function organizationIdsForOperationsManagerViewer(viewerPayload: any, organizationRows: any[]): string[] {
+  const u = resolveUserPayloadForRole(viewerPayload);
+  const hints = api.organizationIdHintsFromAuthUser(u);
+  const dedupe = (xs: string[]) => [...new Set(xs.map((x) => String(x).trim()).filter(Boolean))];
+  if (hints.length > 0) return dedupe(hints as string[]);
+  const uid = String(u?.id ?? u?.pk ?? '').trim();
+  if (!uid || !Array.isArray(organizationRows)) return [];
+  const found: string[] = [];
+  for (const o of organizationRows) {
+    const mid = (o as any).organization_manager_id;
+    const s1 = mid != null && mid !== '' ? String(mid).trim() : '';
+    const om = (o as any).organization_manager;
+    const s2 =
+      om && typeof om === 'object' && (om as any).id != null ? String((om as any).id).trim() : '';
+    if ((s1 && s1 === uid) || (s2 && s2 === uid)) {
+      const id = String((o as any).id ?? (o as any).pk ?? '').trim();
+      if (id) found.push(id);
+    }
+  }
+  return dedupe(found);
+}
+
+/** Auth hints first; then company rows where this user is the company manager. */
+function companyIdsForManagerViewer(viewerPayload: any, companyRows: any[]): string[] {
+  const u = resolveUserPayloadForRole(viewerPayload);
+  const hints = api.companyIdHintsFromAuthUser(u);
+  const dedupe = (xs: string[]) => [...new Set(xs.map((x) => String(x).trim()).filter(Boolean))];
+  if (hints.length > 0) return dedupe(hints as string[]);
+  const uid = String(u?.id ?? u?.pk ?? '').trim();
+  if (!uid || !Array.isArray(companyRows)) return [];
+  const found: string[] = [];
+  for (const c of companyRows) {
+    const mid = String(api.resolveCompanyManagerUserId(c) ?? '').trim();
+    if (mid && mid === uid) {
+      const id = String((c as any).id ?? (c as any).pk ?? '').trim();
+      if (id) found.push(id);
+    }
+  }
+  return dedupe(found);
+}
+
+function companyIdsUnderOrganizations(orgIds: string[], companyRows: any[]): Set<string> {
+  const oid = new Set(orgIds.map((x) => String(x).trim()).filter(Boolean));
+  const out = new Set<string>();
+  if (oid.size === 0 || !Array.isArray(companyRows)) return out;
+  for (const c of companyRows) {
+    const orgRaw = (c as any).organization_id ?? (c as any).organization;
+    let orgId = '';
+    if (orgRaw != null && typeof orgRaw === 'object' && (orgRaw as any).id != null) {
+      orgId = String((orgRaw as any).id).trim();
+    } else if (orgRaw != null && orgRaw !== '') {
+      orgId = String(orgRaw).trim();
+    }
+    if (orgId && oid.has(orgId)) {
+      const cid = String((c as any).id ?? (c as any).pk ?? '').trim();
+      if (cid) out.add(cid);
+    }
+  }
+  return out;
+}
+
+function filterRowsForViewerScope(
+  list: RowUser[],
+  viewerPayload: any,
+  viewerRole: UserRole,
+  companyRows: any[],
+  organizationRows: any[]
+): RowUser[] {
+  if (viewerRole === 'super_admin') return list;
+
+  if (viewerRole === 'organization_manager') {
+    const orgIds = organizationIdsForOperationsManagerViewer(viewerPayload, organizationRows);
+    const oidSet = new Set(orgIds);
+    const companiesInScope = companyIdsUnderOrganizations(orgIds, companyRows);
+    if (oidSet.size === 0 && companiesInScope.size === 0) {
+      if (__DEV__) {
+        console.warn('[UserManagement] organization_manager: no org scope from hints or catalog; list not filtered.');
+      }
+      return list;
+    }
+    return list.filter((row) => {
+      const raw = row.raw || {};
+      const profile = raw.profile || {};
+      const employee = raw.employee || raw.employee_details || {};
+      const orgCand = collectOrganizationIdCandidates(employee, profile, raw);
+      const compCand = collectCompanyIdCandidates(employee, profile, raw);
+      if (orgCand.some((id) => oidSet.has(String(id).trim()))) return true;
+      if (compCand.some((id) => companiesInScope.has(String(id).trim()))) return true;
+      return false;
+    });
+  }
+
+  if (viewerRole === 'company_manager') {
+    const companyIds = companyIdsForManagerViewer(viewerPayload, companyRows);
+    const cidSet = new Set(companyIds);
+    if (cidSet.size === 0) {
+      if (__DEV__) {
+        console.warn('[UserManagement] manager: no company scope from hints or catalog; list not filtered.');
+      }
+      return list;
+    }
+    return list.filter((row) => {
+      const raw = row.raw || {};
+      const profile = raw.profile || {};
+      const employee = raw.employee || raw.employee_details || {};
+      const ids = collectCompanyIdCandidates(employee, profile, raw);
+      return ids.some((id) => cidSet.has(String(id).trim()));
+    });
+  }
+
+  return [];
+}
+
+function dedupeOrgCompanyOptions(items: OrgCompanyOption[]): OrgCompanyOption[] {
+  const seen = new Set<string>();
+  return items.filter((x) => (seen.has(x.id) ? false : (seen.add(x.id), true)));
+}
+
+/** Org/company pickers for create, edit, and assign — scoped for org and company managers. */
+async function loadScopedOrgCompanyForViewer(
+  viewerPayload: any,
+  viewerRole: UserRole,
+  opts?: { organizationRows?: any[]; companyRows?: any[] }
+): Promise<{ orgs: OrgCompanyOption[]; companies: OrgCompanyOption[] }> {
+  const u = resolveUserPayloadForRole(viewerPayload);
+
+  if (viewerRole === 'super_admin') {
+    try {
+      const orgsRaw = await api.getOrganizations();
+      const orgs = (Array.isArray(orgsRaw) ? orgsRaw : []).map((o: any) => ({
+        id: String(o.id),
+        name: o.name || '—',
+      }));
+      let companies: OrgCompanyOption[] = [];
+      try {
+        const compsRaw = await api.getCompanies();
+        companies = (Array.isArray(compsRaw) ? compsRaw : []).map((c: any) => ({
+          id: String(c.id),
+          name: c.name || '—',
+        }));
+      } catch {
+        companies = [];
+      }
+      return { orgs, companies };
+    } catch {
+      return { orgs: [], companies: [] };
+    }
+  }
+
+  if (viewerRole === 'organization_manager') {
+    let orgRows = opts?.organizationRows;
+    if (!Array.isArray(orgRows) || orgRows.length === 0) {
+      const uid = String(u?.id ?? u?.pk ?? '').trim();
+      if (uid) {
+        try {
+          const scoped = await api.getOrganizations({ organization_manager: uid });
+          if (Array.isArray(scoped) && scoped.length) orgRows = scoped;
+        } catch {
+          /* noop */
+        }
+      }
+    }
+    if (!Array.isArray(orgRows) || orgRows.length === 0) {
+      try {
+        orgRows = await api.getOrganizations();
+      } catch {
+        orgRows = [];
+      }
+    }
+    orgRows = Array.isArray(orgRows) ? orgRows : [];
+    const orgIdList = organizationIdsForOperationsManagerViewer(viewerPayload, orgRows);
+
+    const orgs: OrgCompanyOption[] = [];
+    const companies: OrgCompanyOption[] = [];
+    for (const oid of orgIdList) {
+      if (!oid) continue;
+      try {
+        const o = await api.getOrganization(oid);
+        if (o?.id != null) orgs.push({ id: String(o.id), name: o.name || '—' });
+      } catch {
+        /* ignore */
+      }
+      let loaded = false;
+      try {
+        const cs = await api.getCompanies({ organization_id: oid });
+        const arr = Array.isArray(cs) ? cs : [];
+        for (const c of arr) {
+          companies.push({ id: String(c.id), name: c.name || '—' });
+        }
+        loaded = arr.length > 0;
+      } catch {
+        /* try alternate param */
+      }
+      if (!loaded) {
+        try {
+          const cs2 = await api.getCompanies({ organization: oid });
+          const arr = Array.isArray(cs2) ? cs2 : [];
+          for (const c of arr) {
+            companies.push({ id: String(c.id), name: c.name || '—' });
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    return { orgs: dedupeOrgCompanyOptions(orgs), companies: dedupeOrgCompanyOptions(companies) };
+  }
+
+  if (viewerRole === 'company_manager') {
+    let compRows = opts?.companyRows;
+    if (!Array.isArray(compRows) || compRows.length === 0) {
+      try {
+        compRows = await api.getCompanies();
+      } catch {
+        compRows = [];
+      }
+    }
+    compRows = Array.isArray(compRows) ? compRows : [];
+    const companyIdList = companyIdsForManagerViewer(viewerPayload, compRows);
+
+    const orgs: OrgCompanyOption[] = [];
+    const companies: OrgCompanyOption[] = [];
+    for (const cid of companyIdList) {
+      if (!cid) continue;
+      try {
+        const c = await api.getCompany(cid);
+        if (!c?.id) continue;
+        companies.push({ id: String(c.id), name: c.name || '—' });
+        const orgRef = c.organization_id ?? c.organization;
+        const orgId =
+          orgRef != null && typeof orgRef === 'object' && (orgRef as any).id != null
+            ? String((orgRef as any).id)
+            : String(orgRef || '').trim();
+        if (orgId) {
+          try {
+            const o = await api.getOrganization(orgId);
+            if (o?.id != null) orgs.push({ id: String(o.id), name: o.name || '—' });
+          } catch {
+            /* ignore */
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    return { orgs: dedupeOrgCompanyOptions(orgs), companies: dedupeOrgCompanyOptions(companies) };
+  }
+
+  return { orgs: [], companies: [] };
+}
+
+/**
+ * Replace raw company/org UUIDs with names from loaded catalogs (Users + Admins tables).
+ */
+function polishOrganizationCompanyLabel(
+  primary: string,
+  employee: any,
+  profile: any,
+  u: any,
+  companies: any[],
+  orgs: any[]
+): string {
+  const raw = String(primary || '').trim();
+  const companyIds = collectCompanyIdCandidates(employee, profile, u);
+  const orgIds = collectOrganizationIdCandidates(employee, profile, u);
+
+  const namesFromIds = (): string => {
+    const cNames = companyIds.map((id) => lookupEntityName(companies, id)).filter(Boolean) as string[];
+    const oNames = orgIds.map((id) => lookupEntityName(orgs, id)).filter(Boolean) as string[];
+    if (oNames.length && cNames.length) return `${oNames[0]} · ${cNames[0]}`;
+    if (cNames.length) return cNames[0];
+    if (oNames.length) return oNames[0];
+    return '';
+  };
+
+  const hasHumanLabel = raw && raw !== '—' && !isLikelyUuid(raw);
+  if (hasHumanLabel) return raw;
+
+  if (raw && isLikelyUuid(raw)) {
+    const asCompany = lookupEntityName(companies, raw);
+    if (asCompany) return asCompany;
+    const asOrg = lookupEntityName(orgs, raw);
+    if (asOrg) return asOrg;
+  }
+
+  const built = namesFromIds();
+  if (built) return built;
+
+  return '—';
+}
+
+function mapApiUser(
+  u: any,
+  ctx: {
+    deptCatalog: any[];
+    userNameById: Map<string, string>;
+    companyRows: any[];
+    organizationRows: any[];
+  }
+): RowUser {
   const profile = u.profile || u.user_profile || u.employee_profile || {};
   const employee = u.employee || u.employee_details || {};
-  const addedByObj =
-    (u.created_by && typeof u.created_by === 'object' ? u.created_by : null) ||
-    (u.added_by && typeof u.added_by === 'object' ? u.added_by : null);
   const title =
     pickFirstNonEmpty(
       profile.job_title,
@@ -222,24 +783,58 @@ function mapApiUser(u: any): RowUser {
     u.phone,
     u.mobile_number
   );
-  const team = pickFirstNonEmpty(profile.team, employee.team, profile.team_name, employee.team_name);
-  const department = pickFirstNonEmpty(
-    profile.department,
-    employee.department,
-    profile.department_name,
-    employee.department_name
+  const team = pickFirstNonEmpty(
+    profile.team,
+    employee.team,
+    profile.team_name,
+    employee.team_name
   );
+  const organizationCompanyRaw = pickFirstNonEmpty(
+    profile.organization_name,
+    employee.organization_name,
+    (u as any).organization_name,
+    (u as any).company_name,
+    typeof (u as any)?.assigned_company === 'object' && (u as any).assigned_company?.name
+      ? String((u as any).assigned_company.name)
+      : null,
+    typeof (u as any)?.assigned_organization === 'object' && (u as any).assigned_organization?.name
+      ? String((u as any).assigned_organization.name)
+      : null,
+    typeof employee?.organization === 'object' && (employee.organization as any)?.name
+      ? String((employee.organization as any).name)
+      : null,
+    typeof u?.organization === 'object' && (u.organization as any)?.name
+      ? String((u.organization as any).name)
+      : null,
+    typeof (employee as any)?.company === 'object' &&
+      (employee as any).company &&
+      typeof (employee as any).company.organization === 'object' &&
+      (employee as any).company.organization?.name
+      ? String((employee as any).company.organization.name)
+      : null,
+    typeof employee?.company === 'object' && (employee.company as any)?.name
+      ? String((employee.company as any).name)
+      : null,
+    typeof employee?.company === 'string' && String(employee.company).trim()
+      ? String(employee.company).trim()
+      : null,
+    profile.company_name,
+    employee.company_name,
+    typeof u?.company === 'object' && (u.company as any)?.name ? String((u.company as any).name) : null,
+    typeof u?.company === 'string' && String(u.company).trim() ? String(u.company).trim() : null,
+    profile.org_name
+  );
+  const organizationCompany = polishOrganizationCompanyLabel(
+    organizationCompanyRaw || '—',
+    employee,
+    profile,
+    u,
+    ctx.companyRows,
+    ctx.organizationRows
+  );
+  const department = resolveDepartmentDisplay(employee, profile, ctx.deptCatalog);
   const pin = pickFirstNonEmpty(profile.employee_pin, profile.pin, employee.employee_pin, employee.pin, u.employee_pin);
-  const addedBy = pickFirstNonEmpty(
-    u.added_by_name,
-    u.created_by_name,
-    u.created_by_email,
-    u.added_by_email,
-    addedByObj?.full_name,
-    addedByObj?.name,
-    addedByObj?.username,
-    addedByObj?.email
-  );
+  const addedBy = resolveAddedByDisplay(u, ctx.userNameById);
   return {
     id: String(u.id),
     username: u.username || (u.email ? String(u.email).split('@')[0] : '') || '—',
@@ -248,6 +843,7 @@ function mapApiUser(u: any): RowUser {
     phone: phone || '—',
     title: title || '—',
     team: team || '—',
+    organizationCompany: organizationCompany || '—',
     department: department || '—',
     pin: pin || '—',
     dateAdded: formatDate(u.date_joined || u.created_at || profile.created_at || employee.created_at),
@@ -266,6 +862,7 @@ const COL = {
   fullName: 140,
   phone: 112,
   title: 104,
+  orgCompany: 148,
   team: 100,
   department: 112,
   pin: 96,
@@ -282,6 +879,7 @@ type ColumnKey =
   | 'fullName'
   | 'phone'
   | 'title'
+  | 'orgCompany'
   | 'team'
   | 'department'
   | 'pin'
@@ -295,6 +893,7 @@ const COL_WIDTH_BY_KEY: Record<ColumnKey, number> = {
   fullName: COL.fullName,
   phone: COL.phone,
   title: COL.title,
+  orgCompany: COL.orgCompany,
   team: COL.team,
   department: COL.department,
   pin: COL.pin,
@@ -309,11 +908,12 @@ const DEFAULT_COLS: Record<ColumnKey, boolean> = {
   fullName: true,
   phone: true,
   title: true,
-  team: true,
+  orgCompany: true,
+  team: false,
   department: true,
   pin: true,
   dateAdded: true,
-  lastLogin: true,
+  lastLogin: false,
   addedBy: true,
 };
 
@@ -323,6 +923,7 @@ const COL_LABELS: Record<ColumnKey, string> = {
   fullName: 'Full name',
   phone: 'Phone',
   title: 'Title',
+  orgCompany: 'Organization / Company',
   team: 'Team',
   department: 'Department',
   pin: 'Employee PIN',
@@ -388,8 +989,15 @@ function assignRoleLabel(role: 'employee' | 'company_manager' | 'organization_ma
   return 'Employee';
 }
 
+const FULL_ROLE_PICKER_OPTIONS: { id: string; label: string }[] = [
+  { id: 'employee', label: 'Employee' },
+  { id: 'company_manager', label: 'Company Manager' },
+  { id: 'organization_manager', label: 'Organization Manager' },
+  { id: 'super_admin', label: 'Super Admin' },
+];
+
 export default function UserManagementScreen() {
-  const { user } = useAuth();
+  const { user, role: sessionRole } = useAuth();
   const [rows, setRows] = useState<RowUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -400,6 +1008,12 @@ export default function UserManagementScreen() {
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [columnsOpen, setColumnsOpen] = useState(false);
   const [visibleCols, setVisibleCols] = useState<Record<ColumnKey, boolean>>({ ...DEFAULT_COLS });
+
+  /** Web UI: Admins table uses Organization / Company (not a separate Team column), and omits Department + PIN. */
+  const effectiveVisibleCols = useMemo((): Record<ColumnKey, boolean> => {
+    if (tab !== 'admins') return visibleCols;
+    return { ...visibleCols, department: false, pin: false, team: false };
+  }, [tab, visibleCols]);
 
   const [createModal, setCreateModal] = useState(false);
   const [editModal, setEditModal] = useState<RowUser | null>(null);
@@ -415,6 +1029,7 @@ export default function UserManagementScreen() {
     role: 'employee' as string,
     organization_id: '',
     company_id: '',
+    department_id: '',
   });
   const [editForm, setEditForm] = useState({
     username: '',
@@ -425,6 +1040,7 @@ export default function UserManagementScreen() {
     role: 'employee' as string,
     organization_id: '',
     company_id: '',
+    department_id: '',
     employee_pin: '',
     hourly_rate: '',
   });
@@ -458,6 +1074,42 @@ export default function UserManagementScreen() {
   const [editCompanyPicker, setEditCompanyPicker] = useState(false);
   const [editOrgList, setEditOrgList] = useState<{ id: string; name: string }[]>([]);
   const [editCompanyList, setEditCompanyList] = useState<{ id: string; name: string }[]>([]);
+  const [deptCreateOptions, setDeptCreateOptions] = useState<DepartmentOption[]>([]);
+  const [deptEditOptions, setDeptEditOptions] = useState<DepartmentOption[]>([]);
+  const [createDeptPicker, setCreateDeptPicker] = useState(false);
+  const [editDeptPicker, setEditDeptPicker] = useState(false);
+  const editDeptNameHintRef = useRef<string | null>(null);
+  const prevCreateCompanyIdRef = useRef<string>('');
+  const prevEditCompanyIdRef = useRef<string>('');
+
+  const createEditRolePickerOptions = useMemo(() => {
+    if (sessionRole === 'company_manager') {
+      return FULL_ROLE_PICKER_OPTIONS.filter((o) => o.id === 'employee');
+    }
+    if (sessionRole === 'organization_manager') {
+      return FULL_ROLE_PICKER_OPTIONS.filter((o) => o.id !== 'super_admin');
+    }
+    return FULL_ROLE_PICKER_OPTIONS;
+  }, [sessionRole]);
+
+  const assignRolePickerOptions = useMemo(() => {
+    if (sessionRole === 'company_manager') {
+      return FULL_ROLE_PICKER_OPTIONS.filter((o) => o.id === 'employee');
+    }
+    if (sessionRole === 'organization_manager') {
+      return FULL_ROLE_PICKER_OPTIONS.filter((o) => o.id !== 'super_admin');
+    }
+    return FULL_ROLE_PICKER_OPTIONS;
+  }, [sessionRole]);
+
+  const createOrgPickerLocked =
+    sessionRole === 'company_manager' || (sessionRole === 'organization_manager' && createOrgList.length <= 1);
+  const createCompanyPickerLocked = sessionRole === 'company_manager';
+  const editOrgPickerLocked =
+    sessionRole === 'company_manager' || (sessionRole === 'organization_manager' && editOrgList.length <= 1);
+  const editCompanyPickerLocked = sessionRole === 'company_manager';
+  const assignOrgPickerLocked = sessionRole === 'company_manager';
+  const assignCompanyPickerLocked = sessionRole === 'company_manager';
 
   const load = useCallback(async () => {
     if (!user) {
@@ -466,19 +1118,62 @@ export default function UserManagementScreen() {
     }
     try {
       const userData = (await api.getCurrentUser()) as any;
-      const roles = userData?.roles || [];
-      if (!canAccessUserManagement(roles)) {
+      if (!canAccessUserManagement(userData)) {
         setAuthorized(false);
         setLoading(false);
         return;
       }
       setAuthorized(true);
-      const [rawUsers, rawEmployees] = await Promise.all([
+      const [rawUsers, rawEmployees, rawOrgs, rawCompanies] = await Promise.all([
         api.getUsers({}).catch(() => []),
         api.getEmployees({}).catch(() => []),
+        api.getOrganizations().catch(() => []),
+        api.getCompanies().catch(() => []),
       ]);
       const users = Array.isArray(rawUsers) ? rawUsers : [];
       const employees = Array.isArray(rawEmployees) ? rawEmployees : [];
+      const organizationRows = Array.isArray(rawOrgs) ? rawOrgs : [];
+      const companyRows = Array.isArray(rawCompanies) ? rawCompanies : [];
+      const userNameById = buildUserAddedByLookup(users);
+
+      const companyIdSet = new Set<string>();
+      for (const e of employees) {
+        const c = e?.company_id ?? e?.company;
+        const cid =
+          c != null && typeof c === 'object' && (c as any).id != null
+            ? String((c as any).id).trim()
+            : String(c ?? '').trim();
+        if (cid) companyIdSet.add(cid);
+      }
+      const deptCatalog: any[] = [];
+      const seenDeptKey = new Set<string>();
+      const pushDepts = (rows: any[]) => {
+        for (const d of rows) {
+          const id = String(d?.id ?? d?.pk ?? d?.uuid ?? '').trim();
+          const key = id || `n:${String(d?.name ?? '').toLowerCase()}`;
+          if (!key || key === 'n:') continue;
+          if (!seenDeptKey.has(key)) {
+            seenDeptKey.add(key);
+            deptCatalog.push(d);
+          }
+        }
+      };
+      await Promise.all(
+        [...companyIdSet].map(async (cid) => {
+          try {
+            const dr = await api.getDepartments({ company: cid });
+            if (Array.isArray(dr)) pushDepts(dr);
+          } catch {
+            /* ignore */
+          }
+          try {
+            const dr2 = await api.getDepartments({ company_id: cid });
+            if (Array.isArray(dr2)) pushDepts(dr2);
+          } catch {
+            /* ignore */
+          }
+        })
+      );
 
       // Fill sparse auth-user rows with scheduler employee details where available.
       const employeeByUserId = new Map<string, any>();
@@ -497,6 +1192,15 @@ export default function UserManagementScreen() {
         const em = normalizeEmail(u?.email ?? u?.profile?.email);
         const employee = employeeByUserId.get(uid) || (em ? employeeByEmail.get(em) : undefined);
         if (!employee) return u;
+        const pDep = u?.profile?.department;
+        const empDep = employee?.department;
+        const mergedDept = pickFirstNonEmpty(
+          typeof pDep === 'object' && pDep && (pDep as any).name ? String((pDep as any).name) : null,
+          typeof pDep === 'string' ? pDep : null,
+          employee?.department_name,
+          typeof empDep === 'object' && empDep && (empDep as any).name ? String((empDep as any).name) : null,
+          typeof empDep === 'string' ? empDep : null
+        );
         return {
           ...u,
           employee,
@@ -506,7 +1210,7 @@ export default function UserManagementScreen() {
             ...(u?.profile || {}),
             phone: pickFirstNonEmpty(u?.profile?.phone, employee?.phone, employee?.mobile_number),
             employee_pin: pickFirstNonEmpty(u?.profile?.employee_pin, employee?.employee_pin, employee?.pin),
-            department: pickFirstNonEmpty(u?.profile?.department, employee?.department_name, employee?.department),
+            department: mergedDept || u?.profile?.department,
             team: pickFirstNonEmpty(u?.profile?.team, employee?.team_name, employee?.team),
             job_title: pickFirstNonEmpty(
               u?.profile?.job_title,
@@ -521,8 +1225,21 @@ export default function UserManagementScreen() {
 
       const list = enrichedUsers
         .filter((u: any) => (u.profile?.status ?? u.status) !== 'deleted')
-        .map(mapApiUser);
-      setRows(list);
+        .map((u: any) =>
+          mapApiUser(u, {
+            deptCatalog,
+            userNameById,
+            companyRows,
+            organizationRows,
+          })
+        );
+      const viewerRole = getPrimaryRoleFromUser(userData);
+      const scopedList = filterRowsForViewerScope(list, userData, viewerRole, companyRows, organizationRows);
+      if (__DEV__) {
+        console.log('Current User (User Management):', userData);
+        console.log('Users List (scoped):', scopedList);
+      }
+      setRows(scopedList);
     } catch (e) {
       console.warn(e);
     } finally {
@@ -632,7 +1349,7 @@ export default function UserManagementScreen() {
   useEffect(() => {
     if (!form.organization_id) {
       setCreateCompanyList([]);
-      setForm((f) => ({ ...f, company_id: '' }));
+      setForm((f) => ({ ...f, company_id: '', department_id: '' }));
       return;
     }
     let cancelled = false;
@@ -678,6 +1395,100 @@ export default function UserManagementScreen() {
     };
   }, [editForm.organization_id, editModal]);
 
+  useEffect(() => {
+    if (form.role !== 'employee') {
+      setDeptCreateOptions([]);
+      return;
+    }
+    if (!form.company_id) {
+      setDeptCreateOptions([]);
+      setForm((f) => (f.department_id ? { ...f, department_id: '' } : f));
+      prevCreateCompanyIdRef.current = '';
+      return;
+    }
+    const cur = String(form.company_id);
+    if (prevCreateCompanyIdRef.current && prevCreateCompanyIdRef.current !== cur) {
+      setForm((f) => ({ ...f, department_id: '' }));
+    }
+    prevCreateCompanyIdRef.current = cur;
+    let cancelled = false;
+    (async () => {
+      const orgName = createOrgList.find((o) => o.id === form.organization_id)?.name;
+      const compName = createCompanyList.find((c) => c.id === form.company_id)?.name;
+      const list = await loadDepartmentOptions(api, {
+        organizationId: form.organization_id,
+        companyId: form.company_id,
+        organizationName: orgName,
+        companyName: compName,
+      });
+      if (__DEV__) {
+        console.log('Role:', form.role);
+        console.log('Is Employee:', form.role === 'employee');
+        console.log('Department:', form.department_id);
+        console.log('Selected Org:', form.organization_id);
+        console.log('Departments:', list);
+      }
+      if (!cancelled) setDeptCreateOptions(list);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [form.company_id, form.organization_id, form.role, createCompanyList, createOrgList]);
+
+  useEffect(() => {
+    if (!editModal || editForm.role !== 'employee') {
+      setDeptEditOptions([]);
+      if (!editModal) prevEditCompanyIdRef.current = '';
+      return;
+    }
+    if (!editForm.company_id) {
+      setDeptEditOptions([]);
+      prevEditCompanyIdRef.current = '';
+      return;
+    }
+    const cur = String(editForm.company_id);
+    if (prevEditCompanyIdRef.current && prevEditCompanyIdRef.current !== cur) {
+      setEditForm((f) => ({ ...f, department_id: '' }));
+    }
+    prevEditCompanyIdRef.current = cur;
+    let cancelled = false;
+    (async () => {
+      const orgName = editOrgList.find((o) => o.id === editForm.organization_id)?.name;
+      const compName = editCompanyList.find((c) => c.id === editForm.company_id)?.name;
+      const list = await loadDepartmentOptions(api, {
+        organizationId: editForm.organization_id,
+        companyId: editForm.company_id,
+        organizationName: orgName,
+        companyName: compName,
+      });
+      if (__DEV__) {
+        console.log('Role (edit):', editForm.role);
+        console.log('Is Employee (edit):', editForm.role === 'employee');
+        console.log('Department (edit):', editForm.department_id);
+        console.log('Selected Org (edit):', editForm.organization_id);
+        console.log('Departments (edit):', list);
+      }
+      if (!cancelled) setDeptEditOptions(list);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [editModal, editForm.role, editForm.company_id, editForm.organization_id, editCompanyList, editOrgList]);
+
+  useEffect(() => {
+    const hint = editDeptNameHintRef.current;
+    if (!editModal || !hint || deptEditOptions.length === 0) return;
+    setEditForm((f) => {
+      if (f.department_id) {
+        editDeptNameHintRef.current = null;
+        return f;
+      }
+      const m = deptEditOptions.find((o) => o.name.trim().toLowerCase() === hint.trim().toLowerCase());
+      editDeptNameHintRef.current = null;
+      return m ? { ...f, department_id: m.id } : f;
+    });
+  }, [editModal, deptEditOptions]);
+
   const assignAvailableUsers = useMemo(() => {
     if (assignRole === 'super_admin' || assignRole === 'organization_manager' || assignRole === 'company_manager') {
       return rows;
@@ -706,12 +1517,16 @@ export default function UserManagementScreen() {
     setEmployeeUserIds(new Set());
     setCompanyList([]);
     try {
-      const orgs = await api.getOrganizations();
-      const list = (Array.isArray(orgs) ? orgs : []).map((o: any) => ({
-        id: String(o.id),
-        name: o.name || '—',
-      }));
-      setOrgList(list);
+      const userData = (await api.getCurrentUser()) as any;
+      const vr = getPrimaryRoleFromUser(resolveUserPayloadForRole(userData));
+      const { orgs, companies } = await loadScopedOrgCompanyForViewer(userData, vr);
+      setOrgList(orgs);
+      if (vr === 'company_manager') {
+        if (orgs[0]) setAssignOrgId(orgs[0].id);
+        if (companies[0]) setAssignCompanyId(companies[0].id);
+      } else if (vr === 'organization_manager' && orgs.length === 1) {
+        setAssignOrgId(orgs[0].id);
+      }
     } catch {
       setOrgList([]);
     }
@@ -734,6 +1549,16 @@ export default function UserManagementScreen() {
 
   const handleAssignSubmit = async () => {
     if (!assignFormReady) return;
+    const me = resolveUserPayloadForRole((await api.getCurrentUser()) as any);
+    const vr = getPrimaryRoleFromUser(me);
+    if (vr === 'company_manager' && assignRole !== 'employee') {
+      Alert.alert('Error', 'You can only assign the employee role.');
+      return;
+    }
+    if (vr === 'organization_manager' && assignRole === 'super_admin') {
+      Alert.alert('Error', 'This role is not available for your account.');
+      return;
+    }
     const backendRole =
       assignRole === 'organization_manager' || assignRole === 'company_manager' || assignRole === 'super_admin'
         ? assignRole
@@ -790,9 +1615,13 @@ export default function UserManagementScreen() {
   };
 
   const adminRows = useMemo(() => rows.filter((r) => rowBelongsToAdminsTab(r)), [rows]);
+  const adminRowsForTab = useMemo(
+    () => filterAdminTabRowsForOrganizationManagerViewer(adminRows, user),
+    [adminRows, user]
+  );
   const userRows = useMemo(() => rows.filter((r) => !rowBelongsToAdminsTab(r)), [rows]);
 
-  const tabRows = tab === 'admins' ? adminRows : userRows;
+  const tabRows = tab === 'admins' ? adminRowsForTab : userRows;
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -803,17 +1632,21 @@ export default function UserManagementScreen() {
         r.email.toLowerCase().includes(q) ||
         r.full_name.toLowerCase().includes(q) ||
         r.phone.toLowerCase().includes(q) ||
-        r.title.toLowerCase().includes(q)
+        r.title.toLowerCase().includes(q) ||
+        r.team.toLowerCase().includes(q) ||
+        r.organizationCompany.toLowerCase().includes(q) ||
+        r.department.toLowerCase().includes(q) ||
+        r.addedBy.toLowerCase().includes(q)
     );
   }, [tabRows, search]);
 
   const tableMinWidth = useMemo(() => {
     let w = COL.check + COL.avatar + COL.gear + COL.actions;
     (Object.keys(COL_WIDTH_BY_KEY) as ColumnKey[]).forEach((key) => {
-      if (visibleCols[key]) w += COL_WIDTH_BY_KEY[key];
+      if (effectiveVisibleCols[key]) w += COL_WIDTH_BY_KEY[key];
     });
     return w;
-  }, [visibleCols]);
+  }, [effectiveVisibleCols]);
 
   const toggleSelect = (id: string) => {
     setSelected((prev) => {
@@ -843,18 +1676,14 @@ export default function UserManagementScreen() {
     const raw = (r.raw || {}) as any;
     const profile = raw.profile || {};
     const employee = raw.employee || raw.employee_details || {};
-    const rawRole = normalizeRoleToken(getPrimaryRoleFromUser(raw));
+    const canonical = getPrimaryRoleFromUser(raw);
     const role =
-      rawRole === 'super_admin' ||
-      rawRole === 'organization_manager' ||
-      rawRole === 'operations_manager' ||
-      rawRole === 'company_manager' ||
-      rawRole === 'manager'
-        ? rawRole === 'operations_manager'
+      canonical === 'super_admin'
+        ? 'super_admin'
+        : canonical === 'organization_manager'
           ? 'organization_manager'
-          : rawRole === 'manager'
+          : canonical === 'company_manager'
             ? 'company_manager'
-            : rawRole
         : 'employee';
     const orgId = String(
       profile.organization_id ??
@@ -875,7 +1704,23 @@ export default function UserManagementScreen() {
       employee.position,
       employee.title
     );
+    const depRaw = employee.department;
+    let departmentId = '';
+    if (depRaw && typeof depRaw === 'object' && (depRaw as any).id != null) {
+      departmentId = String((depRaw as any).id);
+    } else if (employee.department_id != null && String(employee.department_id).trim() !== '') {
+      departmentId = String(employee.department_id);
+    }
+    const deptNameOnly = pickFirstNonEmpty(
+      typeof depRaw === 'object' && depRaw && (depRaw as any).name ? String((depRaw as any).name) : '',
+      employee.department_name,
+      r.department !== '—' ? r.department : ''
+    );
+    editDeptNameHintRef.current =
+      departmentId || !deptNameOnly || deptNameOnly === '—' ? null : deptNameOnly;
+    prevEditCompanyIdRef.current = '';
     setEditModal(r);
+    const editDepartmentId = role === 'employee' ? departmentId : '';
     setEditForm({
       username: r.username === '—' ? '' : r.username,
       email: r.email === '—' ? '' : r.email,
@@ -885,14 +1730,16 @@ export default function UserManagementScreen() {
       role,
       organization_id: orgId && orgId !== 'undefined' ? orgId : '',
       company_id: companyId && companyId !== 'undefined' ? companyId : '',
+      department_id: editDepartmentId,
       employee_pin: r.pin === '—' ? '' : r.pin,
       hourly_rate: String(profile.hourly_rate ?? employee.hourly_rate ?? ''),
     });
     void (async () => {
       try {
-        const orgs = await api.getOrganizations();
-        const list = (Array.isArray(orgs) ? orgs : []).map((o: any) => ({ id: String(o.id), name: o.name || '—' }));
-        setEditOrgList(list);
+        const me = (await api.getCurrentUser()) as any;
+        const vr = getPrimaryRoleFromUser(resolveUserPayloadForRole(me));
+        const { orgs } = await loadScopedOrgCompanyForViewer(me, vr);
+        setEditOrgList(orgs);
       } catch {
         setEditOrgList([]);
       }
@@ -949,12 +1796,43 @@ export default function UserManagementScreen() {
       Alert.alert('Error', 'Password must be at least 6 characters');
       return;
     }
-    if (form.role === 'organization_manager' && !form.organization_id) {
+
+    const resolvedMe = resolveUserPayloadForRole((await api.getCurrentUser()) as any);
+    const viewerRole = getPrimaryRoleFromUser(resolvedMe);
+    if (viewerRole === 'company_manager' && form.role !== 'employee') {
+      Alert.alert('Error', 'You can only create employee accounts.');
+      return;
+    }
+    if (viewerRole === 'organization_manager' && form.role === 'super_admin') {
+      Alert.alert('Error', 'This role is not available for your account.');
+      return;
+    }
+
+    let orgId = String(form.organization_id || '').trim();
+    let companyId = String(form.company_id || '').trim();
+    if (viewerRole === 'company_manager') {
+      const cHints = api.companyIdHintsFromAuthUser(resolvedMe);
+      const oHints = api.organizationIdHintsFromAuthUser(resolvedMe);
+      if (cHints[0]) companyId = cHints[0];
+      if (oHints[0]) orgId = oHints[0];
+    }
+    if (viewerRole === 'organization_manager') {
+      const oHints = new Set(api.organizationIdHintsFromAuthUser(resolvedMe));
+      if (oHints.size > 0 && orgId && !oHints.has(orgId)) {
+        orgId = [...oHints][0];
+      }
+    }
+
+    if (form.role === 'organization_manager' && !orgId) {
       Alert.alert('Error', 'Organization is required for Organization Manager');
       return;
     }
-    if (form.role === 'company_manager' && (!form.organization_id || !form.company_id)) {
+    if (form.role === 'company_manager' && (!orgId || !companyId)) {
       Alert.alert('Error', 'Organization and company are required for Company Manager');
+      return;
+    }
+    if (form.role === 'employee' && String(companyId || '').trim() && !form.department_id) {
+      Alert.alert('Please select a department');
       return;
     }
     setSaving(true);
@@ -974,8 +1852,6 @@ export default function UserManagementScreen() {
       const phoneApi = phoneDigitsForApi(form.phone);
       const employeePin = form.employee_pin?.trim();
       const hourlyRateNum = parseHourlyRateForApi(form.hourly_rate);
-      const orgId = form.organization_id?.trim();
-      const companyId = form.company_id?.trim();
 
       const roleCandidates =
         desiredRole === 'company_manager'
@@ -1180,6 +2056,21 @@ export default function UserManagementScreen() {
           } catch {
             /* employee row may already exist */
           }
+          const deptOpt = deptCreateOptions.find((d) => d.id === form.department_id);
+          if (deptOpt && form.department_id) {
+            try {
+              const linked = await api.findSchedulerEmployeeForAuthUser({
+                id: createdUserId,
+                email,
+                company_id: c,
+                assigned_company: c,
+              });
+              const eid = linked?.id ? String(linked.id) : '';
+              if (eid) await persistEmployeeDepartment(api, eid, deptOpt);
+            } catch {
+              /* ignore */
+            }
+          }
         }
       }
       setCreateModal(false);
@@ -1195,6 +2086,7 @@ export default function UserManagementScreen() {
         role: 'employee',
         organization_id: '',
         company_id: '',
+        department_id: '',
       });
       await load();
       Alert.alert('Success', 'User created');
@@ -1218,16 +2110,47 @@ export default function UserManagementScreen() {
       Alert.alert('Error', 'Username is required');
       return;
     }
-    if (editForm.role === 'organization_manager' && !editForm.organization_id) {
+
+    const resolvedMe = resolveUserPayloadForRole((await api.getCurrentUser()) as any);
+    const viewerRole = getPrimaryRoleFromUser(resolvedMe);
+    if (viewerRole === 'company_manager' && editForm.role !== 'employee') {
+      Alert.alert('Error', 'You can only assign the employee role.');
+      return;
+    }
+    if (viewerRole === 'organization_manager' && editForm.role === 'super_admin') {
+      Alert.alert('Error', 'This role is not available for your account.');
+      return;
+    }
+
+    let orgId = String(editForm.organization_id || '').trim();
+    let compId = String(editForm.company_id || '').trim();
+    if (viewerRole === 'company_manager') {
+      const cHints = api.companyIdHintsFromAuthUser(resolvedMe);
+      const oHints = api.organizationIdHintsFromAuthUser(resolvedMe);
+      if (cHints[0]) compId = cHints[0];
+      if (oHints[0]) orgId = oHints[0];
+    }
+    if (viewerRole === 'organization_manager') {
+      const oHints = new Set(api.organizationIdHintsFromAuthUser(resolvedMe));
+      if (oHints.size > 0 && orgId && !oHints.has(orgId)) {
+        orgId = [...oHints][0];
+      }
+    }
+
+    if (editForm.role === 'organization_manager' && !orgId) {
       Alert.alert('Error', 'Organization is required for Organization Manager');
       return;
     }
-    if (editForm.role === 'company_manager' && (!editForm.organization_id || !editForm.company_id)) {
+    if (editForm.role === 'company_manager' && (!orgId || !compId)) {
       Alert.alert('Error', 'Organization and company are required for Company Manager');
       return;
     }
-    if (editForm.role === 'employee' && (!editForm.organization_id || !editForm.company_id)) {
+    if (editForm.role === 'employee' && (!orgId || !compId)) {
       Alert.alert('Error', 'Organization and company are required for employees');
+      return;
+    }
+    if (editForm.role === 'employee' && String(compId || '').trim() && !editForm.department_id) {
+      Alert.alert('Please select a department');
       return;
     }
     setSaving(true);
@@ -1255,8 +2178,8 @@ export default function UserManagementScreen() {
           phone: editForm.phone.trim(),
           employee_pin: editForm.employee_pin.trim(),
           hourly_rate: editForm.hourly_rate.trim(),
-          organization_id: editForm.organization_id,
-          company_id: editForm.company_id,
+          organization_id: orgId,
+          company_id: compId,
         }),
         clean({
           username: editForm.username.trim(),
@@ -1267,8 +2190,8 @@ export default function UserManagementScreen() {
           phone: editForm.phone.trim(),
           employee_pin: editForm.employee_pin.trim(),
           hourly_rate: editForm.hourly_rate.trim(),
-          organization: editForm.organization_id,
-          company: editForm.company_id,
+          organization: orgId,
+          company: compId,
         }),
         clean({
           username: editForm.username.trim(),
@@ -1294,8 +2217,6 @@ export default function UserManagementScreen() {
         throw new Error('Could not update role on the server. Check permissions or try a different role label in the API.');
       }
 
-      const orgId = String(editForm.organization_id || '').trim();
-      const compId = String(editForm.company_id || '').trim();
       if (orgId || compId) {
         await api.syncAuthUserOrgCompany(editModal.id, orgId, compId);
       }
@@ -1306,13 +2227,13 @@ export default function UserManagementScreen() {
         const resolved = await api.findSchedulerEmployeeForAuthUser({
           id: editModal.id,
           email: editForm.email.trim(),
-          company_id: editForm.company_id || undefined,
-          assigned_company: editForm.company_id || undefined,
+          company_id: compId || undefined,
+          assigned_company: compId || undefined,
         });
         if (resolved?.id) employeeId = String(resolved.id).trim();
       }
       if (editForm.role === 'employee') {
-        const nextCompany = String(editForm.company_id ?? '').trim();
+        const nextCompany = String(compId ?? '').trim();
         if (!employeeId) {
           try {
             const created = await api.createEmployeeLinkedToUser({
@@ -1340,6 +2261,7 @@ export default function UserManagementScreen() {
           rawEmp.company_id ?? (typeof rawEmp.company === 'object' ? rawEmp.company?.id : rawEmp.company) ?? ''
         ).trim();
         const companyChanged = nextCompany !== '' && prevCompany !== nextCompany;
+        const deptOpt = deptEditOptions.find((d) => d.id === editForm.department_id);
 
         const empPayload: Record<string, any> = {
           email: editForm.email.trim(),
@@ -1354,10 +2276,20 @@ export default function UserManagementScreen() {
           position: jt || undefined,
           title: jt || undefined,
         };
+        if (deptOpt) {
+          const isFb = deptOpt.isFallback === true || String(deptOpt.id).startsWith('__fb__');
+          if (!isFb) {
+            empPayload.department_id = deptOpt.id;
+            empPayload.department = deptOpt.id;
+          } else {
+            empPayload.department = deptOpt.name;
+            empPayload.department_name = deptOpt.name;
+          }
+        }
         const empBody = clean(empPayload);
         if (companyChanged) {
-          empBody.department = null;
           empBody.team = null;
+          if (!deptOpt) empBody.department = null;
         }
         await api.updateSchedulerEmployeeWithFallbacks(employeeId, [
           empBody,
@@ -1483,7 +2415,7 @@ export default function UserManagementScreen() {
       <View style={[styles.cell, styles.cellHead, { width: COL.avatar }]} key="h-av" />,
     ];
     const push = (key: ColumnKey, w: number, label: string) => {
-      if (!visibleCols[key]) return;
+      if (!effectiveVisibleCols[key]) return;
       cells.push(
         <View style={[styles.cell, styles.cellHead, { width: w }]} key={`h-${key}`}>
           <Text style={styles.thText}>{label}</Text>
@@ -1495,6 +2427,7 @@ export default function UserManagementScreen() {
     push('fullName', COL.fullName, 'Full name');
     push('phone', COL.phone, 'Phone');
     push('title', COL.title, 'Title');
+    push('orgCompany', COL.orgCompany, 'Organization / Company');
     push('team', COL.team, 'Team');
     push('department', COL.department, 'Department');
     push('pin', COL.pin, 'Employee PIN');
@@ -1531,7 +2464,7 @@ export default function UserManagementScreen() {
       </View>,
     ];
     const pushVal = (key: ColumnKey, w: number, node: React.ReactNode) => {
-      if (!visibleCols[key]) return;
+      if (!effectiveVisibleCols[key]) return;
       cellsOut.push(
         <View style={[styles.cell, { width: w }]} key={key}>
           {node}
@@ -1543,8 +2476,9 @@ export default function UserManagementScreen() {
     pushVal('fullName', COL.fullName, <Text style={[styles.tdText, styles.tdName]}>{r.full_name}</Text>);
     pushVal('phone', COL.phone, <Text style={styles.tdText}>{r.phone}</Text>);
     pushVal('title', COL.title, <Text style={styles.tdText}>{r.title}</Text>);
-    pushVal('team', COL.team, <Text style={styles.tdMuted}>{r.team}</Text>);
-    pushVal('department', COL.department, <Text style={styles.tdMuted}>{r.department}</Text>);
+    pushVal('orgCompany', COL.orgCompany, <Text style={styles.tdText}>{r.organizationCompany}</Text>);
+    pushVal('team', COL.team, <Text style={styles.tdText}>{r.team}</Text>);
+    pushVal('department', COL.department, <Text style={styles.tdText}>{r.department}</Text>);
     pushVal('pin', COL.pin, <Text style={styles.tdText}>{r.pin}</Text>);
     pushVal('dateAdded', COL.dateAdded, <Text style={styles.tdText}>{r.dateAdded}</Text>);
     pushVal(
@@ -1554,7 +2488,13 @@ export default function UserManagementScreen() {
         {r.lastLogin}
       </Text>
     );
-    pushVal('addedBy', COL.addedBy, <Text style={styles.tdMuted}>{r.addedBy}</Text>);
+    pushVal(
+      'addedBy',
+      COL.addedBy,
+      <View style={styles.addedByBadge}>
+        <Text style={styles.addedByBadgeText}>{r.addedBy}</Text>
+      </View>
+    );
     cellsOut.push(<View style={[styles.cell, { width: COL.gear }]} key="g" />);
     cellsOut.push(
       <View style={[styles.cell, styles.actionsCell, { width: COL.actions }]} key="act">
@@ -1589,15 +2529,13 @@ export default function UserManagementScreen() {
   }
 
   const usersTabLabel = `Users (${userRows.length}/${rows.length})`;
-  const adminsTabLabel = `Admins (${adminRows.length}/${rows.length})`;
+  const adminsTabLabel = `Admins (${adminRowsForTab.length}/${rows.length})`;
 
   return (
     <View style={styles.container}>
       <View style={styles.pageHeader}>
         <Text style={styles.pageTitle}>User Management</Text>
-        <Text style={styles.pageSubtitle}>
-          Users: line staff (employee roles). Admins: super admins, admins, org managers, and company managers.
-        </Text>
+        <Text style={styles.pageSubtitle}>Manage users and their roles in the system.</Text>
 
         <View style={styles.tabs}>
           <TouchableOpacity
@@ -1621,7 +2559,7 @@ export default function UserManagementScreen() {
             <MaterialCommunityIcons name="magnify" size={20} color="#94a3b8" style={styles.searchIcon} />
         <TextInput
           style={styles.search}
-              placeholder="Search"
+              placeholder="Search employees..."
           value={search}
           onChangeText={setSearch}
           placeholderTextColor="#94a3b8"
@@ -1740,12 +2678,20 @@ export default function UserManagementScreen() {
                 keyboardType="decimal-pad"
               />
               <Text style={styles.fieldLabel}>Role</Text>
-              <TouchableOpacity style={styles.selectField} onPress={() => setCreateRolePicker(true)} disabled={saving}>
+              <TouchableOpacity
+                style={styles.selectField}
+                onPress={() => setCreateRolePicker(true)}
+                disabled={saving || (sessionRole === 'company_manager' && createEditRolePickerOptions.length <= 1)}
+              >
                 <Text style={styles.selectFieldText}>{createFormRoleLabel(form.role)}</Text>
                 <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
               </TouchableOpacity>
               <Text style={styles.fieldLabel}>Organization</Text>
-              <TouchableOpacity style={styles.selectField} onPress={() => setCreateOrgPicker(true)} disabled={saving}>
+              <TouchableOpacity
+                style={[styles.selectField, createOrgPickerLocked && styles.selectFieldDisabled]}
+                onPress={() => !createOrgPickerLocked && setCreateOrgPicker(true)}
+                disabled={saving || createOrgPickerLocked}
+              >
                 <Text style={[styles.selectFieldText, !form.organization_id && styles.selectPlaceholder]}>
                   {form.organization_id
                     ? createOrgList.find((o) => o.id === form.organization_id)?.name || 'Select organization'
@@ -1755,9 +2701,12 @@ export default function UserManagementScreen() {
               </TouchableOpacity>
               <Text style={styles.fieldLabel}>Company</Text>
           <TouchableOpacity
-                style={[styles.selectField, !form.organization_id && styles.selectFieldDisabled]}
-                onPress={() => form.organization_id && setCreateCompanyPicker(true)}
-                disabled={saving || !form.organization_id}
+                style={[
+                  styles.selectField,
+                  (!form.organization_id || createCompanyPickerLocked) && styles.selectFieldDisabled,
+                ]}
+                onPress={() => form.organization_id && !createCompanyPickerLocked && setCreateCompanyPicker(true)}
+                disabled={saving || !form.organization_id || createCompanyPickerLocked}
               >
                 <Text style={[styles.selectFieldText, !form.company_id && styles.selectPlaceholder]}>
                   {!form.organization_id
@@ -1768,6 +2717,25 @@ export default function UserManagementScreen() {
                 </Text>
                 <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
           </TouchableOpacity>
+              {form.role === 'employee' ? (
+                <>
+                  <Text style={styles.fieldLabel}>Department</Text>
+                  <TouchableOpacity
+                    style={[styles.selectField, !form.company_id && styles.selectFieldDisabled]}
+                    onPress={() => form.company_id && setCreateDeptPicker(true)}
+                    disabled={saving || !form.company_id}
+                  >
+                    <Text style={[styles.selectFieldText, !form.department_id && styles.selectPlaceholder]}>
+                      {!form.company_id
+                        ? 'Select company first'
+                        : form.department_id
+                          ? deptCreateOptions.find((d) => d.id === form.department_id)?.name || 'Department'
+                          : 'Select department'}
+                    </Text>
+                    <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
+                  </TouchableOpacity>
+                </>
+              ) : null}
               <View style={styles.createUserActions}>
                 <TouchableOpacity style={styles.cancelOutlineBtn} onPress={() => setCreateModal(false)} disabled={saving}>
                   <Text style={styles.cancelOutlineBtnText}>Cancel</Text>
@@ -1853,13 +2821,21 @@ export default function UserManagementScreen() {
               />
 
               <Text style={styles.fieldLabel}>Role</Text>
-              <TouchableOpacity style={styles.selectField} onPress={() => setEditRolePicker(true)} disabled={saving}>
+              <TouchableOpacity
+                style={styles.selectField}
+                onPress={() => setEditRolePicker(true)}
+                disabled={saving || (sessionRole === 'company_manager' && createEditRolePickerOptions.length <= 1)}
+              >
                 <Text style={styles.selectFieldText}>{createFormRoleLabel(editForm.role)}</Text>
                 <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                 </TouchableOpacity>
 
               <Text style={styles.fieldLabel}>Organization</Text>
-              <TouchableOpacity style={styles.selectField} onPress={() => setEditOrgPicker(true)} disabled={saving}>
+              <TouchableOpacity
+                style={[styles.selectField, editOrgPickerLocked && styles.selectFieldDisabled]}
+                onPress={() => !editOrgPickerLocked && setEditOrgPicker(true)}
+                disabled={saving || editOrgPickerLocked}
+              >
                 <Text style={[styles.selectFieldText, !editForm.organization_id && styles.selectPlaceholder]}>
                   {editForm.organization_id
                     ? editOrgList.find((o) => o.id === editForm.organization_id)?.name || 'Select organization'
@@ -1870,9 +2846,12 @@ export default function UserManagementScreen() {
 
               <Text style={styles.fieldLabel}>Company</Text>
               <TouchableOpacity
-                style={[styles.selectField, !editForm.organization_id && styles.selectFieldDisabled]}
-                onPress={() => editForm.organization_id && setEditCompanyPicker(true)}
-                disabled={saving || !editForm.organization_id}
+                style={[
+                  styles.selectField,
+                  (!editForm.organization_id || editCompanyPickerLocked) && styles.selectFieldDisabled,
+                ]}
+                onPress={() => editForm.organization_id && !editCompanyPickerLocked && setEditCompanyPicker(true)}
+                disabled={saving || !editForm.organization_id || editCompanyPickerLocked}
               >
                 <Text style={[styles.selectFieldText, !editForm.company_id && styles.selectPlaceholder]}>
                   {!editForm.organization_id
@@ -1883,6 +2862,26 @@ export default function UserManagementScreen() {
                 </Text>
                 <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
               </TouchableOpacity>
+
+              {editForm.role === 'employee' ? (
+                <>
+                  <Text style={styles.fieldLabel}>Department</Text>
+                  <TouchableOpacity
+                    style={[styles.selectField, !editForm.company_id && styles.selectFieldDisabled]}
+                    onPress={() => editForm.company_id && setEditDeptPicker(true)}
+                    disabled={saving || !editForm.company_id}
+                  >
+                    <Text style={[styles.selectFieldText, !editForm.department_id && styles.selectPlaceholder]}>
+                      {!editForm.company_id
+                        ? 'Select company first'
+                        : editForm.department_id
+                          ? deptEditOptions.find((d) => d.id === editForm.department_id)?.name || 'Department'
+                          : 'Select department'}
+                    </Text>
+                    <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
+                  </TouchableOpacity>
+                </>
+              ) : null}
 
               <Text style={styles.fieldLabel}>Employee PIN</Text>
               <TextInput
@@ -1917,6 +2916,21 @@ export default function UserManagementScreen() {
         </KeyboardAvoidingView>
       </Modal>
 
+      <OptionPickerModal
+        visible={createDeptPicker}
+        title="Select department"
+        options={deptCreateOptions.map((d) => ({ id: d.id, label: d.name }))}
+        onSelect={(id) => setForm((f) => ({ ...f, department_id: id }))}
+        onClose={() => setCreateDeptPicker(false)}
+      />
+      <OptionPickerModal
+        visible={editDeptPicker}
+        title="Select department"
+        options={deptEditOptions.map((d) => ({ id: d.id, label: d.name }))}
+        onSelect={(id) => setEditForm((f) => ({ ...f, department_id: id }))}
+        onClose={() => setEditDeptPicker(false)}
+      />
+
       <Modal visible={addMenuOpen} transparent animationType="fade" onRequestClose={() => setAddMenuOpen(false)}>
         <Pressable style={styles.addMenuOverlay} onPress={() => setAddMenuOpen(false)}>
           <View style={[styles.addMenuOuter, { pointerEvents: 'box-none' }]}>
@@ -1925,6 +2939,22 @@ export default function UserManagementScreen() {
                 style={styles.addMenuItem}
                 onPress={async () => {
                   setAddMenuOpen(false);
+                  let initialOrg = '';
+                  let initialCompany = '';
+                  try {
+                    const me = (await api.getCurrentUser()) as any;
+                    const vr = getPrimaryRoleFromUser(resolveUserPayloadForRole(me));
+                    const { orgs, companies } = await loadScopedOrgCompanyForViewer(me, vr);
+                    setCreateOrgList(orgs);
+                    if (vr === 'company_manager') {
+                      if (orgs[0]) initialOrg = orgs[0].id;
+                      if (companies[0]) initialCompany = companies[0].id;
+                    } else if (vr === 'organization_manager' && orgs.length === 1) {
+                      initialOrg = orgs[0].id;
+                    }
+                  } catch {
+                    setCreateOrgList([]);
+                  }
                   setForm({
                     email: '',
                     username: '',
@@ -1934,19 +2964,10 @@ export default function UserManagementScreen() {
                     employee_pin: '',
                     hourly_rate: '',
                     role: 'employee',
-                    organization_id: '',
-                    company_id: '',
+                    organization_id: initialOrg,
+                    company_id: initialCompany,
+                    department_id: '',
                   });
-                  try {
-                    const orgs = await api.getOrganizations();
-                    const list = (Array.isArray(orgs) ? orgs : []).map((o: any) => ({
-                      id: String(o.id),
-                      name: o.name || '—',
-                    }));
-                    setCreateOrgList(list);
-                  } catch {
-                    setCreateOrgList([]);
-                  }
                   setCreateModal(true);
                 }}
               >
@@ -2032,7 +3053,11 @@ export default function UserManagementScreen() {
             <Text style={styles.fieldLabel}>
               Organization{assignRole === 'super_admin' ? ' (optional)' : ''}
             </Text>
-            <TouchableOpacity style={styles.selectField} onPress={() => setAssignOrgPicker(true)} disabled={saving}>
+            <TouchableOpacity
+              style={[styles.selectField, assignOrgPickerLocked && styles.selectFieldDisabled]}
+              onPress={() => !assignOrgPickerLocked && setAssignOrgPicker(true)}
+              disabled={saving || assignOrgPickerLocked}
+            >
               <Text style={[styles.selectFieldText, !assignOrgId && styles.selectPlaceholder]}>
                 {assignOrgId ? orgList.find((o) => o.id === assignOrgId)?.name : 'Select an organization'}
               </Text>
@@ -2048,10 +3073,16 @@ export default function UserManagementScreen() {
             <TouchableOpacity
               style={[
                 styles.selectField,
-                assignRole !== 'super_admin' && !assignOrgId && styles.selectFieldDisabled,
+                (assignRole !== 'super_admin' && !assignOrgId) || assignCompanyPickerLocked
+                  ? styles.selectFieldDisabled
+                  : null,
               ]}
-              onPress={() => (assignRole === 'super_admin' || assignOrgId) && setAssignCompanyPicker(true)}
-              disabled={saving || (assignRole !== 'super_admin' && !assignOrgId)}
+              onPress={() =>
+                !assignCompanyPickerLocked &&
+                (assignRole === 'super_admin' || assignOrgId) &&
+                setAssignCompanyPicker(true)
+              }
+              disabled={saving || assignCompanyPickerLocked || (assignRole !== 'super_admin' && !assignOrgId)}
             >
               <Text style={[styles.selectFieldText, !assignCompanyId && styles.selectPlaceholder]}>
                 {assignRole !== 'super_admin' && !assignOrgId
@@ -2066,7 +3097,11 @@ export default function UserManagementScreen() {
             </TouchableOpacity>
 
             <Text style={styles.fieldLabel}>Role</Text>
-            <TouchableOpacity style={styles.selectField} onPress={() => setAssignRolePicker(true)} disabled={saving}>
+            <TouchableOpacity
+              style={styles.selectField}
+              onPress={() => setAssignRolePicker(true)}
+              disabled={saving || (sessionRole === 'company_manager' && assignRolePickerOptions.length <= 1)}
+            >
               <Text style={styles.selectFieldText}>{assignRoleLabel(assignRole)}</Text>
               <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
             </TouchableOpacity>
@@ -2088,13 +3123,14 @@ export default function UserManagementScreen() {
       <OptionPickerModal
         visible={createRolePicker}
         title="Role"
-        options={[
-          { id: 'employee', label: 'Employee' },
-          { id: 'company_manager', label: 'Company Manager' },
-          { id: 'organization_manager', label: 'Organization Manager' },
-          { id: 'super_admin', label: 'Super Admin' },
-        ]}
-        onSelect={(id) => setForm((f) => ({ ...f, role: id }))}
+        options={createEditRolePickerOptions}
+        onSelect={(id) =>
+          setForm((f) => ({
+            ...f,
+            role: id,
+            department_id: id === 'employee' ? f.department_id : '',
+          }))
+        }
         onClose={() => setCreateRolePicker(false)}
       />
       <OptionPickerModal
@@ -2114,13 +3150,14 @@ export default function UserManagementScreen() {
       <OptionPickerModal
         visible={editRolePicker}
         title="Role"
-        options={[
-          { id: 'employee', label: 'Employee' },
-          { id: 'company_manager', label: 'Company Manager' },
-          { id: 'organization_manager', label: 'Organization Manager' },
-          { id: 'super_admin', label: 'Super Admin' },
-        ]}
-        onSelect={(id) => setEditForm((f) => ({ ...f, role: id }))}
+        options={createEditRolePickerOptions}
+        onSelect={(id) =>
+          setEditForm((f) => ({
+            ...f,
+            role: id,
+            department_id: id === 'employee' ? f.department_id : '',
+          }))
+        }
         onClose={() => setEditRolePicker(false)}
       />
       <OptionPickerModal
@@ -2154,12 +3191,7 @@ export default function UserManagementScreen() {
       <OptionPickerModal
         visible={assignRolePicker}
         title="Role"
-        options={[
-          { id: 'employee', label: 'Employee' },
-          { id: 'company_manager', label: 'Company Manager' },
-          { id: 'organization_manager', label: 'Organization Manager' },
-          { id: 'super_admin', label: 'Super Admin' },
-        ]}
+        options={assignRolePickerOptions}
         onSelect={(id) =>
           setAssignRole(id as 'employee' | 'company_manager' | 'organization_manager' | 'super_admin')
         }
@@ -2459,6 +3491,16 @@ const styles = StyleSheet.create({
   tdName: { fontWeight: '700' },
   tdMuted: { fontSize: 14, color: '#94a3b8' },
   tdMutedSmall: { fontSize: 13, color: '#94a3b8', lineHeight: 18 },
+  /** Match web: pill chip with dark label (not low-contrast grey). */
+  addedByBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#e2e8f0',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    maxWidth: '100%',
+  },
+  addedByBadgeText: { fontSize: 14, color: '#0f172a', fontWeight: '500' },
 
   checkboxOuter: {
     width: 22,

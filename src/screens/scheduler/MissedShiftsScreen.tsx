@@ -13,6 +13,7 @@ import {
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
 import * as api from '../../api';
+import { isLikelyUuid } from '../../lib/departmentEmployeeMatch';
 
 type Organization = { id: string; name: string; [k: string]: any };
 type Company = { id: string; name: string; organization_id?: string; company_manager_id?: string; [k: string]: any };
@@ -23,22 +24,52 @@ function companyOrganizationId(c: Company | null | undefined): string {
   return v != null ? String(v) : '';
 }
 
-function employeeNameFromShift(s: any): string {
+function registerEmployeeLookupKeys(acc: Record<string, string>, idRaw: string, displayName: string) {
+  const id = String(idRaw || '').trim();
+  if (!id) return;
+  acc[id] = displayName;
+  acc[id.replace(/-/g, '').toLowerCase()] = displayName;
+}
+
+function lookupEmployeeName(lookup: Record<string, string>, raw: string): string {
+  const k = String(raw || '').trim();
+  if (!k) return '';
+  if (lookup[k]) return lookup[k];
+  return lookup[k.replace(/-/g, '').toLowerCase()] || '';
+}
+
+function employeeNameFromShift(s: any, lookup: Record<string, string> = {}): string {
   const e = s.employee;
   if (e && typeof e === 'object') {
     const fn = String(e.first_name || '').trim();
     const ln = String(e.last_name || '').trim();
     if (fn || ln) return `${fn} ${ln}`.trim();
     if (e.email) return String(e.email);
+    const oid = String(e.id ?? e.pk ?? e.uuid ?? '').trim();
+    if (oid) {
+      const hit = lookupEmployeeName(lookup, oid);
+      if (hit) return hit;
+    }
   }
-  if (typeof e === 'string' && e) return e;
+  if (typeof e === 'string' && e.trim()) {
+    const hit = lookupEmployeeName(lookup, e);
+    if (hit) return hit;
+    if (!isLikelyUuid(e)) return e;
+  }
+  const empId = String(s.employee_id ?? '').trim();
+  if (empId) {
+    const hit = lookupEmployeeName(lookup, empId);
+    if (hit) return hit;
+  }
   const n =
     s.employee_name ||
     s.employee_full_name ||
     (s as any).original_employee_name ||
     (s as any).user_name;
   if (n) return String(n);
-  return '(Original)';
+  if (empId && isLikelyUuid(empId)) return 'Employee';
+  if (typeof e === 'string' && e && isLikelyUuid(e)) return 'Employee';
+  return empId || (typeof e === 'string' ? e : '') || 'Employee';
 }
 
 function shiftCompanyId(s: any): string {
@@ -145,10 +176,11 @@ export default function MissedShiftsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [orgModal, setOrgModal] = useState(false);
   const [companyModal, setCompanyModal] = useState(false);
+  const [employeeLookup, setEmployeeLookup] = useState<Record<string, string>>({});
   const initialDone = useRef(false);
 
-  const needsOrg = role === 'super_admin' || role === 'admin' || role === 'operations_manager';
-  const isOrgManager = role === 'operations_manager' && user?.id;
+  const needsOrg = role === 'super_admin' || role === 'organization_manager';
+  const isOrgManager = role === 'organization_manager' && user?.id;
 
   const companiesForOrg = useMemo(() => {
     let list = [...companies];
@@ -179,7 +211,7 @@ export default function MissedShiftsScreen() {
       setOrganizations(Array.isArray(orgsRaw) ? orgsRaw : []);
 
       let compRaw: any[] = [];
-      if (isOrgManager || role === 'manager') {
+      if (isOrgManager || role === 'company_manager') {
         compRaw = await api.getCompanies();
       } else if (needsOrg) {
         try {
@@ -212,7 +244,7 @@ export default function MissedShiftsScreen() {
         const allowed = new Set(companiesForOrg.map((c) => c.id));
         shifts = shifts.filter((s) => allowed.has(shiftCompanyId(s)));
       }
-      if (role === 'manager' && user?.id && companyFilter === 'all' && orgFilter === 'all') {
+      if (role === 'company_manager' && user?.id && companyFilter === 'all' && orgFilter === 'all') {
         const allowed = new Set(
           api.filterCompaniesForCompanyManagerRole(companies, role, user.id).map((c) => c.id)
         );
@@ -225,7 +257,7 @@ export default function MissedShiftsScreen() {
         const allowed = new Set(companiesForOrg.map((c) => c.id));
         rr = rr.filter((r) => allowed.has(requestCompanyId(r)));
       }
-      if (role === 'manager' && user?.id && companyFilter === 'all' && orgFilter === 'all') {
+      if (role === 'company_manager' && user?.id && companyFilter === 'all' && orgFilter === 'all') {
         const allowed = new Set(
           api.filterCompaniesForCompanyManagerRole(companies, role, user.id).map((c) => c.id)
         );
@@ -257,6 +289,44 @@ export default function MissedShiftsScreen() {
     const ok = companiesForOrg.some((c) => c.id === companyFilter);
     if (!ok) setCompanyFilter('all');
   }, [companiesForOrg, companyFilter]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const companyIds =
+        companyFilter !== 'all'
+          ? [companyFilter]
+          : companiesForOrg.map((c) => c.id).filter((id) => String(id || '').trim() !== '');
+      const unique = [...new Set(companyIds.map((id) => String(id)))];
+      const acc: Record<string, string> = {};
+      await Promise.all(
+        unique.map(async (cid) => {
+          try {
+            const rows = await api.getEmployeesForCompany(cid);
+            for (const emp of rows) {
+              const id = String((emp as any).id ?? (emp as any).pk ?? (emp as any).uuid ?? '').trim();
+              if (!id) continue;
+              const fn = String((emp as any).first_name || '').trim();
+              const ln = String((emp as any).last_name || '').trim();
+              const nm =
+                fn || ln ? `${fn} ${ln}`.trim() : String((emp as any).email || '').trim() || id;
+              registerEmployeeLookupKeys(acc, id, nm);
+              const uid = (emp as any).user_id;
+              if (uid != null && String(uid).trim() !== '') {
+                registerEmployeeLookupKeys(acc, String(uid).trim(), nm);
+              }
+            }
+          } catch {
+            /* ignore */
+          }
+        })
+      );
+      if (!cancelled) setEmployeeLookup(acc);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [companyFilter, companiesForOrg]);
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -293,7 +363,7 @@ export default function MissedShiftsScreen() {
         </View>
         <View style={styles.missedCardBody}>
           <Text style={styles.empName} numberOfLines={1}>
-            {employeeNameFromShift(item)}
+            {employeeNameFromShift(item, employeeLookup)}
           </Text>
           <View style={styles.shiftRow}>
             <MaterialCommunityIcons name="clock-outline" size={16} color="#64748b" />
@@ -362,7 +432,7 @@ export default function MissedShiftsScreen() {
     <View style={styles.root}>
       <FlatList
         data={listData}
-        extraData={tab}
+        extraData={{ tab, employeeLookup }}
         keyExtractor={(item, index) => String(item.id ?? index)}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         contentContainerStyle={styles.listContent}

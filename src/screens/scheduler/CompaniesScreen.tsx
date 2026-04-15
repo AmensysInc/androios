@@ -19,6 +19,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
 import { getPrimaryRoleFromUser } from '../../types/auth';
 import * as api from '../../api';
+import { recordLooksMotelRow } from '../../lib/motelEmployeeAccess';
 
 type Organization = { id: string; name: string; [k: string]: any };
 type Company = { id: string; name: string; organization_id?: string; company_manager_id?: string; [k: string]: any };
@@ -26,7 +27,8 @@ type Company = { id: string; name: string; organization_id?: string; company_man
 function companyOrganizationId(c: Company | null | undefined): string {
   if (c == null) return '';
   const v = c.organization_id ?? (c as any).organization;
-  return v != null ? String(v) : '';
+  if (v != null && typeof v === 'object' && (v as any).id != null) return String((v as any).id).trim();
+  return v != null ? String(v).trim() : '';
 }
 
 function organizationIdFromAuthUser(u: any): string {
@@ -85,6 +87,14 @@ function formatUsPhoneDisplay(digits: string): string {
 
 function displayUsPhoneFromRaw(raw: string | null | undefined): string {
   return formatUsPhoneDisplay(digitsOnly(String(raw ?? '')));
+}
+
+function parsePositiveIntOrUndefined(raw: string): number | undefined {
+  const s = String(raw || '').trim();
+  if (!s) return undefined;
+  const n = parseInt(s, 10);
+  if (Number.isFinite(n) && n >= 0) return n;
+  return undefined;
 }
 
 function orgIsArchived(o: Organization): boolean {
@@ -414,6 +424,9 @@ export default function CompaniesScreen() {
   const [address, setAddress] = useState('');
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
+  const [noOfFloors, setNoOfFloors] = useState('');
+  const [noOfRooms, setNoOfRooms] = useState('');
+  const [noOfRoomsPerFloor, setNoOfRoomsPerFloor] = useState('');
   const [managerId, setManagerId] = useState<string | null>(null);
   const [managerOptions, setManagerOptions] = useState<PickerOption[]>([]);
   const [usersById, setUsersById] = useState<Record<string, any>>({});
@@ -433,48 +446,69 @@ export default function CompaniesScreen() {
     setPhone(formatUsPhoneDisplay(digitsOnly(text)));
   }, []);
 
-  const isOrgManager = effectiveRole === 'operations_manager' && user?.id;
+  const isOrgManager = effectiveRole === 'organization_manager' && user?.id;
   const canCreateOrg = role === 'super_admin';
   const canDeleteOrg = role === 'super_admin';
-  const canCreateCompany = role === 'super_admin' || role === 'operations_manager';
-  const canEditCompany = role === 'super_admin' || role === 'operations_manager';
+  const canCreateCompany = role === 'super_admin' || role === 'organization_manager';
+  const canEditCompany = role === 'super_admin' || role === 'organization_manager';
 
   const filteredCompanies = React.useMemo(() => {
     let list = api.filterCompaniesForCompanyManagerRole(companies, effectiveRole, user?.id);
     const oid = authOrgId || (user?.organization_id ? String(user.organization_id) : '');
-    if (effectiveRole === 'operations_manager' && oid) {
+    if (effectiveRole === 'organization_manager' && oid) {
       list = list.filter((c) => companyOrganizationId(c) === oid);
     }
     return list;
   }, [companies, effectiveRole, user?.id, user?.organization_id, authOrgId]);
 
   const filteredOrgs = React.useMemo(() => {
-    if (effectiveRole === 'operations_manager') {
+    if (effectiveRole === 'organization_manager') {
       const oid = authOrgId || (user?.organization_id ? String(user.organization_id) : '');
       if (oid) return organizations.filter((o) => String(o.id) === oid);
       if (organizations.length === 1) return organizations;
       return organizations;
     }
-    if (role === 'manager' && filteredCompanies.length > 0) {
+    if (role === 'company_manager' && filteredCompanies.length > 0) {
       const orgIds = new Set(filteredCompanies.map((c) => companyOrganizationId(c)).filter(Boolean));
       return organizations.filter((o) => orgIds.has(o.id));
     }
     return organizations;
   }, [organizations, filteredCompanies, role, user?.organization_id, effectiveRole, authOrgId]);
 
+  /** Floors/rooms fields only for companies under an organization row that looks like motels (see `recordLooksMotelRow`). */
+  const companyFormIsMotelsOrg = React.useMemo(() => {
+    const oid = String(orgIdForCompany || '').trim();
+    if (oid) {
+      const org = organizations.find((o) => String(o.id) === oid);
+      if (org) return recordLooksMotelRow(org);
+    }
+    if (editCompany) {
+      const nested = (editCompany as any).organization;
+      if (nested && typeof nested === 'object') return recordLooksMotelRow(nested);
+    }
+    return false;
+  }, [orgIdForCompany, organizations, editCompany]);
+
+  useEffect(() => {
+    if (modal !== 'company' || companyFormIsMotelsOrg) return;
+    setNoOfFloors('');
+    setNoOfRooms('');
+    setNoOfRoomsPerFloor('');
+  }, [modal, companyFormIsMotelsOrg]);
+
   const activeOrgList = React.useMemo(() => filteredOrgs.filter((o) => !orgIsArchived(o)), [filteredOrgs]);
   const archivedOrgList = React.useMemo(() => filteredOrgs.filter(orgIsArchived), [filteredOrgs]);
   const orgsForList = orgListFilter === 'active' ? activeOrgList : archivedOrgList;
 
   const orgIdForOrgManagerActions = React.useMemo(() => {
-    if (effectiveRole !== 'operations_manager') return '';
+    if (effectiveRole !== 'organization_manager') return '';
     return String(
       authOrgId || user?.organization_id || filteredOrgs[0]?.id || companyOrganizationId(filteredCompanies[0]) || ''
     ).trim();
   }, [effectiveRole, authOrgId, user?.organization_id, filteredOrgs, filteredCompanies]);
 
   /** Org managers only manage one org — show companies in a flat grid (no org wrapper row). */
-  const orgManagerFlatView = effectiveRole === 'operations_manager';
+  const orgManagerFlatView = effectiveRole === 'organization_manager';
   const orgManagerCompaniesForList = React.useMemo(() => {
     if (!orgManagerFlatView) return [];
     const active = filteredCompanies.filter((c) => !companyIsArchived(c));
@@ -685,6 +719,9 @@ export default function CompaniesScreen() {
     setAddress('');
     setPhone('');
     setEmail('');
+    setNoOfFloors('');
+    setNoOfRooms('');
+    setNoOfRoomsPerFloor('');
     setManagerId(null);
     setManagerOptions([]);
     setModal('org');
@@ -697,6 +734,9 @@ export default function CompaniesScreen() {
     setAddress(String((org as any).address ?? '') || '');
     setPhone(displayUsPhoneFromRaw((org as any).phone));
     setEmail(String((org as any).email ?? '') || '');
+    setNoOfFloors(String((org as any).no_of_floors ?? (org as any).floors ?? '') || '');
+    setNoOfRooms(String((org as any).no_of_rooms ?? (org as any).rooms ?? '') || '');
+    setNoOfRoomsPerFloor(String((org as any).no_of_rooms_per_floor ?? (org as any).rooms_per_floor ?? '') || '');
     setManagerId((org as any).organization_manager_id ? String((org as any).organization_manager_id) : null);
     void loadManagers(['organization_manager', 'operations_manager']);
     setModal('org');
@@ -776,6 +816,9 @@ export default function CompaniesScreen() {
     setAddress('');
     setPhone('');
     setEmail('');
+    setNoOfFloors('');
+    setNoOfRooms('');
+    setNoOfRoomsPerFloor('');
     setManagerId(null);
     setManagerOptions([]);
     setModal('company');
@@ -790,6 +833,9 @@ export default function CompaniesScreen() {
     setAddress(String((company as any).address ?? '') || '');
     setPhone(displayUsPhoneFromRaw((company as any).phone));
     setEmail(String((company as any).email ?? '') || '');
+    setNoOfFloors(String((company as any).no_of_floors ?? (company as any).floors ?? '') || '');
+    setNoOfRooms(String((company as any).no_of_rooms ?? (company as any).rooms ?? '') || '');
+    setNoOfRoomsPerFloor(String((company as any).no_of_rooms_per_floor ?? (company as any).rooms_per_floor ?? '') || '');
     setManagerId(company.company_manager_id ? String(company.company_manager_id) : null);
     void loadManagers(['company_manager', 'manager']);
     setModal('company');
@@ -806,6 +852,10 @@ export default function CompaniesScreen() {
     }
     setSaving(true);
     try {
+      const floorsNum = parsePositiveIntOrUndefined(noOfFloors);
+      const roomsNum = parsePositiveIntOrUndefined(noOfRooms);
+      const roomsPerFloorNum = parsePositiveIntOrUndefined(noOfRoomsPerFloor);
+
       const minimalCreate = {
         name,
         organization_id: orgIdForCompany.trim(),
@@ -826,6 +876,11 @@ export default function CompaniesScreen() {
         phone: phone?.trim() || undefined,
         email: email?.trim() || undefined,
       };
+      if (companyFormIsMotelsOrg) {
+        richPayload.no_of_floors = floorsNum;
+        richPayload.no_of_rooms = roomsNum;
+        richPayload.no_of_rooms_per_floor = roomsPerFloorNum;
+      }
       if (managerId) {
         richPayload.company_manager = managerId;
         richPayload.company_manager_id = managerId;
@@ -957,10 +1012,10 @@ export default function CompaniesScreen() {
         <View style={styles.headerTopRow}>
           <View style={styles.headerTitleBlock}>
             <Text style={styles.title}>
-              {role === 'operations_manager' ? 'Companies' : 'Organizations & Companies'}
+              {role === 'organization_manager' ? 'Companies' : 'Organizations & Companies'}
             </Text>
             <Text style={styles.subtitle}>
-              {role === 'operations_manager'
+              {role === 'organization_manager'
                 ? "Your organization's companies"
                 : 'Manage organizations and companies'}
             </Text>
@@ -1001,7 +1056,7 @@ export default function CompaniesScreen() {
                 <Text style={styles.headerNewOrgButtonText}>+ New org</Text>
               </TouchableOpacity>
             ) : null}
-            {canCreateCompany && role === 'operations_manager' ? (
+            {canCreateCompany && role === 'organization_manager' ? (
               <TouchableOpacity
                 style={styles.headerNewOrgButton}
                 onPress={() =>
@@ -1066,7 +1121,7 @@ export default function CompaniesScreen() {
           ListEmptyComponent={
             <View style={styles.empty}>
               <Text style={styles.emptyText}>
-                {role === 'operations_manager'
+                {role === 'organization_manager'
                   ? orgListFilter === 'archived'
                     ? 'No archived organizations'
                     : 'No organization loaded. Check that your profile includes an organization, then pull to refresh.'
@@ -1079,7 +1134,7 @@ export default function CompaniesScreen() {
                   <Text style={styles.primaryButtonText}>Create organization</Text>
                 </TouchableOpacity>
               ) : null}
-              {canCreateCompany && role === 'operations_manager' && orgListFilter === 'active' && filteredOrgs[0]?.id ? (
+              {canCreateCompany && role === 'organization_manager' && orgListFilter === 'active' && filteredOrgs[0]?.id ? (
                 <TouchableOpacity style={styles.primaryButton} onPress={() => handleCreateCompany(filteredOrgs[0].id)}>
                   <Text style={styles.primaryButtonText}>+ New company</Text>
                 </TouchableOpacity>
@@ -1300,6 +1355,41 @@ export default function CompaniesScreen() {
                   <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                 </TouchableOpacity>
 
+                {companyFormIsMotelsOrg ? (
+                  <View style={styles.threeColRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.labelInline}>No of Floors</Text>
+                      <TextInput
+                        style={[styles.input, styles.inputNoMargin]}
+                        value={noOfFloors}
+                        onChangeText={setNoOfFloors}
+                        placeholder="e.g. 3"
+                        keyboardType="number-pad"
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.labelInline}>No of Rooms</Text>
+                      <TextInput
+                        style={[styles.input, styles.inputNoMargin]}
+                        value={noOfRooms}
+                        onChangeText={setNoOfRooms}
+                        placeholder="e.g. 36"
+                        keyboardType="number-pad"
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.labelInline}>No of Rooms for Floor</Text>
+                      <TextInput
+                        style={[styles.input, styles.inputNoMargin]}
+                        value={noOfRoomsPerFloor}
+                        onChangeText={setNoOfRoomsPerFloor}
+                        placeholder="e.g. 12"
+                        keyboardType="number-pad"
+                      />
+                    </View>
+                  </View>
+                ) : null}
+
                 <Text style={styles.label}>Brand Color</Text>
                 <ColorControl value={brandColor} fallback="#3b82f6" onChange={setBrandColor} />
 
@@ -1392,6 +1482,41 @@ export default function CompaniesScreen() {
                     />
                   </View>
                 </View>
+
+                {companyFormIsMotelsOrg ? (
+                  <View style={styles.threeColRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.labelInline}>No of Floors</Text>
+                      <TextInput
+                        style={[styles.input, styles.inputNoMargin]}
+                        value={noOfFloors}
+                        onChangeText={setNoOfFloors}
+                        placeholder="0"
+                        keyboardType="number-pad"
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.labelInline}>No of Rooms</Text>
+                      <TextInput
+                        style={[styles.input, styles.inputNoMargin]}
+                        value={noOfRooms}
+                        onChangeText={setNoOfRooms}
+                        placeholder="0"
+                        keyboardType="number-pad"
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.labelInline}>No of Rooms for Floor</Text>
+                      <TextInput
+                        style={[styles.input, styles.inputNoMargin]}
+                        value={noOfRoomsPerFloor}
+                        onChangeText={setNoOfRoomsPerFloor}
+                        placeholder="0"
+                        keyboardType="number-pad"
+                      />
+                    </View>
+                  </View>
+                ) : null}
               </>
             )}
             <View style={styles.modalActions}>
@@ -1941,6 +2066,7 @@ const styles = StyleSheet.create({
   },
 
   twoColRow: { flexDirection: 'row', gap: 12, marginBottom: 16 },
+  threeColRow: { flexDirection: 'row', gap: 12, marginBottom: 16 },
   labelInline: { fontSize: 12, color: '#64748b', marginBottom: 6 },
 
   pickerOverlay: {

@@ -588,7 +588,7 @@ export default function TasksScreen() {
   const [memberIdByEmail, setMemberIdByEmail] = useState<Record<string, string>>({});
   const [picker, setPicker] = useState<'scope' | 'member' | 'priority' | 'date' | 'status' | null>(null);
 
-  const canViewAllMembers = ['super_admin', 'admin', 'operations_manager', 'manager'].includes(role || '');
+  const canViewAllMembers = ['super_admin', 'organization_manager', 'company_manager'].includes(role || '');
 
   const scopeOptions: PickerOption[] = useMemo(
     () => [

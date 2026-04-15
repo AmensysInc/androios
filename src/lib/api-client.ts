@@ -125,6 +125,19 @@ function normalizeUserPayload(raw: any): any {
   if (typeof merged !== 'object' || merged == null) return null;
   const withId = { ...merged } as any;
   if (withId.id == null && withId.pk != null) withId.id = String(withId.pk);
+
+  // `/auth/user/` often nests identity on `user` but puts `roles` / `role` on the outer object.
+  // Without this, `getPrimaryRoleFromUser` sees no roles and falls back to `user` / wrong tab.
+  if (fromUser || fromData) {
+    if (Array.isArray(r.roles) && r.roles.length) {
+      withId.roles = r.roles;
+    }
+    if (withId.role == null && r.role != null) withId.role = r.role;
+    if (withId.role_name == null && r.role_name != null) withId.role_name = r.role_name;
+    if (withId.primary_role == null && r.primary_role != null) withId.primary_role = r.primary_role;
+    if (r.is_superuser === true) withId.is_superuser = true;
+  }
+
   const hasIdentity =
     withId.id != null || withId.email != null || withId.username != null;
   return hasIdentity ? withId : null;
@@ -545,9 +558,13 @@ export class ApiClient {
     const access = getAccessToken(response)!;
     const refresh = getRefreshToken(response);
     const payload = unwrapPayload(response);
-    let user = normalizeUserPayload(payload?.user ?? (response as any)?.user);
+    const inner = payload?.user ?? (response as any)?.user;
+    let user =
+      inner && typeof inner === 'object' && payload && typeof payload === 'object'
+        ? normalizeUserPayload({ ...payload, user: inner })
+        : normalizeUserPayload(payload ?? inner);
     if (!user) {
-      user = normalizeUserPayload(await this.getCurrentUser());
+      user = await this.getCurrentUser();
     }
     if (!user) throw new Error('Login succeeded but user profile could not be loaded.');
     return { user, access, refresh, response };

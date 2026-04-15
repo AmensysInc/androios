@@ -290,7 +290,7 @@ export default function TemplateScreen() {
   const [taskDueOpen, setTaskDueOpen] = useState(false);
 
   const isAdmin =
-    role === 'super_admin' || role === 'admin' || role === 'operations_manager' || role === 'manager';
+    role === 'super_admin' || role === 'organization_manager' || role === 'company_manager';
 
   const norm = (v: any) => (v != null ? String(v) : '');
 
@@ -332,7 +332,7 @@ export default function TemplateScreen() {
   const loadTeamMembers = useCallback(async () => {
     if (!user || !isAdmin) return;
     try {
-      if (role === 'super_admin' || role === 'admin') {
+      if (role === 'super_admin') {
         const users = await api.getUsers();
         setTeamMembers(
           (users || []).map((u: any) => ({

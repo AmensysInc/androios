@@ -438,7 +438,7 @@ const pmStyles = StyleSheet.create({
 /** Team focus panel: Super Admin, Organization Manager, Company Manager only (not generic admin). */
 function canViewTeamFocusSessions(role: UserRole | null): boolean {
   if (!role) return false;
-  return ['super_admin', 'operations_manager', 'manager'].includes(role);
+  return ['super_admin', 'organization_manager', 'company_manager'].includes(role);
 }
 
 export default function FocusScreen() {

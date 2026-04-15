@@ -1,3 +1,4 @@
+import { Platform } from 'react-native';
 import apiClient, { HttpError } from '../lib/api-client';
 
 const DEFAULT_COMPANY_TYPE = 'General';
@@ -15,11 +16,75 @@ function logSchedulerShift(phase: string, data: Record<string, unknown>) {
   }
 }
 
+/** Strip braces / `urn:uuid:` so we can match Django/Postgres UUID strings. */
+export function normalizeMotelRoomUuidString(v: unknown): string {
+  if (v == null) return '';
+  let s = String(v).trim();
+  if (s.startsWith('{') && s.endsWith('}')) s = s.slice(1, -1).trim();
+  const low = s.toLowerCase();
+  if (low.startsWith('urn:uuid:')) s = s.slice(9).trim();
+  return s;
+}
+
+/**
+ * Canonical lowercase hyphenated UUID if `v` is parseable (matches Python `uuid.UUID` acceptance).
+ * Empty string if not a UUID — avoids treating room numbers like `101` as ids.
+ */
+export function parseMotelRoomUuidString(v: unknown): string {
+  const n = normalizeMotelRoomUuidString(v);
+  if (!n) return '';
+  const compact = n.replace(/-/g, '');
+  if (/^[0-9a-f]{32}$/i.test(compact)) {
+    const u = compact.toLowerCase();
+    return `${u.slice(0, 8)}-${u.slice(8, 12)}-${u.slice(12, 16)}-${u.slice(16, 20)}-${u.slice(20, 32)}`;
+  }
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(n)) return n.toLowerCase();
+  return '';
+}
+
+export function isLikelyUuid(v: unknown): boolean {
+  return parseMotelRoomUuidString(v) !== '';
+}
+
+/** First parseable motel room UUID among common JSON keys (for `start-cleaning`). */
+export function pickMotelRoomUuidId(r: Record<string, any> | null | undefined): string {
+  if (!r || typeof r !== 'object') return '';
+  for (const k of ['id', 'room_id', 'uuid', 'roomId'] as const) {
+    const got = parseMotelRoomUuidString(r[k]);
+    if (got) return got;
+  }
+  return '';
+}
+
+/**
+ * Cleaning-session id from `start-cleaning` (and similar) responses.
+ * Prefer `session_id` / `sessionId` before generic `id` so wrapped `{ data: { id: room } }` never wins over `session_id`.
+ */
+export function resolveMotelCleaningSessionId(res: Record<string, any> | null | undefined): string {
+  if (!res || typeof res !== 'object') return '';
+  const data = (res as any).data;
+  const nested = data && typeof data === 'object' ? (data as Record<string, unknown>) : null;
+  const candidates: unknown[] = [
+    (res as any).session_id,
+    (res as any).sessionId,
+    nested?.session_id,
+    nested?.sessionId,
+    (res as any).id,
+    nested?.id,
+  ];
+  for (const c of candidates) {
+    const parsed = parseMotelRoomUuidString(c);
+    if (parsed) return parsed;
+  }
+  return '';
+}
+
 function attachId<T extends Record<string, any>>(item: T): T {
   if (!item || typeof item !== 'object') return item;
   const o = { ...item } as T & { id?: string; pk?: string | number; uuid?: string };
   if (o.id == null && o.pk != null) (o as any).id = String(o.pk);
   if (o.id == null && o.uuid != null) (o as any).id = String(o.uuid);
+  if (o.id == null && (o as any).room_id != null) (o as any).id = String((o as any).room_id);
   return o as T;
 }
 
@@ -52,6 +117,14 @@ function buildCompanyWriteBody(data: Record<string, any>, mode: 'create' | 'patc
     ['address', 'address'],
     ['phone', 'phone'],
     ['email', 'email'],
+    // Motel/company sizing fields (used by web "motels" org).
+    ['no_of_floors', 'no_of_floors'],
+    ['no_of_rooms', 'no_of_rooms'],
+    ['no_of_rooms_per_floor', 'no_of_rooms_per_floor'],
+    // Allow common aliases from mobile form state.
+    ['floors', 'no_of_floors'],
+    ['rooms', 'no_of_rooms'],
+    ['rooms_per_floor', 'no_of_rooms_per_floor'],
     ['company_manager', 'company_manager'],
     ['company_manager_id', 'company_manager_id'],
   ];
@@ -80,6 +153,13 @@ export function normalizePaginatedList<T extends Record<string, any>>(raw: any):
       raw.schedule_templates ??
       raw.templates ??
       raw.shifts ??
+      raw.rooms ??
+      raw.motel_rooms ??
+      raw.room_list ??
+      raw.room_set ??
+      raw.motel_room_set ??
+      raw.payload ??
+      raw.content ??
       raw.items ??
       raw.records ??
       (Array.isArray(raw.data) ? raw.data : undefined);
@@ -96,7 +176,14 @@ export function normalizePaginatedList<T extends Record<string, any>>(raw: any):
         raw.data.sessions ??
         raw.data.items ??
         raw.data.organizations ??
-        raw.data.schedule_templates;
+        raw.data.schedule_templates ??
+        raw.data.rooms ??
+        raw.data.motel_rooms ??
+        raw.data.room_list ??
+        raw.data.room_set ??
+        raw.data.motel_room_set ??
+        raw.data.payload ??
+        raw.data.content;
       if (Array.isArray(inner)) return inner.filter(Boolean).map((x) => attachId(x));
       if (raw.data.employee && typeof raw.data.employee === 'object' && !Array.isArray(raw.data.employee)) {
         return [attachId(raw.data.employee as T)];
@@ -104,6 +191,53 @@ export function normalizePaginatedList<T extends Record<string, any>>(raw: any):
     }
   }
   return [attachId(raw as T)];
+}
+
+/** True if object resembles a motel room row (not a DRF wrapper / user / company). */
+function looksLikeMotelRoomRow(o: unknown): boolean {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return false;
+  const r = o as Record<string, any>;
+  const keys = Object.keys(r);
+  const low = keys.map((k) => k.toLowerCase());
+  if (low.includes('count') && low.includes('results') && keys.length <= 8) return false;
+  if (low.includes('name') && low.includes('email') && keys.length <= 12 && !low.includes('room')) return false;
+  if (r.room_number != null || r.floor_number != null || r.floor != null) return true;
+  if (r.number != null && (r.floor != null || r.floor_id != null || r.floor_number != null || r.status != null))
+    return true;
+  if (r.id != null || r.pk != null || r.uuid != null || r.room_id != null) {
+    const blob = low.join(' ');
+    if (blob.includes('room') || blob.includes('floor') || blob.includes('status') || blob.includes('occup')) return true;
+  }
+  return false;
+}
+
+function deepCollectMotelRoomArrays(node: unknown, depth: number, out: MotelRoomRow[][]): void {
+  if (depth > 12 || node == null) return;
+  if (Array.isArray(node)) {
+    if (node.length > 0 && looksLikeMotelRoomRow(node[0])) {
+      out.push(node as MotelRoomRow[]);
+    } else {
+      for (const item of node) deepCollectMotelRoomArrays(item, depth + 1, out);
+    }
+    return;
+  }
+  if (typeof node === 'object') {
+    for (const v of Object.values(node as object)) deepCollectMotelRoomArrays(v, depth + 1, out);
+  }
+}
+
+/**
+ * Normalizes `/motel/rooms/` (and nested company/org) payloads: known list keys, then room-shaped arrays deep in JSON.
+ * Exported for Employee hotel screen when merging `getCompany` / `getOrganization` bodies.
+ */
+export function extractMotelRoomListFromResponse(raw: any): MotelRoomRow[] {
+  if (raw == null) return [];
+  let rows = normalizePaginatedList<MotelRoomRow>(raw).filter(looksLikeMotelRoomRow);
+  if (rows.length > 0) return rows.map((x) => attachId(x as any));
+  const buckets: MotelRoomRow[][] = [];
+  deepCollectMotelRoomArrays(raw, 0, buckets);
+  const pick = buckets.reduce((a, b) => (b.length > a.length ? b : a), [] as MotelRoomRow[]);
+  return pick.filter(Boolean).map((x) => attachId(x as any));
 }
 
 /** Row shapes for scheduler list endpoints (matches screen `Organization` / `Company` / `Employee` types). */
@@ -133,15 +267,29 @@ export function filterCompaniesForCompanyManagerRole<T extends Record<string, an
   role: string | null | undefined,
   userId: string | null | undefined
 ): T[] {
-  if (role !== 'manager' || userId == null || String(userId) === '') return companies;
+  if (role !== 'company_manager' || userId == null || String(userId) === '') return companies;
   const uid = String(userId);
   const matched = companies.filter((c) => resolveCompanyManagerUserId(c) === uid);
   return matched.length > 0 ? matched : companies;
 }
 
+/**
+ * Only rows whose `company_manager` FK matches — no fallback to the full list.
+ * Use for security-sensitive gates (e.g. motel-only Hotel screen).
+ */
+export function filterCompaniesStrictlyForCompanyManager<T extends Record<string, any>>(
+  companies: T[],
+  userId: string | null | undefined
+): T[] {
+  if (userId == null || String(userId) === '') return [];
+  const uid = String(userId);
+  return companies.filter((c) => resolveCompanyManagerUserId(c) === uid);
+}
+
 // —— Auth / users ——
+/** Same normalization as `apiClient.getCurrentUser` (roles on envelope + nested `user`). */
 export async function getCurrentUser() {
-  return apiClient.get<any>('/auth/user/');
+  return apiClient.getCurrentUser();
 }
 export async function getUsers(params?: Record<string, any>) {
   const raw = await apiClient.get<any>('/auth/users/', params);
@@ -853,7 +1001,7 @@ function schedulerEmployeeCompanyId(e: Record<string, any> | null | undefined): 
  * Company id(s) from `/auth/user/` — many backends nest `company_id` under `profile` only,
  * so top-level `user.company_id` is missing and employees could not be resolved.
  */
-function companyIdHintsFromAuthUser(u: any): string[] {
+export function companyIdHintsFromAuthUser(u: any): string[] {
   const seen = new Set<string>();
   const add = (raw: any) => {
     if (raw == null || raw === '') return;
@@ -893,6 +1041,51 @@ function companyIdHintsFromAuthUser(u: any): string[] {
   return [...seen];
 }
 
+/** Organization id(s) from `/auth/user/` — often nested under `profile` / `user_profile` only. */
+export function organizationIdHintsFromAuthUser(u: any): string[] {
+  const seen = new Set<string>();
+  const add = (raw: any) => {
+    if (raw == null || raw === '') return;
+    if (typeof raw === 'object' && !Array.isArray(raw)) {
+      const obj = raw as any;
+      const id = obj.id ?? obj.pk ?? obj.uuid ?? obj.organization_id ?? obj.organization;
+      const s = id != null ? String(id).trim() : '';
+      if (s && !s.toLowerCase().includes('object')) seen.add(s);
+      return;
+    }
+    const s = String(raw).trim();
+    if (s && !s.toLowerCase().includes('object')) seen.add(s);
+  };
+  if (!u || typeof u !== 'object') return [];
+  add(u.organization_id);
+  add(u.assigned_organization);
+  add((u as any).profile?.organization_id);
+  add((u as any).user_profile?.organization_id);
+  add(u.organization);
+  add((u as any).profile?.organization);
+  add((u as any).user_profile?.organization);
+  const mem = (u as any).memberships ?? (u as any).company_memberships;
+  if (Array.isArray(mem)) {
+    for (const m of mem) {
+      if (m && typeof m === 'object') {
+        add((m as any).organization_id);
+        add((m as any).organization);
+        const o = (m as any).organization;
+        if (o && typeof o === 'object') add((o as any).id);
+      }
+    }
+  }
+  return [...seen];
+}
+
+/** True when auth user has any organization or company id we can resolve (profile-nested ids included). */
+export function hasSchedulerOrgOrCompanyOnUser(u: any): boolean {
+  if (!u || typeof u !== 'object') return false;
+  return (
+    organizationIdHintsFromAuthUser(u).length > 0 || companyIdHintsFromAuthUser(u).length > 0
+  );
+}
+
 /** Company UUID for API filters — avoids `String(nestedCompany)` → "[object Object]". */
 export function companyIdFromSchedulerEmployee(emp: any, user?: any): string | undefined {
   const fromEmp = schedulerEmployeeCompanyId(emp);
@@ -930,6 +1123,14 @@ export function shiftOverlapsRange(s: any, rangeStart: Date, rangeEnd: Date): bo
   const lo = rangeStart.getTime();
   const hi = rangeEnd.getTime();
   return t >= lo - 60_000 && t <= hi + 60_000;
+}
+
+/** YYYY-MM-DD in the user's local timezone — matches schedule grid weeks; avoids UTC day shift from `toISOString()`. */
+export function localCalendarDateYmd(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 /**
@@ -2183,8 +2384,8 @@ export async function publishShiftsWeekWithFallbacks(params: {
 
   const rs = params.rangeStart.toISOString();
   const re = params.rangeEnd.toISOString();
-  const rsDate = rs.slice(0, 10);
-  const reDate = re.slice(0, 10);
+  const rsDate = localCalendarDateYmd(params.rangeStart);
+  const reDate = localCalendarDateYmd(params.rangeEnd);
 
   const clean = (obj: Record<string, any>) => {
     const out: Record<string, any> = {};
@@ -2218,15 +2419,21 @@ export async function publishShiftsWeekWithFallbacks(params: {
     }
   }
 
-  // Fallback: PATCH each shift into a "published" state.
+  // Fallback: PATCH each shift into a "published" / visible state.
   // Use multiple possible field names; verify by reloading one row.
   const publishBodies: Record<string, any>[] = [
     { status: 'Published' },
     { status: 'published' },
+    { status: 'Active' },
+    { status: 'active' },
     { is_published: true },
     { published: true },
+    { visible_to_employee: true },
+    { employee_visible: true },
+    { is_visible: true },
     { status: 'Published', is_published: true },
     { status: 'published', is_published: true },
+    { status: 'Active', is_published: true },
   ];
 
   let chosenBody: Record<string, any> | null = null;
@@ -2247,7 +2454,16 @@ export async function publishShiftsWeekWithFallbacks(params: {
     }
     const verify = await apiClient.get<any>(`/scheduler/shifts/${encodeURIComponent(ids[0])}/`).catch(() => null);
     const st = String(verify?.status ?? '').toLowerCase();
-    const pub = Boolean(verify?.is_published ?? verify?.published ?? st === 'published');
+    const pub =
+      Boolean(verify?.is_published) ||
+      Boolean(verify?.published) ||
+      Boolean(verify?.visible_to_employee) ||
+      Boolean(verify?.employee_visible) ||
+      Boolean(verify?.is_visible) ||
+      st === 'published' ||
+      st === 'active' ||
+      st === 'live' ||
+      st === 'confirmed';
     if (pub) {
       chosenBody = w;
       break;
@@ -2502,6 +2718,21 @@ export async function approveReplacementRequest(id: string) {
 }
 export async function rejectReplacementRequest(id: string, data?: { notes?: string }) {
   return apiClient.post<any>(`/scheduler/replacement-requests/${id}/reject/`, data || {});
+}
+
+// —— Scheduler: leave / time-off requests (optional backend) ——
+export async function getLeaveRequests(params?: Record<string, any>) {
+  const raw = await apiClient.get<any>('/scheduler/leave-requests/', params);
+  return normalizePaginatedList(raw);
+}
+
+export async function createLeaveRequest(data: Record<string, any>) {
+  return apiClient.post<any>('/scheduler/leave-requests/', data);
+}
+
+export async function approveLeaveRequest(id: string) {
+  const enc = encodeURIComponent(String(id));
+  return apiClient.post<any>(`/scheduler/leave-requests/${enc}/approve/`, {});
 }
 
 // —— Scheduler: schedule templates ——
@@ -3309,8 +3540,9 @@ async function fetchScheduleTemplateDetailFirst(
 
 /**
  * GET template detail — tries paths in {@link orderedScheduleTemplateDetailPaths} order (stops at first 200).
+ * Exported for clients that need full nested shifts when the list serializer omits them.
  */
-async function getScheduleTemplateDetail(
+export async function getScheduleTemplateDetail(
   id: string,
   companyId?: string | null,
   hintRow?: any
@@ -3417,6 +3649,52 @@ function shiftRowReferencesScheduleTemplate(shiftRow: any, templateId: string): 
     if (templateIdMatchesFkValue((shiftRow as any)[k], tid)) return true;
   }
   return false;
+}
+
+/**
+ * Shifts linked to a saved weekly schedule template (FK often lives on Shift, not on template list payload).
+ */
+export async function getShiftsForScheduleTemplate(companyId: string, templateId: string): Promise<any[]> {
+  const cid = String(companyId || '').trim();
+  const tid = String(templateId || '').trim();
+  if (!cid || !tid) return [];
+
+  const tries: Record<string, any>[] = [
+    { company: cid, schedule_template: tid, page_size: 1000 },
+    { company_id: cid, schedule_template: tid, page_size: 1000 },
+    { company: cid, schedule_template_id: tid, page_size: 1000 },
+    { company: cid, weekly_schedule_template: tid, page_size: 1000 },
+    { company: cid, weekly_schedule_template_id: tid, page_size: 1000 },
+    { company: cid, saved_schedule_template: tid, page_size: 1000 },
+    { company: cid, saved_schedule_template_id: tid, page_size: 1000 },
+    { company: cid, week_schedule_template: tid, page_size: 1000 },
+    { company: cid, week_schedule_template_id: tid, page_size: 1000 },
+    { schedule_template: tid, company: cid, page_size: 1000 },
+  ];
+
+  const queryMentionsTemplate = (q: Record<string, any>) =>
+    Object.keys(q).some(
+      (k) =>
+        k.includes('schedule_template') ||
+        k.includes('weekly_schedule_template') ||
+        k.includes('week_schedule_template') ||
+        k.includes('week_template') ||
+        k.includes('saved_schedule_template')
+    );
+
+  for (const q of tries) {
+    try {
+      const rows = await getShifts(q);
+      const list = Array.isArray(rows) ? rows : [];
+      if (list.length === 0) continue;
+      if (queryMentionsTemplate(q)) return list;
+      const filtered = list.filter((s: any) => shiftRowReferencesScheduleTemplate(s, tid));
+      if (filtered.length > 0) return filtered;
+    } catch {
+      /* next */
+    }
+  }
+  return [];
 }
 
 /** Writable FK shapes for PATCH `/scheduler/shifts/<id>/` — backend may store the link on Shift, not on template M2M. */
@@ -3618,10 +3896,8 @@ export async function createScheduleTemplateWithFallbacks(params: {
   const cid = String(params.companyId || '').trim();
   if (!cid) throw new Error('companyId is required');
 
-  const rsIso = params.rangeStart.toISOString();
-  const reIso = params.rangeEnd.toISOString();
-  const rsDate = rsIso.slice(0, 10);
-  const reDate = reIso.slice(0, 10);
+  const rsDate = localCalendarDateYmd(params.rangeStart);
+  const reDate = localCalendarDateYmd(params.rangeEnd);
   const oid = params.organizationId ? String(params.organizationId).trim() : '';
 
   const label = `Schedule ${rsDate} – ${reDate}`;
@@ -3670,7 +3946,7 @@ export async function createScheduleTemplateWithFallbacks(params: {
     return d.toISOString();
   };
 
-  const shiftsIn = params.shifts.filter((s) => {
+  let shiftsIn = params.shifts.filter((s) => {
     const eid = resolveEmployeeId(s);
     const st = resolveStartIso(s);
     const et = resolveEndIso(s);
@@ -3678,6 +3954,10 @@ export async function createScheduleTemplateWithFallbacks(params: {
   });
   if (shiftsIn.length === 0) {
     throw new Error('No shifts with a valid employee id and start/end times');
+  }
+  shiftsIn = shiftsIn.filter((s) => shiftOverlapsRange(s, params.rangeStart, params.rangeEnd));
+  if (shiftsIn.length === 0) {
+    throw new Error('No shifts fall within the selected week — only this week is saved on the template.');
   }
 
   /** Existing Shift rows from the week — backend often links templates via PK list, not nested JSON. */
@@ -3888,15 +4168,17 @@ export async function updateScheduleTemplateWithFallbacks(params: {
   if (!tid) throw new Error('templateId is required');
   if (!cid) throw new Error('companyId is required');
 
-  const rsIso = params.rangeStart.toISOString();
-  const reIso = params.rangeEnd.toISOString();
-  const rsDate = rsIso.slice(0, 10);
-  const reDate = reIso.slice(0, 10);
+  const rsDate = localCalendarDateYmd(params.rangeStart);
+  const reDate = localCalendarDateYmd(params.rangeEnd);
   const oid = params.organizationId ? String(params.organizationId).trim() : '';
   const label = `Schedule ${rsDate} – ${reDate}`;
 
-  const shiftsIn = Array.isArray(params.shifts) ? params.shifts : [];
+  let shiftsIn = Array.isArray(params.shifts) ? params.shifts : [];
   if (shiftsIn.length === 0) throw new Error('No shifts provided to update template');
+  shiftsIn = shiftsIn.filter((s) => shiftOverlapsRange(s, params.rangeStart, params.rangeEnd));
+  if (shiftsIn.length === 0) {
+    throw new Error('No shifts fall within the selected week — updates only apply to this week.');
+  }
 
   const shiftIdsFromApi = shiftsIn
     .map((s: any) => String(s?.id ?? s?.pk ?? s?.uuid ?? '').trim())
@@ -4331,4 +4613,209 @@ export async function updateHabitCompletion(id: string, data: any) {
 }
 export async function deleteHabitCompletion(id: string) {
   return apiClient.delete(`/habits/completions/${id}/`);
+}
+
+// —— Motel / hotel cleaning (employee motel orgs) ——
+export type MotelRoomRow = { id: string; name?: string; number?: string; room_number?: string; label?: string; [k: string]: any };
+
+export async function getMotelRooms(params?: Record<string, any>): Promise<MotelRoomRow[]> {
+  const pageSize = 200;
+  const base: Record<string, any> = { page_size: pageSize, limit: pageSize, ...(params ?? {}) };
+  const merged: MotelRoomRow[] = [];
+  const seen = new Set<string>();
+  const add = (batch: MotelRoomRow[]) => {
+    for (const r of batch) {
+      const id = String((r as any).id ?? '').trim();
+      if (id) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+      }
+      merged.push(r);
+    }
+  };
+
+  const raw1 = await apiClient.get<any>('/motel/rooms/', base);
+  let batch = extractMotelRoomListFromResponse(raw1);
+  add(batch);
+  if (batch.length >= pageSize) {
+    for (let page = 2; page <= 15; page++) {
+      try {
+        const rawN = await apiClient.get<any>('/motel/rooms/', { ...base, page });
+        const next = extractMotelRoomListFromResponse(rawN);
+        if (next.length === 0) break;
+        add(next);
+        if (next.length < pageSize) break;
+      } catch {
+        break;
+      }
+    }
+  }
+  return merged;
+}
+
+export async function startMotelCleaning(roomId: string): Promise<{ id?: string; session_id?: string; [k: string]: any }> {
+  const id = parseMotelRoomUuidString(roomId);
+  if (!id) {
+    throw new Error('This room has no valid id from the server. Pull to refresh the list, then try again.');
+  }
+  if (typeof __DEV__ !== 'undefined' && __DEV__) {
+    console.log('[motel/start-cleaning] Sending room_id:', id);
+  }
+  try {
+    return await apiClient.post<any>('/motel/start-cleaning/', { room_id: id });
+  } catch (e: unknown) {
+    if (typeof __DEV__ !== 'undefined' && __DEV__) {
+      const body = e instanceof HttpError ? e.body : undefined;
+      console.log('[motel/start-cleaning] ERROR:', body ?? (e instanceof Error ? e.message : e));
+    }
+    throw e;
+  }
+}
+
+export type MotelCleaningImageAsset = {
+  uri: string;
+  fileName?: string | null;
+  mimeType?: string | null;
+};
+
+/** Optional client-side cleaning timer metadata appended to multipart upload (backend may ignore unknown keys). */
+export type MotelCleaningUploadTimeMeta = {
+  start_time: string;
+  end_time: string;
+  total_time_seconds: number;
+};
+
+/**
+ * Multipart POST — Django expects `session_id` / `sessionId` plus file part(s) named `images`.
+ * On web, `{ uri, name, type }` is not a real file upload; we send Blob so `request.FILES` is populated.
+ */
+export async function uploadMotelCleaningImages(
+  sessionId: string,
+  assets: MotelCleaningImageAsset[],
+  timeMeta?: MotelCleaningUploadTimeMeta
+): Promise<Record<string, unknown>> {
+  const sid = parseMotelRoomUuidString(sessionId);
+  if (!sid) throw new Error('Session id is required to upload cleaning images');
+  if (!assets?.length) throw new Error('At least one image is required');
+
+  const formData = new FormData();
+  formData.append('session_id', sid);
+  if (timeMeta) {
+    formData.append('start_time', timeMeta.start_time);
+    formData.append('end_time', timeMeta.end_time);
+    formData.append('total_time_seconds', String(timeMeta.total_time_seconds));
+  }
+
+  let appended = 0;
+  for (let i = 0; i < assets.length; i++) {
+    const img = assets[i];
+    const uri = String(img?.uri ?? '').trim();
+    if (!uri) continue;
+    const name = img.fileName || `cleaning_${i}.jpg`;
+    const mime = img.mimeType || 'image/jpeg';
+    if (Platform.OS === 'web') {
+      const res = await fetch(uri);
+      const blob = await res.blob();
+      const body =
+        blob.type && blob.type !== 'application/octet-stream' ? blob : new Blob([blob], { type: mime });
+      formData.append('images', body as any, name);
+    } else {
+      formData.append('images', { uri, name, type: mime } as any);
+    }
+    appended += 1;
+  }
+  if (appended === 0) throw new Error('No valid image URIs to upload');
+
+  return apiClient.postFormData<Record<string, unknown>>('/motel/upload-cleaning-images/', formData);
+}
+
+export async function completeMotelCleaning(sessionId: string): Promise<Record<string, unknown>> {
+  const id = parseMotelRoomUuidString(sessionId);
+  if (!id) throw new Error('Session is required');
+  if (typeof __DEV__ !== 'undefined' && __DEV__) {
+    console.log('[motel/complete-cleaning-session] Sending session_id / id:', id);
+  }
+  try {
+    /** `complete-cleaning/` is RoomCleaningTask (requires taskId); session timer flow uses `complete-cleaning-session/`. */
+    return await apiClient.post<Record<string, unknown>>('/motel/complete-cleaning-session/', {
+      session_id: id,
+      id,
+    });
+  } catch (e: unknown) {
+    if (typeof __DEV__ !== 'undefined' && __DEV__) {
+      const body = e instanceof HttpError ? e.body : undefined;
+      console.log('[motel/complete-cleaning-session] ERROR:', body ?? (e instanceof Error ? e.message : e));
+    }
+    throw e;
+  }
+}
+
+/** Manager workflow: book an available motel room (`POST /motel/book-room/`). */
+export async function bookMotelRoom(roomId: string, customerName: string): Promise<Record<string, unknown>> {
+  const id = parseMotelRoomUuidString(roomId);
+  if (!id) throw new Error('Room is required');
+  const name = String(customerName ?? '').trim();
+  if (!name) throw new Error('Guest name is required');
+  return apiClient.post<Record<string, unknown>>('/motel/book-room/', {
+    room_id: id,
+    customer_name: name,
+  });
+}
+
+/** Manager workflow: change display room number (`POST /motel/update-room/`). */
+export async function updateMotelRoomNumber(roomId: string, newRoomNumber: string): Promise<Record<string, unknown>> {
+  const id = parseMotelRoomUuidString(roomId);
+  if (!id) throw new Error('Room is required');
+  const num = String(newRoomNumber ?? '').trim();
+  if (!num) throw new Error('New room number is required');
+  return apiClient.post<Record<string, unknown>>('/motel/update-room/', {
+    room_id: id,
+    room_number: num,
+  });
+}
+
+/** Manager workflow: checkout guest / vacate (`POST /motel/vacate-room/`). Backend defaults assignee to current user. */
+export async function vacateMotelRoom(roomId: string): Promise<Record<string, unknown>> {
+  const id = parseMotelRoomUuidString(roomId);
+  if (!id) throw new Error('Room is required');
+  return apiClient.post<Record<string, unknown>>('/motel/vacate-room/', { room_id: id });
+}
+
+export type MotelRoomDerivedStatus = 'occupied' | 'vacated' | 'cleaning_completed' | 'approved';
+
+export async function getMotelRoomStatus(roomId: string): Promise<{
+  room_id: string;
+  status: MotelRoomDerivedStatus;
+  latest_session_id: string | null;
+  images_exist: boolean;
+}> {
+  const id = parseMotelRoomUuidString(roomId);
+  if (!id) throw new Error('Room is required');
+  return apiClient.get<any>(`/motel/room-status/${id}/`);
+}
+
+export async function getMotelRoomCleaningDetails(roomId: string): Promise<{
+  room_id: string;
+  status: MotelRoomDerivedStatus;
+  session_id: string | null;
+  start_time?: string | null;
+  end_time?: string | null;
+  approved?: boolean;
+  images: string[];
+}> {
+  const id = parseMotelRoomUuidString(roomId);
+  if (!id) throw new Error('Room is required');
+  return apiClient.get<any>(`/motel/room-cleaning-details/${id}/`);
+}
+
+export async function approveMotelCleaning(sessionId: string): Promise<Record<string, unknown>> {
+  const id = parseMotelRoomUuidString(sessionId);
+  if (!id) throw new Error('Session is required');
+  return apiClient.post<Record<string, unknown>>('/motel/approve-cleaning/', { session_id: id });
+}
+
+export async function markMotelRoomAvailable(roomId: string): Promise<Record<string, unknown>> {
+  const id = parseMotelRoomUuidString(roomId);
+  if (!id) throw new Error('Room is required');
+  return apiClient.post<Record<string, unknown>>('/motel/mark-room-available/', { room_id: id });
 }

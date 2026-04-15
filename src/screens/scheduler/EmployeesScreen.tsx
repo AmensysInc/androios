@@ -20,6 +20,13 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 const KeyedView = View as React.ComponentType<React.ComponentProps<typeof View> & { key?: React.Key }>;
 import { useAuth } from '../../context/AuthContext';
 import * as api from '../../api';
+import {
+  buildDepartmentFilterOptions,
+  employeeMatchesDepartmentFilter,
+  departmentPrimaryId,
+  departmentNameFromCatalog,
+  isLikelyUuid,
+} from '../../lib/departmentEmployeeMatch';
 
 type Company = { id: string; name: string; company_manager_id?: string; [k: string]: any };
 type Employee = {
@@ -63,16 +70,30 @@ function employeeSubtitle(e: Employee): string {
   return '—';
 }
 
-function departmentLabel(e: Employee): string {
+function departmentLabel(e: Employee, deptCatalog: any[]): string {
   const d = e.department;
-  if (d && typeof d === 'object' && d.name) return String(d.name);
-  if (typeof d === 'string' && d) return d;
-  const name = (e as any).department_name;
-  if (name) return String(name);
+  if (d && typeof d === 'object' && (d as any).name) return String((d as any).name);
+  const primary = departmentPrimaryId(e);
+  if (primary) {
+    const hit = departmentNameFromCatalog(deptCatalog, primary);
+    if (hit) return hit;
+  }
+  const dn = (e as any).department_name;
+  if (dn != null && String(dn).trim() !== '') {
+    const s = String(dn).trim();
+    const hit = departmentNameFromCatalog(deptCatalog, s);
+    if (hit) return hit;
+    if (!isLikelyUuid(s)) return s;
+  }
+  if (typeof d === 'string' && d.trim()) {
+    const hit = departmentNameFromCatalog(deptCatalog, d);
+    if (hit) return hit;
+    if (!isLikelyUuid(d)) return d;
+  }
   return 'No Department';
 }
 
-function departmentKey(e: Employee): string {
+function departmentKey(e: Employee, deptCatalog: any[]): string {
   let id: string | number | undefined = e.department_id;
   if ((id == null || id === '') && typeof e.department === 'object' && e.department?.id != null) {
     id = e.department.id;
@@ -80,8 +101,8 @@ function departmentKey(e: Employee): string {
   if (id != null && id !== '') return String(id);
   const dn = (e as any).department_name;
   if (dn) return `name:${String(dn)}`;
-  if (departmentLabel(e) === 'No Department') return '__none__';
-  return `name:${departmentLabel(e)}`;
+  if (departmentLabel(e, deptCatalog) === 'No Department') return '__none__';
+  return `name:${departmentLabel(e, deptCatalog)}`;
 }
 
 function positionLabel(e: Employee): string {
@@ -149,7 +170,6 @@ const COL = {
   employee: 200,
   contact: 210,
   department: 128,
-  position: 120,
   rate: 96,
   status: 92,
   actions: 52,
@@ -188,7 +208,7 @@ export default function EmployeesScreen() {
   });
   const [saving, setSaving] = useState(false);
 
-  const isManager = role === 'manager';
+  const isManager = role === 'company_manager';
   const scopedCompanies = api.filterCompaniesForCompanyManagerRole(companies, role, user?.id);
   const managerCompanyId = isManager
     ? scopedCompanies[0]?.id ?? companies[0]?.id
@@ -223,24 +243,12 @@ export default function EmployeesScreen() {
   }, [effectiveCompanyId]);
 
   const departmentOptions = useMemo(() => {
-    const opts: { id: string; label: string }[] = [{ id: 'all', label: 'All Departments' }];
-    const seen = new Set<string>();
-    for (const d of departments) {
-      const id = d.id != null ? String(d.id) : '';
-      const name = d.name != null ? String(d.name) : id;
-      if (id && !seen.has(id)) {
-        seen.add(id);
-        opts.push({ id, label: name || id });
-      }
+    const base = buildDepartmentFilterOptions(departments, employees, 'All Departments');
+    const hasNone = employees.some((e) => departmentKey(e, departments) === '__none__');
+    if (hasNone && !base.some((o) => o.id === '__none__')) {
+      return [...base, { id: '__none__', label: 'No Department' }];
     }
-    for (const e of employees) {
-      const key = departmentKey(e);
-      if (key === '__none__' && !seen.has('__none__')) {
-        seen.add('__none__');
-        opts.push({ id: '__none__', label: 'No Department' });
-      }
-    }
-    return opts;
+    return base;
   }, [departments, employees]);
 
   const scopeLabel = useMemo(() => {
@@ -253,16 +261,17 @@ export default function EmployeesScreen() {
     const q = search.toLowerCase().trim();
     return employees.filter((e) => {
       if (departmentFilter !== 'all') {
-        const key = departmentKey(e);
         if (departmentFilter === '__none__') {
-          if (key !== '__none__') return false;
-        } else if (key !== departmentFilter) return false;
+          if (departmentKey(e, departments) !== '__none__') return false;
+        } else if (!employeeMatchesDepartmentFilter(e, departmentFilter, departments)) {
+          return false;
+        }
       }
       if (!q) return true;
       const name = employeeDisplayName(e).toLowerCase();
       const email = (e.email || '').toLowerCase();
       const sub = employeeSubtitle(e).toLowerCase();
-      const dept = departmentLabel(e).toLowerCase();
+      const dept = departmentLabel(e, departments).toLowerCase();
       const pos = positionLabel(e).toLowerCase();
       return (
         name.includes(q) ||
@@ -272,12 +281,14 @@ export default function EmployeesScreen() {
         pos.includes(q)
       );
     });
-  }, [employees, search, departmentFilter]);
+  }, [employees, search, departmentFilter, departments]);
 
   const kpis = useMemo(() => {
     const total = employees.length;
     const active = employees.filter(isActiveEmployee).length;
-    const deptKeys = new Set(employees.map((e) => departmentKey(e)).filter((k) => k !== '__none__'));
+    const deptKeys = new Set(
+      employees.map((e) => departmentKey(e, departments)).filter((k) => k !== '__none__')
+    );
     const deptCount = deptKeys.size;
     const rates = employees
       .map((e) => {
@@ -290,7 +301,7 @@ export default function EmployeesScreen() {
     const avg =
       rates.length > 0 ? (rates.reduce((a, b) => a + b, 0) / rates.length).toFixed(2) : null;
     return { total, active, deptCount, avg };
-  }, [employees]);
+  }, [employees, departments]);
 
   const scopeOptions = useMemo(() => {
     const base = [{ id: 'all', label: 'All Employees' }];
@@ -401,7 +412,7 @@ export default function EmployeesScreen() {
   };
 
   const tableMinWidth =
-    COL.employee + COL.contact + COL.department + COL.position + COL.rate + COL.status + COL.actions;
+    COL.employee + COL.contact + COL.department + COL.rate + COL.status + COL.actions;
 
   if (loading) {
     return (
@@ -484,9 +495,6 @@ export default function EmployeesScreen() {
                 <View style={[styles.th, { width: COL.department }]}>
                   <Text style={styles.thText}>Department</Text>
                 </View>
-                <View style={[styles.th, { width: COL.position }]}>
-                  <Text style={styles.thText}>Position</Text>
-                </View>
                 <View style={[styles.th, { width: COL.rate }]}>
                   <Text style={styles.thText}>Hourly Rate</Text>
                 </View>
@@ -530,12 +538,7 @@ export default function EmployeesScreen() {
                     </View>
                     <View style={[styles.td, { width: COL.department }]}>
                       <Text style={styles.tdText} numberOfLines={2}>
-                        {departmentLabel(item)}
-                      </Text>
-                    </View>
-                    <View style={[styles.td, { width: COL.position }]}>
-                      <Text style={styles.tdText} numberOfLines={2}>
-                        {positionLabel(item)}
+                        {departmentLabel(item, departments)}
                       </Text>
                     </View>
                     <View style={[styles.td, { width: COL.rate }]}>

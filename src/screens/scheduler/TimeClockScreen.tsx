@@ -18,6 +18,21 @@ import {
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
 import * as api from '../../api';
+import {
+  employeeDepartmentDisplay,
+  departmentPrimaryId as departmentKey,
+  normalizeDeptIdsEqual,
+  employeeMatchesDepartmentFilter,
+  buildDepartmentFilterOptions,
+} from '../../lib/departmentEmployeeMatch';
+import { LeaveRequestsSection, SwapRequestsSection } from './TimeClockPendingSections';
+import {
+  getPendingLocalLeaveRequests,
+  getPendingLocalSwapRequests,
+  removePendingLocalLeaveRequest,
+  removePendingLocalSwapRequest,
+  isLocalPendingId,
+} from '../../lib/schedulerPendingRequestsLocal';
 
 const GREEN = '#22c55e';
 const ORANGE = '#f59e0b';
@@ -487,11 +502,37 @@ function requestCompanyLabel(req: any, companyList: any[]): string {
   return '—';
 }
 
-function departmentKey(emp: any): string {
-  const d = emp?.department;
-  if (d && typeof d === 'object' && d.id != null) return String(d.id);
-  if (emp?.department_id != null) return String(emp.department_id);
-  return '';
+function isPendingApprovalStatus(raw: any): boolean {
+  const s = String(raw ?? '')
+    .trim()
+    .toLowerCase();
+  return !s || s === 'pending' || s === 'requested' || s === 'open' || s === 'waiting_approval';
+}
+
+function leaveRowEmployeeId(l: any): string {
+  const e = l?.employee;
+  if (e && typeof e === 'object') return String(e.id ?? e.pk ?? '').trim();
+  return String(l?.employee_id ?? '').trim();
+}
+
+function swapRequestCompanyId(r: any): string {
+  return String(
+    r?.company_id ??
+      r?.company ??
+      r?.shift?.company_id ??
+      r?.shift?.company ??
+      r?.original_shift?.company_id ??
+      r?.original_shift?.company ??
+      ''
+  );
+}
+
+function swapRowEmployeeId(r: any): string {
+  const reqEmp = r?.requesting_employee;
+  if (reqEmp && typeof reqEmp === 'object') return String(reqEmp.id ?? '').trim();
+  const emp = r?.employee;
+  if (emp && typeof emp === 'object') return String(emp.id ?? '').trim();
+  return String(r?.employee_id ?? r?.requesting_employee_id ?? '').trim();
 }
 
 function PickerModal({
@@ -568,25 +609,24 @@ export default function TimeClockScreen() {
   const [entries, setEntries] = useState<any[]>([]);
   const [reportEntries, setReportEntries] = useState<any[]>([]);
   const [requests, setRequests] = useState<any[]>([]);
+  const [leaveRequests, setLeaveRequests] = useState<any[]>([]);
+  const [swapRequests, setSwapRequests] = useState<any[]>([]);
   const [overviewTasks, setOverviewTasks] = useState<any[]>([]);
 
   const [hoursReportPeriod, setHoursReportPeriod] = useState<'today' | 'week' | 'month'>('week');
-  const [hoursDeptFilter, setHoursDeptFilter] = useState<string>('all');
   const [hoursEmpFilter, setHoursEmpFilter] = useState<string>('all');
   const [tasksEmpFilter, setTasksEmpFilter] = useState<string>('all');
 
   const [hoursReportPeriodPicker, setHoursReportPeriodPicker] = useState(false);
-  const [hoursDeptPicker, setHoursDeptPicker] = useState(false);
   const [hoursEmpPicker, setHoursEmpPicker] = useState(false);
   const [tasksEmpPicker, setTasksEmpPicker] = useState(false);
 
   const [selectedCompanyId, setSelectedCompanyId] = useState<string>('all');
-  const [selectedLocationId, setSelectedLocationId] = useState<string>('all');
+  const [selectedDepartmentId, setSelectedDepartmentId] = useState<string>('all');
   const [period, setPeriod] = useState<'today' | 'week' | 'month'>('today');
   const [tab, setTab] = useState<TabKey>('clock');
 
   const [companyPicker, setCompanyPicker] = useState(false);
-  const [locationPicker, setLocationPicker] = useState(false);
   const [periodPicker, setPeriodPicker] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
 
@@ -599,8 +639,8 @@ export default function TimeClockScreen() {
   const [editDatePickerTarget, setEditDatePickerTarget] = useState<'clockIn' | 'clockOut' | null>(null);
   const [editDatePickerSeedMs, setEditDatePickerSeedMs] = useState(() => Date.now());
 
-  const isManager = role === 'manager';
-  const canSeeAllTasks = ['super_admin', 'admin', 'operations_manager', 'manager'].includes(role || '');
+  const isManager = role === 'company_manager';
+  const canSeeAllTasks = ['super_admin', 'organization_manager', 'company_manager'].includes(role || '');
   const scopedCompanies = api.filterCompaniesForCompanyManagerRole(companies, role, user?.id);
   const managerCompanyId = isManager
     ? scopedCompanies[0]?.id ?? companies[0]?.id
@@ -712,6 +752,52 @@ export default function TimeClockScreen() {
 
       const reqRaw = await api.getUnscheduledClockRequests().catch(() => []);
       setRequests(Array.isArray(reqRaw) ? reqRaw : []);
+
+      let leaveRaw = await api.getLeaveRequests().catch(() => []);
+      if (!Array.isArray(leaveRaw)) leaveRaw = [];
+      leaveRaw = leaveRaw.filter((l) => isPendingApprovalStatus(l.status ?? l.state));
+      if (companyForData) {
+        leaveRaw = leaveRaw.filter((l) => {
+          const cid = String(
+            l.company_id ?? (typeof l.company === 'object' && l.company?.id != null ? l.company.id : l.company) ?? ''
+          );
+          if (cid && cid === String(companyForData)) return true;
+          const eid = leaveRowEmployeeId(l);
+          return !eid || empIds.has(eid);
+        });
+      }
+      const localLeaves = await getPendingLocalLeaveRequests();
+      const extraLeaves = localLeaves.filter((l) => {
+        if (!isPendingApprovalStatus(l.status ?? l.state)) return false;
+        if (!companyForData) return true;
+        const cid = String(l.company_id ?? '');
+        if (cid && cid === String(companyForData)) return true;
+        const eid = leaveRowEmployeeId(l);
+        return !eid || empIds.has(eid);
+      });
+      setLeaveRequests([...extraLeaves, ...leaveRaw]);
+
+      let rrRaw = await api.getReplacementRequests().catch(() => []);
+      if (!Array.isArray(rrRaw)) rrRaw = [];
+      rrRaw = rrRaw.filter((r) => isPendingApprovalStatus(r.status ?? r.state));
+      if (companyForData) {
+        rrRaw = rrRaw.filter((r) => {
+          const cid = swapRequestCompanyId(r);
+          if (cid && cid === String(companyForData)) return true;
+          const eid = swapRowEmployeeId(r);
+          return !eid || empIds.has(eid);
+        });
+      }
+      const localSwaps = await getPendingLocalSwapRequests();
+      const extraSwaps = localSwaps.filter((r) => {
+        if (!isPendingApprovalStatus(r.status ?? r.state)) return false;
+        if (!companyForData) return true;
+        const cid = String(r.company_id ?? swapRequestCompanyId(r) ?? '');
+        if (cid && cid === String(companyForData)) return true;
+        const eid = swapRowEmployeeId(r);
+        return !eid || empIds.has(eid);
+      });
+      setSwapRequests([...extraSwaps, ...rrRaw]);
     } catch (e) {
       console.warn(e);
     } finally {
@@ -731,27 +817,24 @@ export default function TimeClockScreen() {
   }, [isManager, managerCompanyId, selectedCompanyId]);
 
   useEffect(() => {
-    setSelectedLocationId('all');
+    setSelectedDepartmentId('all');
   }, [effectiveCompanyId]);
 
-  const locationOptions: PickerOption[] = useMemo(() => {
-    const opts: PickerOption[] = [{ id: 'all', label: 'All Locations' }];
-    const seen = new Set<string>();
-    for (const d of departments) {
-      const id = d.id != null ? String(d.id) : '';
-      const name = d.name || id;
-      if (id && !seen.has(id)) {
-        seen.add(id);
-        opts.push({ id, label: name });
-      }
-    }
-    return opts;
-  }, [departments]);
+  const departmentFilterOptions: PickerOption[] = useMemo(
+    () => buildDepartmentFilterOptions(departments, employees, 'All'),
+    [departments, employees]
+  );
 
   const scopedEmployees = useMemo(() => {
-    if (selectedLocationId === 'all') return employees;
-    return employees.filter((e) => departmentKey(e) === selectedLocationId);
-  }, [employees, selectedLocationId]);
+    if (selectedDepartmentId === 'all') return employees;
+    return employees.filter((e) => employeeMatchesDepartmentFilter(e, selectedDepartmentId, departments));
+  }, [employees, selectedDepartmentId, departments]);
+
+  useEffect(() => {
+    if (hoursEmpFilter === 'all') return;
+    const ok = scopedEmployees.some((e) => String(e.id) === hoursEmpFilter);
+    if (!ok) setHoursEmpFilter('all');
+  }, [scopedEmployees, hoursEmpFilter]);
 
   const employeeById = useMemo(() => {
     const m = new Map<string, any>();
@@ -769,17 +852,11 @@ export default function TimeClockScreen() {
 
   const hoursReportFiltered = useMemo(() => {
     let list = reportEntriesScoped;
-    if (hoursDeptFilter !== 'all') {
-      const empIds = new Set(
-        scopedEmployees.filter((e) => departmentKey(e) === hoursDeptFilter).map((e) => String(e.id))
-      );
-      list = list.filter((en) => empIds.has(entryEmployeeId(en)));
-    }
     if (hoursEmpFilter !== 'all') {
       list = list.filter((en) => entryEmployeeId(en) === hoursEmpFilter);
     }
     return list;
-  }, [reportEntriesScoped, scopedEmployees, hoursDeptFilter, hoursEmpFilter]);
+  }, [reportEntriesScoped, hoursEmpFilter]);
 
   const hoursReportStats = useMemo(() => {
     const empIds = new Set<string>();
@@ -821,15 +898,6 @@ export default function TimeClockScreen() {
     }).length;
     return { total, pending, completed, overdue };
   }, [tasksScoped]);
-
-  const hoursDeptOptions: PickerOption[] = useMemo(() => {
-    const opts: PickerOption[] = [{ id: 'all', label: 'All Departments' }];
-    for (const d of departments) {
-      const id = d.id != null ? String(d.id) : '';
-      if (id) opts.push({ id, label: d.name || id });
-    }
-    return opts;
-  }, [departments]);
 
   const hoursEmpOptions: PickerOption[] = useMemo(() => {
     const opts: PickerOption[] = [{ id: 'all', label: 'All Employees' }];
@@ -902,7 +970,6 @@ export default function TimeClockScreen() {
         : 'All companies'
       : companies.find((c) => String(c.id) === selectedCompanyId)?.name || 'Company';
 
-  const locationLabel = locationOptions.find((o) => o.id === selectedLocationId)?.label ?? 'All Locations';
   const periodLabel = period === 'today' ? 'Today' : period === 'week' ? 'This Week' : 'This Month';
 
   const companyOptions: PickerOption[] = useMemo(() => {
@@ -1095,6 +1162,48 @@ export default function TimeClockScreen() {
     }
   };
 
+  const handleApproveLeave = async (row: any) => {
+    const id = String(row?.id ?? row?.pk ?? '').trim();
+    if (!id) return;
+    setActionLoading(true);
+    try {
+      if (isLocalPendingId(id)) {
+        await removePendingLocalLeaveRequest(id);
+        await load();
+        Alert.alert('Approved', 'Leave request cleared from pending list.');
+        return;
+      }
+      await api.approveLeaveRequest(id);
+      await load();
+      Alert.alert('Approved', 'Leave request approved.');
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Approve failed');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleApproveSwap = async (row: any) => {
+    const id = String(row?.id ?? '').trim();
+    if (!id) return;
+    setActionLoading(true);
+    try {
+      if (isLocalPendingId(id)) {
+        await removePendingLocalSwapRequest(id);
+        await load();
+        Alert.alert('Approved', 'Swap request cleared from pending list.');
+        return;
+      }
+      await api.approveReplacementRequest(id);
+      await load();
+      Alert.alert('Approved', 'Swap request approved.');
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Approve failed');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const hoursReportPeriodLabel =
     hoursReportPeriod === 'today' ? 'Today' : hoursReportPeriod === 'week' ? 'This Week' : 'This Month';
 
@@ -1170,18 +1279,44 @@ export default function TimeClockScreen() {
             </Text>
             <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.filterChip} onPress={() => setLocationPicker(true)}>
-            <Text style={styles.filterChipText} numberOfLines={1}>
-              {locationLabel}
-            </Text>
-            <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
-          </TouchableOpacity>
           <TouchableOpacity style={styles.filterChip} onPress={() => setPeriodPicker(true)}>
             <Text style={styles.filterChipText} numberOfLines={1}>
               {periodLabel}
             </Text>
             <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
           </TouchableOpacity>
+        </View>
+
+        <View style={styles.deptFilterBlock}>
+          <Text style={styles.deptFilterTitle}>Department</Text>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.deptRadioRow}
+            nestedScrollEnabled
+          >
+            {departmentFilterOptions.map((opt) => {
+              const selected =
+                opt.id === 'all'
+                  ? selectedDepartmentId === 'all'
+                  : normalizeDeptIdsEqual(opt.id, selectedDepartmentId);
+              return (
+                <TouchableOpacity
+                  key={opt.id}
+                  style={[styles.deptRadioChip, selected && styles.deptRadioChipOn]}
+                  onPress={() => setSelectedDepartmentId(opt.id)}
+                  activeOpacity={0.85}
+                >
+                  <View style={[styles.deptRadioRing, selected && styles.deptRadioRingOn]}>
+                    {selected ? <View style={styles.deptRadioDot} /> : null}
+                  </View>
+                  <Text style={[styles.deptRadioText, selected && styles.deptRadioTextOn]} numberOfLines={1}>
+                    {opt.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
         </View>
 
         <View style={styles.tabs}>
@@ -1194,7 +1329,7 @@ export default function TimeClockScreen() {
                 key: 'requests' as const,
                 label: 'Clock-in Requests',
                 icon: 'account-clock-outline' as const,
-                badge: requests.length,
+                badge: requests.length + leaveRequests.length + swapRequests.length,
               },
             ] as const
           ).map((t) => (
@@ -1370,12 +1505,6 @@ export default function TimeClockScreen() {
                 </Text>
                 <MaterialCommunityIcons name="chevron-down" size={18} color="#64748b" />
               </TouchableOpacity>
-              <TouchableOpacity style={styles.hoursFilterChip} onPress={() => setHoursDeptPicker(true)}>
-                <Text style={styles.hoursFilterText} numberOfLines={1}>
-                  {hoursDeptOptions.find((o) => o.id === hoursDeptFilter)?.label ?? 'All Departments'}
-                </Text>
-                <MaterialCommunityIcons name="chevron-down" size={18} color="#64748b" />
-              </TouchableOpacity>
               <TouchableOpacity style={styles.hoursFilterChip} onPress={() => setHoursEmpPicker(true)}>
                 <Text style={styles.hoursFilterText} numberOfLines={1}>
                   {hoursEmpOptions.find((o) => o.id === hoursEmpFilter)?.label ?? 'All Employees'}
@@ -1526,64 +1655,83 @@ export default function TimeClockScreen() {
         ) : null}
 
         {tab === 'requests' ? (
-          <View style={styles.hoursMainCard}>
-            <View style={styles.requestsTitleRow}>
-              <MaterialCommunityIcons name="account-clock-outline" size={22} color="#0f172a" />
-              <Text style={styles.hoursCardTitle}>Clock-in Requests</Text>
-            </View>
-            <Text style={styles.requestsHelp}>
-              Employees who clocked in without a scheduled shift. Approve to add the shift to their schedule (shows in
-              reports).
-            </Text>
-            {requests.length === 0 ? (
-              <View style={styles.hoursEmpty}>
-                <MaterialCommunityIcons name="check-circle-outline" size={48} color="#cbd5e1" />
-                <Text style={styles.hoursEmptyText}>No pending requests.</Text>
+          <>
+            <View style={styles.hoursMainCard}>
+              <View style={styles.requestsTitleRow}>
+                <MaterialCommunityIcons name="account-clock-outline" size={22} color="#0f172a" />
+                <Text style={styles.hoursCardTitle}>Clock-in Requests</Text>
               </View>
-            ) : (
-              <ScrollView horizontal showsHorizontalScrollIndicator nestedScrollEnabled>
-                <View style={styles.reqTable}>
-                  <View style={styles.reqTrHead}>
-                    {['Employee', 'Company', 'Clock In', 'Clock Out', 'Hours', 'Action'].map((h) => (
-                      <Text key={h} style={h === 'Action' ? styles.reqThAction : styles.reqTh}>
-                        {h}
-                      </Text>
-                    ))}
-                  </View>
-                  {requests.map((req, ri) => {
-                    const eid = entryEmployeeId(req);
-                    const emp =
-                      (eid ? employeeById.get(eid) : null) ||
-                      (typeof req.employee === 'object' && req.employee ? req.employee : {}) ||
-                      {};
-                    const hrs = durationHours(req);
-                    return (
-                      <View key={entryId(req) || `req-${ri}`} style={styles.reqTr}>
-                        <Text style={styles.reqTd}>{employeeDisplayName(emp)}</Text>
-                        <Text style={styles.reqTd}>{requestCompanyLabel(req, companies)}</Text>
-                        <Text style={styles.reqTd}>
-                          {formatDateShort(req.clock_in)} {formatHm(req.clock_in)}
-                        </Text>
-                        <Text style={styles.reqTd}>
-                          {req.clock_out ? `${formatDateShort(req.clock_out)} ${formatHm(req.clock_out)}` : '—'}
-                        </Text>
-                        <Text style={styles.reqTd}>{hrs.toFixed(2)}</Text>
-                        <View style={styles.reqTdAction}>
-                          <TouchableOpacity
-                            style={styles.approveBtnPrimary}
-                            onPress={() => void handleApproveRequest(req)}
-                            disabled={actionLoading}
-                          >
-                            <Text style={styles.approveBtnPrimaryText}>Approve</Text>
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                    );
-                  })}
+              <Text style={styles.requestsHelp}>
+                Employees who clocked in without a scheduled shift. Approve to add the shift to their schedule (shows in
+                reports).
+              </Text>
+              {requests.length === 0 ? (
+                <View style={styles.hoursEmpty}>
+                  <MaterialCommunityIcons name="check-circle-outline" size={48} color="#cbd5e1" />
+                  <Text style={styles.hoursEmptyText}>No pending clock-in requests.</Text>
                 </View>
-              </ScrollView>
-            )}
-          </View>
+              ) : (
+                <ScrollView horizontal showsHorizontalScrollIndicator nestedScrollEnabled>
+                  <View style={styles.reqTable}>
+                    <View style={styles.reqTrHead}>
+                      {['Employee', 'Department', 'Clock In', 'Clock Out', 'Hours', 'Action'].map((h) => (
+                        <Text key={h} style={h === 'Action' ? styles.reqThAction : styles.reqTh}>
+                          {h}
+                        </Text>
+                      ))}
+                    </View>
+                    {requests.map((req, ri) => {
+                      const eid = entryEmployeeId(req);
+                      const emp =
+                        (eid ? employeeById.get(eid) : null) ||
+                        (typeof req.employee === 'object' && req.employee ? req.employee : {}) ||
+                        {};
+                      const hrs = durationHours(req);
+                      const depDisp = employeeDepartmentDisplay(emp);
+                      return (
+                        <View key={entryId(req) || `req-${ri}`} style={styles.reqTr}>
+                          <Text style={styles.reqTd}>{employeeDisplayName(emp)}</Text>
+                          <Text style={styles.reqTd}>
+                            {depDisp !== '—' ? depDisp : requestCompanyLabel(req, companies)}
+                          </Text>
+                          <Text style={styles.reqTd}>
+                            {formatDateShort(req.clock_in)} {formatHm(req.clock_in)}
+                          </Text>
+                          <Text style={styles.reqTd}>
+                            {req.clock_out ? `${formatDateShort(req.clock_out)} ${formatHm(req.clock_out)}` : '—'}
+                          </Text>
+                          <Text style={styles.reqTd}>{hrs.toFixed(2)}</Text>
+                          <View style={styles.reqTdAction}>
+                            <TouchableOpacity
+                              style={styles.approveBtnPrimary}
+                              onPress={() => void handleApproveRequest(req)}
+                              disabled={actionLoading}
+                            >
+                              <Text style={styles.approveBtnPrimaryText}>Approve</Text>
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </View>
+                </ScrollView>
+              )}
+            </View>
+            <LeaveRequestsSection
+              items={leaveRequests}
+              employeeById={employeeById}
+              companies={companies}
+              actionLoading={actionLoading}
+              onApprove={(row) => void handleApproveLeave(row)}
+            />
+            <SwapRequestsSection
+              items={swapRequests}
+              employeeById={employeeById}
+              companies={companies}
+              actionLoading={actionLoading}
+              onApprove={(row) => void handleApproveSwap(row)}
+            />
+          </>
         ) : null}
       </ScrollView>
 
@@ -1594,14 +1742,6 @@ export default function TimeClockScreen() {
         selectedId={selectedCompanyId}
         onSelect={setSelectedCompanyId}
         onClose={() => setCompanyPicker(false)}
-      />
-      <PickerModal
-        visible={locationPicker}
-        title="Select Location"
-        options={locationOptions}
-        selectedId={selectedLocationId}
-        onSelect={setSelectedLocationId}
-        onClose={() => setLocationPicker(false)}
       />
       <PickerModal
         visible={periodPicker}
@@ -1626,14 +1766,6 @@ export default function TimeClockScreen() {
         selectedId={hoursReportPeriod}
         onSelect={(id) => setHoursReportPeriod(id as typeof hoursReportPeriod)}
         onClose={() => setHoursReportPeriodPicker(false)}
-      />
-      <PickerModal
-        visible={hoursDeptPicker}
-        title="Department"
-        options={hoursDeptOptions}
-        selectedId={hoursDeptFilter}
-        onSelect={setHoursDeptFilter}
-        onClose={() => setHoursDeptPicker(false)}
       />
       <PickerModal
         visible={hoursEmpPicker}
@@ -1777,7 +1909,35 @@ const styles = StyleSheet.create({
   pageTitle: { fontSize: 26, fontWeight: '800', color: '#0f172a' },
   pageSubtitle: { fontSize: 15, color: '#64748b', marginTop: 6, marginBottom: 16 },
 
-  filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 14 },
+  filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 },
+  deptFilterBlock: { marginBottom: 14 },
+  deptFilterTitle: { fontSize: 13, fontWeight: '600', color: '#475569', marginBottom: 8 },
+  deptRadioRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
+  deptRadioChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    backgroundColor: '#fff',
+  },
+  deptRadioChipOn: { borderColor: '#2563eb', backgroundColor: '#eff6ff' },
+  deptRadioRing: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 2,
+    borderColor: '#94a3b8',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  deptRadioRingOn: { borderColor: '#2563eb' },
+  deptRadioDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#2563eb' },
+  deptRadioText: { fontSize: 14, fontWeight: '600', color: '#0f172a', maxWidth: 160 },
+  deptRadioTextOn: { color: '#1e40af' },
   filterChip: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { Platform } from 'react-native';
 import apiClient, { HttpError } from '../lib/api-client';
-import { getPrimaryRoleFromUser, type UserRole } from '../types/auth';
+import { getPrimaryRoleFromUser, mergeNestedAuthUserPayload, type UserRole } from '../types/auth';
 import {
   isBiometricLoginEnabled,
   authenticateWithBiometrics,
@@ -17,10 +17,16 @@ export interface User {
   full_name?: string;
   avatar_url?: string;
   status?: string;
+  /** Some `/auth/user/` payloads include a top-level `role` string in addition to `roles[]`. */
+  role?: string | null;
   roles?: { role?: string; name?: string }[];
   company_id?: string | null;
   assigned_company?: string | null;
   organization_id?: string | null;
+  /** Org slug or nested org object from `/auth/user/` (e.g. `{ type, name }`). */
+  organization?: string | Record<string, unknown> | null;
+  /** When backend sends org category (e.g. `motel`) for Hotel menu visibility. */
+  organization_type?: string | null;
   profile?: Record<string, unknown>;
   user_profile?: Record<string, unknown>;
 }
@@ -86,8 +92,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const userData = await loadUserWithTokenRefresh();
           if (!mounted) return;
           if (userData) {
-            setUser(userData);
-            setRole(getPrimaryRoleFromUser(userData));
+            const normalized = mergeNestedAuthUserPayload(userData) as User;
+            setUser(normalized);
+            setRole(getPrimaryRoleFromUser(normalized));
           } else {
             setUser(null);
             setRole(null);
@@ -133,8 +140,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const setSessionFromLogin = useCallback(async (payload: { user: User; access: string; refresh?: string }) => {
-    setUser(payload.user);
-    setRole(getPrimaryRoleFromUser(payload.user));
+    const normalized = mergeNestedAuthUserPayload(payload.user) as User;
+    setUser(normalized);
+    setRole(getPrimaryRoleFromUser(normalized));
     await apiClient.setToken(payload.access);
   }, []);
 

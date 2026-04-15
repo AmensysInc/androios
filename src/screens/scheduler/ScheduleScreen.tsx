@@ -24,6 +24,11 @@ const KeyedFragment = Fragment as React.ComponentType<{ children?: React.ReactNo
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
 import * as api from '../../api';
+import {
+  employeeDepartmentDisplay,
+  buildDepartmentFilterOptions,
+  employeeMatchesDepartmentFilter,
+} from '../../lib/departmentEmployeeMatch';
 
 type Organization = { id: string; name: string; [k: string]: any };
 type Company = { id: string; name: string; organization_id?: string; company_manager_id?: string; [k: string]: any };
@@ -59,6 +64,8 @@ type SavedWeekTemplate = {
   shiftCount: number;
   savedAtISO: string;
   published: boolean;
+  /** From list/detail row when present; drives subtitle when API omits boolean flags. */
+  publishTriState?: 'yes' | 'no' | 'unknown';
   shifts: Array<{
     employee: string;
     start_time: string;
@@ -132,6 +139,14 @@ function formatWeekToolbar(start: Date, end: Date): string {
   return `${start.toLocaleDateString(undefined, o)} – ${end.toLocaleDateString(undefined, o)}`;
 }
 
+/** Local calendar YYYY-MM-DD — avoids UTC day shifts from `toISOString().slice(0, 10)`. */
+function localCalendarDateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 /** Map `/scheduler/schedule-templates/` rows into local card model (field names vary by backend). */
 function resolveCompanyIdFromRow(row: any, fallback: string): string {
   const c = row?.company_id ?? row?.company;
@@ -147,6 +162,21 @@ function isSchedulerResourceDetailUrl(u: string): boolean {
   const si = parts.indexOf('scheduler');
   if (si < 0) return false;
   return parts.length - (si + 1) >= 2;
+}
+
+/** Tri-state so we can GET template detail when list serializers omit publish flags. */
+function scheduleTemplatePublishedTriState(row: any): 'yes' | 'no' | 'unknown' {
+  if (!row || typeof row !== 'object') return 'unknown';
+  if (row.is_draft === true || row.draft === true) return 'no';
+  if (row.published === true || row.is_published === true || row.is_live === true) return 'yes';
+  if (row.published === false || row.is_published === false) return 'no';
+  const ps = String(row.publish_status ?? row.publication_status ?? '').toLowerCase();
+  if (ps === 'published' || ps === 'live') return 'yes';
+  if (ps === 'draft' || ps === 'unpublished') return 'no';
+  const st = String(row.status ?? row.state ?? '').toLowerCase();
+  if (st === 'published' || st === 'live' || st === 'active') return 'yes';
+  if (st === 'draft') return 'no';
+  return 'unknown';
 }
 
 function mapScheduleTemplateApiToSaved(
@@ -185,6 +215,13 @@ function mapScheduleTemplateApiToSaved(
     row.shifts_data ??
     row.template_shifts ??
     row.shift_templates ??
+    row.schedule_template_shifts ??
+    row.weekly_schedule_template_shifts ??
+    row.schedule_shifts ??
+    row.scheduled_shifts ??
+    row.week_shifts ??
+    row.lines ??
+    row.items ??
     row.data;
   if (typeof shiftsRaw === 'string') {
     try {
@@ -204,7 +241,8 @@ function mapScheduleTemplateApiToSaved(
       row.template_shift_ids ??
       row.scheduled_shift_ids ??
       row.m2m_shift_ids ??
-      row.shift_pks;
+      row.shift_pks ??
+      row.shift_set;
     if (Array.isArray(idOnly) && idOnly.length > 0) {
       shiftsRaw = idOnly;
     }
@@ -311,8 +349,9 @@ function mapScheduleTemplateApiToSaved(
   const savedAtISO =
     typeof savedAtRaw === 'string' ? savedAtRaw : new Date(savedAtRaw as Date | number).toISOString();
 
-  const st = String(row.status ?? '').toLowerCase();
-  const published = Boolean(row.published ?? row.is_published ?? st === 'published');
+  /** Omitted publish flags → `unknown` → still show in All Schedules; only explicit draft/unpublished hides. */
+  const publishTriState = scheduleTemplatePublishedTriState(row);
+  const published = publishTriState !== 'no';
 
   const idList =
     row.shift_ids ??
@@ -322,7 +361,8 @@ function mapScheduleTemplateApiToSaved(
     row.template_shift_ids ??
     row.scheduled_shift_ids ??
     row.m2m_shift_ids ??
-    row.shift_pks;
+    row.shift_pks ??
+    row.shift_set;
   const shiftIdsLen = Array.isArray(idList) ? idList.length : 0;
   const sc =
     row.shift_count ??
@@ -359,8 +399,81 @@ function mapScheduleTemplateApiToSaved(
     shiftCount,
     savedAtISO,
     published,
+    publishTriState,
     shifts,
   };
+}
+
+function savedTemplateNeedsShiftHydration(t: SavedWeekTemplate): boolean {
+  if (t.shiftCount <= 0) return true;
+  if (!Array.isArray(t.shifts) || t.shifts.length === 0) return true;
+  return !t.shifts.some((s) => String(s?.start_time || '').trim() !== '');
+}
+
+/**
+ * List serializers often omit nested shifts and/or publish flags.
+ * GET detail when shifts need hydration or when publish state is unknown on the list row.
+ */
+async function hydrateSavedWeekTemplatesFromApi(
+  mapped: SavedWeekTemplate[],
+  listRows: any[],
+  companyId: string,
+  orgName: string,
+  companyName: string
+): Promise<SavedWeekTemplate[]> {
+  return Promise.all(
+    mapped.map(async (t) => {
+      const listRow =
+        listRows.find((r) => String(r?.id ?? r?.pk ?? r?.uuid ?? '').trim() === t.id) ?? {};
+      const tri = scheduleTemplatePublishedTriState(listRow);
+      const needsShiftFix = savedTemplateNeedsShiftHydration(t);
+      const needPublishedFromDetail = tri === 'unknown';
+
+      if (!needsShiftFix && !needPublishedFromDetail) return t;
+
+      let publishFlag = t.published;
+      let publishTriOut = t.publishTriState;
+      try {
+        const detail = await api.getScheduleTemplateDetail(t.id, companyId, listRow);
+        if (detail) {
+          const fromDetail = mapScheduleTemplateApiToSaved(detail, orgName, companyName, companyId);
+          if (fromDetail) {
+            publishFlag = fromDetail.published;
+            publishTriOut = fromDetail.publishTriState;
+            if (!needsShiftFix) {
+              return { ...t, published: publishFlag, publishTriState: publishTriOut };
+            }
+            if (!savedTemplateNeedsShiftHydration(fromDetail)) return fromDetail;
+          }
+        }
+      } catch {
+        /* fall through */
+      }
+
+      if (needsShiftFix) {
+        try {
+          const shiftRows = await api.getShiftsForScheduleTemplate(companyId, t.id);
+          if (shiftRows.length > 0) {
+            const synthetic = { ...listRow, shifts: shiftRows };
+            const fromShifts = mapScheduleTemplateApiToSaved(synthetic, orgName, companyName, companyId);
+            if (fromShifts && !savedTemplateNeedsShiftHydration(fromShifts)) {
+              return {
+                ...fromShifts,
+                published: publishFlag || fromShifts.published,
+                publishTriState: publishTriOut ?? fromShifts.publishTriState,
+              };
+            }
+          }
+        } catch {
+          /* keep list mapping */
+        }
+      }
+
+      return publishFlag !== t.published || publishTriOut !== t.publishTriState
+        ? { ...t, published: publishFlag, publishTriState: publishTriOut }
+        : t;
+    })
+  );
 }
 
 function employeeDisplayName(e: Employee): string {
@@ -726,6 +839,9 @@ export default function ScheduleScreen() {
   const [selectedCompanyId, setSelectedCompanyId] = useState<string | null>(null);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [shifts, setShifts] = useState<any[]>([]);
+  const [companyDepartments, setCompanyDepartments] = useState<any[]>([]);
+  const [selectedDeptFilter, setSelectedDeptFilter] = useState('all');
+  const [deptModal, setDeptModal] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [orgModal, setOrgModal] = useState(false);
@@ -758,13 +874,13 @@ export default function ScheduleScreen() {
   const [timePickerHour, setTimePickerHour] = useState(6);
   const [timePickerMinute, setTimePickerMinute] = useState(0);
 
-  const needsOrg = role === 'super_admin' || role === 'admin' || role === 'operations_manager';
+  const needsOrg = role === 'super_admin' || role === 'organization_manager';
 
   useEffect(() => {
     if (!shiftModalOpen) setTimePickerField(null);
   }, [shiftModalOpen]);
 
-  const isOrgManager = role === 'operations_manager' && user?.id;
+  const isOrgManager = role === 'organization_manager' && user?.id;
 
   const companiesFiltered = useMemo(() => {
     if (needsOrg && !selectedOrgId) return [];
@@ -784,6 +900,43 @@ export default function ScheduleScreen() {
   );
   const selectedCompanyName = selectedCompany?.name;
 
+  const scheduleDepartmentOptions = useMemo(
+    () => buildDepartmentFilterOptions(companyDepartments, employees, 'All Departments'),
+    [companyDepartments, employees]
+  );
+
+  const employeesForScheduleGrid = useMemo(() => {
+    if (selectedDeptFilter === 'all') return employees;
+    return employees.filter((e) =>
+      employeeMatchesDepartmentFilter(e, selectedDeptFilter, companyDepartments)
+    );
+  }, [employees, selectedDeptFilter, companyDepartments]);
+
+  const scheduleDeptFilterLabel = useMemo(() => {
+    const row = scheduleDepartmentOptions.find((o) => o.id === selectedDeptFilter);
+    return row?.label ?? 'All Departments';
+  }, [scheduleDepartmentOptions, selectedDeptFilter]);
+
+  /**
+   * All Schedules: show templates that are not explicitly draft/unpublished (`published` is false only when
+   * the API says so). Omitted flags count as visible so list serializers don’t hide real schedules.
+   */
+  const publishedSavedTemplatesForCompany = useMemo(() => {
+    if (!selectedCompanyId) return [];
+    const cid = String(selectedCompanyId);
+    return savedTemplates.filter((t) => t.companyId === cid && t.published);
+  }, [savedTemplates, selectedCompanyId]);
+
+  useEffect(() => {
+    setSelectedDeptFilter('all');
+  }, [selectedCompanyId]);
+
+  useEffect(() => {
+    if (selectedDeptFilter === 'all') return;
+    const ok = scheduleDepartmentOptions.some((o) => o.id === selectedDeptFilter);
+    if (!ok) setSelectedDeptFilter('all');
+  }, [scheduleDepartmentOptions, selectedDeptFilter]);
+
   const resolveOrganizationIdForScheduler = useCallback((): string | null => {
     if (needsOrg && selectedOrgId) return String(selectedOrgId);
     const raw = selectedCompany?.organization_id ?? (selectedCompany as any)?.organization;
@@ -798,7 +951,7 @@ export default function ScheduleScreen() {
       setOrganizations(Array.isArray(orgsRaw) ? orgsRaw : []);
 
       let compRaw: any[] = [];
-      if (isOrgManager || role === 'manager') {
+      if (isOrgManager || role === 'company_manager') {
         compRaw = await api.getCompanies();
       } else if (needsOrg) {
         if (selectedOrgId) {
@@ -838,12 +991,20 @@ export default function ScheduleScreen() {
     if (!selectedCompanyId) {
       setEmployees([]);
       setShifts([]);
+      setCompanyDepartments([]);
       return;
     }
     try {
       const cid = String(selectedCompanyId);
       let empRaw: any[] = [];
       let shiftRaw: any[] = [];
+      let deptRaw: any[] = [];
+      try {
+        deptRaw = await api.getDepartments({ company: cid });
+      } catch {
+        deptRaw = [];
+      }
+      setCompanyDepartments(Array.isArray(deptRaw) ? deptRaw : []);
 
       try {
         empRaw = await api.getEmployees({ company: cid });
@@ -894,6 +1055,7 @@ export default function ScheduleScreen() {
       console.warn(e);
       setEmployees([]);
       setShifts([]);
+      setCompanyDepartments([]);
     }
   }, [selectedCompanyId, rangeStart, rangeEnd]);
 
@@ -923,6 +1085,9 @@ export default function ScheduleScreen() {
       const drop = new Set(opts.dropTemplateIds.map((x) => String(x)));
       mapped = mapped.filter((m) => !drop.has(String(m.id)));
     }
+
+    mapped = await hydrateSavedWeekTemplatesFromApi(mapped, rows, cid, orgName, companyName);
+
     // Some backends return empty shift lists on template LIST responses (even though detail has them).
     // Preserve any previously-known non-empty template content so the UI doesn't show "empty template"
     // right after saving.
@@ -1294,8 +1459,8 @@ export default function ScheduleScreen() {
       const isEditingExistingTemplate =
         editingTemplate != null &&
         String(editingTemplate.companyId) === cid &&
-        new Date(editingTemplate.weekStartISO).toISOString().slice(0, 10) === rangeStart.toISOString().slice(0, 10) &&
-        new Date(editingTemplate.weekEndISO).toISOString().slice(0, 10) === rangeEnd.toISOString().slice(0, 10);
+        localCalendarDateKey(new Date(editingTemplate.weekStartISO)) === localCalendarDateKey(rangeStart) &&
+        localCalendarDateKey(new Date(editingTemplate.weekEndISO)) === localCalendarDateKey(rangeEnd);
 
       const templateRow = isEditingExistingTemplate
         ? await api.updateScheduleTemplateWithFallbacks({
@@ -1380,10 +1545,10 @@ export default function ScheduleScreen() {
       setEditingTemplate(null);
       return;
     }
-    const ws = new Date(editingTemplate.weekStartISO).toISOString().slice(0, 10);
-    const we = new Date(editingTemplate.weekEndISO).toISOString().slice(0, 10);
-    const curWs = rangeStart.toISOString().slice(0, 10);
-    const curWe = rangeEnd.toISOString().slice(0, 10);
+    const ws = localCalendarDateKey(new Date(editingTemplate.weekStartISO));
+    const we = localCalendarDateKey(new Date(editingTemplate.weekEndISO));
+    const curWs = localCalendarDateKey(rangeStart);
+    const curWe = localCalendarDateKey(rangeEnd);
     if (ws !== curWs || we !== curWe) {
       setEditingTemplate(null);
     }
@@ -1612,7 +1777,14 @@ export default function ScheduleScreen() {
         <MaterialCommunityIcons name="pencil-outline" size={18} color="#0f172a" />
         <Text style={styles.actionChipText}>{scheduleEditMode ? 'Exit Edit' : 'Edit'}</Text>
       </TouchableOpacity>
-      <TouchableOpacity style={styles.actionChipPrimary} onPress={() => {}}>
+      <TouchableOpacity
+        style={styles.actionChipPrimary}
+        onPress={() => {
+          setEditingTemplate(null);
+          setScheduleEditMode(true);
+        }}
+        accessibilityLabel="New template from this week"
+      >
         <Text style={styles.actionChipPrimaryText}>+ Duplicate</Text>
       </TouchableOpacity>
       <TouchableOpacity style={styles.actionPlain} onPress={handlePrint}>
@@ -1697,6 +1869,29 @@ export default function ScheduleScreen() {
                     : selectedCompanyId
                       ? selectedCompanyName || 'Company'
                       : 'Select company'}
+              </Text>
+              <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.selectBtn,
+                (!selectedCompanyId || (needsOrg && !selectedOrgId)) && styles.selectBtnMuted,
+              ]}
+              onPress={() => {
+                if (!selectedCompanyId || (needsOrg && !selectedOrgId)) return;
+                setDeptModal(true);
+              }}
+              activeOpacity={0.8}
+              disabled={!selectedCompanyId || (needsOrg && !selectedOrgId)}
+            >
+              <Text
+                style={[
+                  styles.selectBtnText,
+                  (!selectedCompanyId || (needsOrg && !selectedOrgId)) && styles.mutedText,
+                ]}
+                numberOfLines={1}
+              >
+                {scheduleDeptFilterLabel}
               </Text>
               <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
             </TouchableOpacity>
@@ -1798,8 +1993,13 @@ export default function ScheduleScreen() {
                     <Text style={styles.emptyTextBold}>No employees found.</Text>
                     <Text style={styles.emptySubtext}>Add employees to this company to start scheduling shifts.</Text>
                   </View>
+                ) : employeesForScheduleGrid.length === 0 ? (
+                  <View style={styles.emptyRow}>
+                    <Text style={styles.emptyTextBold}>No employees in this department.</Text>
+                    <Text style={styles.emptySubtext}>Choose &quot;All Departments&quot; or another department to see more rows.</Text>
+                  </View>
                 ) : (
-                  employees.map((emp) => (
+                  employeesForScheduleGrid.map((emp) => (
                     <KeyedView key={emp.id} style={styles.tr}>
                       <View style={[styles.tdEmp, { width: empColWidth }]}>
                         <View style={styles.avatar}>
@@ -1812,6 +2012,15 @@ export default function ScheduleScreen() {
                           <Text style={styles.empRole} numberOfLines={1}>
                             {employeeRoleLabel(emp)}
                           </Text>
+                          {(() => {
+                            const d = employeeDepartmentDisplay(emp);
+                            if (!d || d === '—') return null;
+                            return (
+                              <Text style={styles.empDept} numberOfLines={1}>
+                                {d}
+                              </Text>
+                            );
+                          })()}
                         </View>
                       </View>
                       {weekDays.map((day, idx) => {
@@ -1885,21 +2094,24 @@ export default function ScheduleScreen() {
             All Schedules
             {selectedOrgName ? ` — ${selectedOrgName}` : ''} · {selectedCompanyName || 'Company'}
           </Text>
-          <Text style={styles.savedSubtitle}>Saved schedules for {selectedCompanyName || 'this company'}.</Text>
-          {savedTemplates.filter((t) => t.companyId === String(selectedCompanyId)).length === 0 ? (
+          <Text style={styles.savedSubtitle}>
+            Saved schedules for {selectedCompanyName || 'this company'}. Draft rows (when the API marks them) are hidden
+            here.
+          </Text>
+          {publishedSavedTemplatesForCompany.length === 0 ? (
             <View style={styles.savedEmpty}>
               <MaterialCommunityIcons name="calendar-blank-outline" size={48} color="#cbd5e1" />
               <Text style={styles.savedEmptyText}>No saved schedules yet.</Text>
-              <Text style={styles.savedEmptyHint}>Click Save to create a schedule template card here.</Text>
+              <Text style={styles.savedEmptyHint}>Use Save on the toolbar to create a template card here.</Text>
             </View>
           ) : (
             <View style={styles.savedList}>
-              {savedTemplates
-                .filter((t) => t.companyId === String(selectedCompanyId))
-                .map((t) => (
+              {publishedSavedTemplatesForCompany.map((t) => (
                   <View key={t.id} style={styles.savedItemCard}>
                     <Text style={styles.savedItemTitle}>{t.weekLabel}</Text>
-                    <Text style={styles.savedItemMeta}>{t.published ? 'Published schedule' : 'Saved schedule'}</Text>
+                    <Text style={styles.savedItemMeta}>
+                      {t.publishTriState === 'yes' ? 'Published schedule' : 'Saved schedule'}
+                    </Text>
                     <Text style={styles.savedItemMeta2}>
                       Saved: {new Date(t.savedAtISO).toLocaleDateString()} · {t.shiftCount} shifts
                     </Text>
@@ -1963,6 +2175,13 @@ export default function ScheduleScreen() {
         options={companyOptions}
         onSelect={(id) => setSelectedCompanyId(id)}
         onClose={() => setCompanyModal(false)}
+      />
+      <PickerModal
+        visible={deptModal}
+        title="Department"
+        options={scheduleDepartmentOptions}
+        onSelect={(id) => setSelectedDeptFilter(id)}
+        onClose={() => setDeptModal(false)}
       />
 
       <Modal visible={shiftModalOpen} transparent animationType="fade" onRequestClose={() => !shiftSaving && setShiftModalOpen(false)}>
@@ -2499,6 +2718,7 @@ const styles = StyleSheet.create({
   empMeta: { flex: 1, minWidth: 0 },
   empName: { fontSize: 14, fontWeight: '600', color: '#0f172a' },
   empRole: { fontSize: 12, color: '#64748b', marginTop: 2 },
+  empDept: { fontSize: 11, color: '#94a3b8', marginTop: 1 },
   tdCell: {
     padding: 10,
     borderRightWidth: 1,
