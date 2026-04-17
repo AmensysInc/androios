@@ -56,6 +56,27 @@ function resolveUserPayloadForRole(userPayload: any): any {
   return userPayload;
 }
 
+/** Same id notion as scheduler screens use for `filterOrganizationsForOperationsManager` (FK matching). */
+function schedulerViewerUserId(viewerPayload: any): string {
+  const u = resolveUserPayloadForRole(viewerPayload);
+  if (!u || typeof u !== 'object') return '';
+  const nested = (u as any).user;
+  const nestedId =
+    nested && typeof nested === 'object'
+      ? (nested as any).id ?? (nested as any).pk ?? (nested as any).user_id
+      : '';
+  return String(
+    (u as any).id ??
+      (u as any).pk ??
+      (u as any).user_id ??
+      nestedId ??
+      (u as any).django_id ??
+      (u as any).uuid ??
+      (u as any).sub ??
+      ''
+  ).trim();
+}
+
 /** User Management: super admins, organization managers, and company managers. */
 function canAccessUserManagement(userPayload: any): boolean {
   const u = resolveUserPayloadForRole(userPayload);
@@ -259,14 +280,27 @@ async function persistAuthUserRole(userId: string, desiredRole: string): Promise
 function userRowDisplayName(u: any): string {
   if (!u || typeof u !== 'object') return '';
   const profile = u.profile || u.user_profile || {};
-  return pickFirstNonEmpty(
-    profile.full_name,
-    u.full_name,
-    [profile.first_name, profile.last_name].filter(Boolean).join(' '),
-    [u.first_name, u.last_name].filter(Boolean).join(' '),
-    u.username,
-    u.email
-  );
+  const emp = u.employee || u.employee_details || {};
+  const combinedFromProfile = [profile.first_name, profile.last_name].filter(Boolean).join(' ').trim();
+  const combinedFromRoot = [u.first_name, u.last_name].filter(Boolean).join(' ').trim();
+  const combinedFromEmployee = [emp.first_name, emp.last_name].filter(Boolean).join(' ').trim();
+  /** When both first and last exist, use them first — `full_name` often holds only a first name. */
+  const bothFromProfile =
+    Boolean(String(profile.first_name ?? '').trim()) && Boolean(String(profile.last_name ?? '').trim());
+  const bothFromRoot =
+    Boolean(String(u.first_name ?? '').trim()) && Boolean(String(u.last_name ?? '').trim());
+  const bothFromEmployee =
+    Boolean(String(emp.first_name ?? '').trim()) && Boolean(String(emp.last_name ?? '').trim());
+  const preferCombined = bothFromProfile || bothFromRoot || bothFromEmployee;
+  let combined = '';
+  if (bothFromProfile) combined = combinedFromProfile;
+  else if (bothFromRoot) combined = combinedFromRoot;
+  else if (bothFromEmployee) combined = combinedFromEmployee;
+  else combined = combinedFromProfile || combinedFromRoot || combinedFromEmployee;
+  if (preferCombined) {
+    return pickFirstNonEmpty(combined, profile.full_name, u.full_name, u.username, u.email);
+  }
+  return pickFirstNonEmpty(profile.full_name, u.full_name, combined, u.username, u.email);
 }
 
 function registerNameLookup(acc: Map<string, string>, idRaw: string, name: string) {
@@ -350,6 +384,131 @@ function resolveAddedByDisplay(u: any, nameById: Map<string, string>): string {
     u.created_by_email,
     u.added_by_email
   );
+}
+
+/** Strip empty values; recurse into plain objects (for nested profile payloads). */
+function stripPayloadForApi(obj: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === undefined || v === null || v === '') continue;
+    if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      const inner = stripPayloadForApi(v as Record<string, any>);
+      if (Object.keys(inner).length > 0) out[k] = inner;
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+/**
+ * After `createUser` the server often persists only email/username/password.
+ * PATCH user + scheduler employee so full name, phone, and employee PIN appear in User Management.
+ */
+async function hydrateCreatedUserDisplayFields(
+  userId: string,
+  email: string,
+  fullName: string,
+  firstName: string,
+  lastName: string,
+  phoneDigits: string | undefined,
+  companyId: string,
+  role: string,
+  employeePin: string | undefined,
+  hourlyRate: number | string | undefined
+): Promise<void> {
+  const uid = String(userId || '').trim();
+  if (!uid) return;
+  const phone = phoneDigits && String(phoneDigits).trim() ? String(phoneDigits).trim() : undefined;
+  const pin = employeePin && String(employeePin).trim() ? String(employeePin).trim() : undefined;
+  const namesOnly = stripPayloadForApi({
+    full_name: fullName,
+    first_name: firstName,
+    last_name: lastName,
+  });
+  const nameBody = stripPayloadForApi({
+    full_name: fullName,
+    first_name: firstName,
+    last_name: lastName,
+    phone,
+    mobile_number: phone,
+    mobile: phone,
+    employee_pin: pin,
+    pin,
+  });
+  const profileNested = stripPayloadForApi({
+    full_name: fullName,
+    first_name: firstName,
+    last_name: lastName,
+    phone,
+    mobile_number: phone,
+    mobile: phone,
+    employee_pin: pin,
+    pin,
+  });
+  const userAttempts: Record<string, any>[] = [
+    namesOnly,
+    nameBody,
+    stripPayloadForApi({ name: fullName, first_name: firstName, last_name: lastName }),
+    stripPayloadForApi({ profile: profileNested }),
+    stripPayloadForApi({ user_profile: profileNested }),
+    stripPayloadForApi({ employee_profile: profileNested }),
+  ];
+  for (const body of userAttempts) {
+    if (Object.keys(body).length === 0) continue;
+    try {
+      await api.updateUserWithFallbacks(uid, body);
+    } catch {
+      /* try next shape — backends differ on flat vs nested profile and phone field names */
+    }
+  }
+
+  if (role !== 'employee') return;
+  const cid = String(companyId || '').trim();
+  if (!cid) return;
+  try {
+    let linked: any = null;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      linked = await api.findSchedulerEmployeeForAuthUser({
+        id: uid,
+        email,
+        company_id: cid,
+        assigned_company: cid,
+      });
+      if (linked?.id) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const eid = linked?.id ? String(linked.id).trim() : '';
+    if (!eid) return;
+    const hr =
+      hourlyRate != null && hourlyRate !== '' && !Number.isNaN(Number(hourlyRate))
+        ? Number(hourlyRate)
+        : undefined;
+    await api.updateSchedulerEmployeeWithFallbacks(eid, [
+      stripPayloadForApi({
+        first_name: firstName,
+        last_name: lastName,
+        email,
+        phone,
+        mobile_number: phone,
+        mobile: phone,
+        employee_pin: pin,
+        pin,
+        clock_pin: pin,
+        hourly_rate: hr,
+      }),
+      stripPayloadForApi({
+        first_name: firstName,
+        last_name: lastName,
+        email,
+        employee_pin: pin,
+        pin,
+      }),
+      stripPayloadForApi({ first_name: firstName, last_name: lastName, email }),
+    ]);
+  } catch {
+    /* optional — user row may still have profile after PATCH */
+  }
 }
 
 function resolveDepartmentDisplay(employee: any, profile: any, deptCatalog: any[]): string {
@@ -462,27 +621,18 @@ function collectOrganizationIdCandidates(employee: any, profile: any, u: any): s
 
 type OrgCompanyOption = { id: string; name: string };
 
-/** Auth hints first; then org rows where this user is assigned organization manager (Django FK shapes). */
+/** Auth hints first; then org rows where this user is assigned organization manager (same client filter as Schedule). */
 function organizationIdsForOperationsManagerViewer(viewerPayload: any, organizationRows: any[]): string[] {
   const u = resolveUserPayloadForRole(viewerPayload);
   const hints = api.organizationIdHintsFromAuthUser(u);
   const dedupe = (xs: string[]) => [...new Set(xs.map((x) => String(x).trim()).filter(Boolean))];
   if (hints.length > 0) return dedupe(hints as string[]);
-  const uid = String(u?.id ?? u?.pk ?? '').trim();
+  const uid = schedulerViewerUserId(u);
   if (!uid || !Array.isArray(organizationRows)) return [];
-  const found: string[] = [];
-  for (const o of organizationRows) {
-    const mid = (o as any).organization_manager_id;
-    const s1 = mid != null && mid !== '' ? String(mid).trim() : '';
-    const om = (o as any).organization_manager;
-    const s2 =
-      om && typeof om === 'object' && (om as any).id != null ? String((om as any).id).trim() : '';
-    if ((s1 && s1 === uid) || (s2 && s2 === uid)) {
-      const id = String((o as any).id ?? (o as any).pk ?? '').trim();
-      if (id) found.push(id);
-    }
-  }
-  return dedupe(found);
+  const filtered = api.filterOrganizationsForOperationsManager(organizationRows, uid);
+  return dedupe(
+    filtered.map((o: any) => String(o?.id ?? o?.pk ?? '').trim()).filter(Boolean)
+  );
 }
 
 /** Auth hints first; then company rows where this user is the company manager. */
@@ -491,7 +641,7 @@ function companyIdsForManagerViewer(viewerPayload: any, companyRows: any[]): str
   const hints = api.companyIdHintsFromAuthUser(u);
   const dedupe = (xs: string[]) => [...new Set(xs.map((x) => String(x).trim()).filter(Boolean))];
   if (hints.length > 0) return dedupe(hints as string[]);
-  const uid = String(u?.id ?? u?.pk ?? '').trim();
+  const uid = schedulerViewerUserId(u);
   if (!uid || !Array.isArray(companyRows)) return [];
   const found: string[] = [];
   for (const c of companyRows) {
@@ -581,6 +731,97 @@ function dedupeOrgCompanyOptions(items: OrgCompanyOption[]): OrgCompanyOption[] 
   return items.filter((x) => (seen.has(x.id) ? false : (seen.add(x.id), true)));
 }
 
+/** Normalize FK fields that may be uuid strings or nested `{ id }` objects. */
+function normalizeEntityId(v: unknown): string {
+  if (v == null || v === '') return '';
+  if (typeof v === 'object' && !Array.isArray(v) && v !== null) {
+    const id = (v as { id?: unknown }).id ?? (v as { pk?: unknown }).pk;
+    if (id != null && String(id).trim() !== '') return String(id).trim();
+    return '';
+  }
+  return String(v).trim();
+}
+
+function organizationIdFromCompanyRow(c: any): string {
+  const orgRaw = c?.organization_id ?? c?.organization;
+  if (orgRaw != null && typeof orgRaw === 'object' && !Array.isArray(orgRaw)) {
+    const nid = (orgRaw as any).id ?? (orgRaw as any).pk;
+    if (nid != null) return String(nid).trim();
+  }
+  return String(orgRaw ?? '').trim();
+}
+
+/**
+ * Loads companies for a single organization — same fallbacks as create-user (no new API shapes).
+ * Filters client-side when only `getCompanies()` is available (handles nested organization FK).
+ */
+async function loadCompanyOptionsForOrganization(organizationId: string): Promise<OrgCompanyOption[]> {
+  const oid = String(organizationId || '').trim();
+  if (!oid) return [];
+  const mapRows = (arr: any[]) =>
+    (Array.isArray(arr) ? arr : []).map((c: any) => ({
+      id: String(c.id),
+      name: c.name || '—',
+    }));
+  const fetchCompanies = async (params: Record<string, any>): Promise<any[]> => {
+    try {
+      const r = await api.getCompanies({ page_size: 500, ...params });
+      return Array.isArray(r) ? r : [];
+    } catch {
+      try {
+        const r2 = await api.getCompanies(params);
+        return Array.isArray(r2) ? r2 : [];
+      } catch {
+        return [];
+      }
+    }
+  };
+  let comps = await fetchCompanies({ organization: oid });
+  if (comps.length === 0) comps = await fetchCompanies({ organization_id: oid });
+  if (comps.length === 0) {
+    const all = await fetchCompanies({});
+    comps = all.filter((c: any) => organizationIdFromCompanyRow(c) === oid);
+  }
+  return mapRows(comps);
+}
+
+function optById<T extends { id: string }>(list: T[], id: string | undefined): T | undefined {
+  const sid = String(id ?? '').trim();
+  if (!sid) return undefined;
+  return list.find((x) => String(x.id) === sid);
+}
+
+/** When to load department options — shared by Create and Edit (matches working Edit behavior). */
+function shouldLoadDepartmentOptionsForUserForm(
+  viewerRole: UserRole,
+  role: string,
+  companyId: string | undefined
+): boolean {
+  const cid = String(companyId || '').trim();
+  if (!cid) return false;
+  return (
+    role === 'employee' ||
+    viewerRole === 'company_manager' ||
+    (viewerRole === 'organization_manager' && role === 'employee')
+  );
+}
+
+async function loadDepartmentOptionsFromCatalogs(
+  organizationId: string | undefined,
+  companyId: string | undefined,
+  orgList: { id: string; name: string }[],
+  companyList: { id: string; name: string }[]
+): Promise<DepartmentOption[]> {
+  const orgName = optById(orgList, organizationId)?.name;
+  const compName = optById(companyList, companyId)?.name;
+  return loadDepartmentOptions(api, {
+    organizationId,
+    companyId,
+    organizationName: orgName,
+    companyName: compName,
+  });
+}
+
 /** Org/company pickers for create, edit, and assign — scoped for org and company managers. */
 async function loadScopedOrgCompanyForViewer(
   viewerPayload: any,
@@ -614,40 +855,93 @@ async function loadScopedOrgCompanyForViewer(
 
   if (viewerRole === 'organization_manager') {
     let orgRows = opts?.organizationRows;
+    /** Many DRF backends do not filter `/scheduler/organizations/` by manager FK — those params return 400. */
     if (!Array.isArray(orgRows) || orgRows.length === 0) {
-      const uid = String(u?.id ?? u?.pk ?? '').trim();
-      if (uid) {
+      try {
+        orgRows = await api.getOrganizations({ page_size: 500 });
+      } catch {
         try {
-          const scoped = await api.getOrganizations({ organization_manager: uid });
-          if (Array.isArray(scoped) && scoped.length) orgRows = scoped;
+          orgRows = await api.getOrganizations();
         } catch {
-          /* noop */
+          orgRows = [];
         }
       }
     }
-    if (!Array.isArray(orgRows) || orgRows.length === 0) {
-      try {
-        orgRows = await api.getOrganizations();
-      } catch {
-        orgRows = [];
+    orgRows = Array.isArray(orgRows) ? orgRows : [];
+    let orgIdList = organizationIdsForOperationsManagerViewer(viewerPayload, orgRows);
+    /** Company hints / employee resolution do not require a numeric `user.id` (email-only auth still resolves). */
+    if (orgIdList.length === 0) {
+      const seen = new Set(orgIdList);
+      for (const cid of api.companyIdHintsFromAuthUser(u)) {
+        if (!cid) continue;
+        try {
+          const c = await api.getCompany(String(cid).trim());
+          const oid = organizationIdFromCompanyRow(c);
+          if (oid && !seen.has(oid)) {
+            seen.add(oid);
+            orgIdList.push(oid);
+          }
+        } catch {
+          /* ignore */
+        }
       }
     }
-    orgRows = Array.isArray(orgRows) ? orgRows : [];
-    const orgIdList = organizationIdsForOperationsManagerViewer(viewerPayload, orgRows);
+    if (orgIdList.length === 0) {
+      const seen = new Set(orgIdList);
+      try {
+        const emp = await api.resolveEmployeeForUser(u);
+        if (emp && typeof emp === 'object') {
+          let oid = normalizeEntityId((emp as any).organization_id ?? (emp as any).organization);
+          if (!oid) {
+            const cid = normalizeEntityId((emp as any).company_id ?? (emp as any).company);
+            if (cid) {
+              try {
+                const c = await api.getCompany(cid);
+                oid = organizationIdFromCompanyRow(c);
+              } catch {
+                /* ignore */
+              }
+            }
+          }
+          if (oid && !seen.has(oid)) {
+            seen.add(oid);
+            orgIdList.push(oid);
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    }
 
     const orgs: OrgCompanyOption[] = [];
     const companies: OrgCompanyOption[] = [];
+    let allCompaniesCache: any[] | null = null;
+    const getAllCompaniesOnce = async () => {
+      if (allCompaniesCache) return allCompaniesCache;
+      let all: any[] = [];
+      try {
+        all = await api.getCompanies({ page_size: 500 });
+      } catch {
+        try {
+          all = await api.getCompanies();
+        } catch {
+          all = [];
+        }
+      }
+      allCompaniesCache = Array.isArray(all) ? all : [];
+      return allCompaniesCache;
+    };
     for (const oid of orgIdList) {
       if (!oid) continue;
       try {
         const o = await api.getOrganization(oid);
         if (o?.id != null) orgs.push({ id: String(o.id), name: o.name || '—' });
       } catch {
-        /* ignore */
+        orgs.push({ id: String(oid), name: '—' });
       }
       let loaded = false;
       try {
-        const cs = await api.getCompanies({ organization_id: oid });
+        const cs = await api.getCompanies({ organization_id: oid, page_size: 500 });
         const arr = Array.isArray(cs) ? cs : [];
         for (const c of arr) {
           companies.push({ id: String(c.id), name: c.name || '—' });
@@ -658,10 +952,23 @@ async function loadScopedOrgCompanyForViewer(
       }
       if (!loaded) {
         try {
-          const cs2 = await api.getCompanies({ organization: oid });
+          const cs2 = await api.getCompanies({ organization: oid, page_size: 500 });
           const arr = Array.isArray(cs2) ? cs2 : [];
           for (const c of arr) {
             companies.push({ id: String(c.id), name: c.name || '—' });
+          }
+          loaded = arr.length > 0;
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!loaded) {
+        try {
+          const rows = await getAllCompaniesOnce();
+          for (const c of rows) {
+            if (organizationIdFromCompanyRow(c) === oid) {
+              companies.push({ id: String(c.id), name: c.name || '—' });
+            }
           }
         } catch {
           /* ignore */
@@ -712,6 +1019,68 @@ async function loadScopedOrgCompanyForViewer(
   }
 
   return { orgs: [], companies: [] };
+}
+
+/**
+ * Resolves the viewer organization id for an organization_manager when auth hints and row data are sparse.
+ * Pass `preScoped` when `loadScopedOrgCompanyForViewer` was already awaited to avoid duplicate work.
+ */
+async function resolveOrganizationIdForOrganizationManagerUser(
+  me: any,
+  preScoped?: { orgs: OrgCompanyOption[]; companies: OrgCompanyOption[] }
+): Promise<string> {
+  const u = resolveUserPayloadForRole(me);
+  const oh = api.organizationIdHintsFromAuthUser(u);
+  if (oh[0]) return String(oh[0]).trim();
+  const scoped =
+    preScoped ?? (await loadScopedOrgCompanyForViewer(u, 'organization_manager'));
+  if (scoped.orgs[0]?.id) return String(scoped.orgs[0].id).trim();
+  if (scoped.companies[0]?.id) {
+    try {
+      const c = await api.getCompany(String(scoped.companies[0].id).trim());
+      const oid = organizationIdFromCompanyRow(c);
+      if (oid) return oid;
+    } catch {
+      /* ignore */
+    }
+  }
+  const ch = api.companyIdHintsFromAuthUser(u);
+  if (ch[0]) {
+    try {
+      const c = await api.getCompany(String(ch[0]).trim());
+      const oid = organizationIdFromCompanyRow(c);
+      if (oid) return oid;
+    } catch {
+      /* ignore */
+    }
+  }
+  try {
+    const emp = await api.resolveEmployeeForUser(u);
+    if (emp && typeof emp === 'object') {
+      let oid = normalizeEntityId((emp as any).organization_id ?? (emp as any).organization);
+      if (oid) return oid;
+      const cid = normalizeEntityId((emp as any).company_id ?? (emp as any).company);
+      if (cid) {
+        try {
+          const c = await api.getCompany(cid);
+          oid = organizationIdFromCompanyRow(c);
+          if (oid) return oid;
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    const rows = await api.getOrganizations({ page_size: 500 }).catch(() => [] as any[]);
+    const ids = organizationIdsForOperationsManagerViewer(me, Array.isArray(rows) ? rows : []);
+    if (ids[0]) return String(ids[0]).trim();
+  } catch {
+    /* ignore */
+  }
+  return '';
 }
 
 /**
@@ -778,10 +1147,13 @@ function mapApiUser(
   const phone = pickFirstNonEmpty(
     profile.phone,
     profile.mobile_number,
+    profile.phone_number,
     employee.phone,
     employee.mobile_number,
+    employee.phone_number,
     u.phone,
-    u.mobile_number
+    u.mobile_number,
+    u.phone_number
   );
   const team = pickFirstNonEmpty(
     profile.team,
@@ -833,13 +1205,22 @@ function mapApiUser(
     ctx.organizationRows
   );
   const department = resolveDepartmentDisplay(employee, profile, ctx.deptCatalog);
-  const pin = pickFirstNonEmpty(profile.employee_pin, profile.pin, employee.employee_pin, employee.pin, u.employee_pin);
+  const pin = pickFirstNonEmpty(
+    profile.employee_pin,
+    profile.pin,
+    employee.employee_pin,
+    employee.pin,
+    (employee as any)?.clock_pin,
+    u.employee_pin,
+    u.pin,
+    (u as any)?.scheduler_pin
+  );
   const addedBy = resolveAddedByDisplay(u, ctx.userNameById);
   return {
     id: String(u.id),
     username: u.username || (u.email ? String(u.email).split('@')[0] : '') || '—',
     email: u.email || profile.email || '—',
-    full_name: profile.full_name || u.full_name || '—',
+    full_name: userRowDisplayName(u) || '—',
     phone: phone || '—',
     title: title || '—',
     team: team || '—',
@@ -998,6 +1379,22 @@ const FULL_ROLE_PICKER_OPTIONS: { id: string; label: string }[] = [
 
 export default function UserManagementScreen() {
   const { user, role: sessionRole } = useAuth();
+  /**
+   * Prefer auth `sessionRole` when it is an elevated role; otherwise derive from `user` so Organization
+   * Manager / Company Manager still get scoped pickers when `/auth/user/` and session disagree.
+   */
+  const viewerRoleForUi = useMemo((): UserRole => {
+    if (
+      sessionRole === 'super_admin' ||
+      sessionRole === 'organization_manager' ||
+      sessionRole === 'company_manager'
+    ) {
+      return sessionRole as UserRole;
+    }
+    if (user) return getPrimaryRoleFromUser(resolveUserPayloadForRole(user as any));
+    return 'employee';
+  }, [sessionRole, user]);
+
   const [rows, setRows] = useState<RowUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -1081,35 +1478,57 @@ export default function UserManagementScreen() {
   const editDeptNameHintRef = useRef<string | null>(null);
   const prevCreateCompanyIdRef = useRef<string>('');
   const prevEditCompanyIdRef = useRef<string>('');
+  /** Incremented on each open so stale async hydration does not overwrite state after close/reopen. */
+  const createModalHydrateGenRef = useRef(0);
 
   const createEditRolePickerOptions = useMemo(() => {
-    if (sessionRole === 'company_manager') {
+    if (viewerRoleForUi === 'company_manager') {
       return FULL_ROLE_PICKER_OPTIONS.filter((o) => o.id === 'employee');
     }
-    if (sessionRole === 'organization_manager') {
-      return FULL_ROLE_PICKER_OPTIONS.filter((o) => o.id !== 'super_admin');
+    if (viewerRoleForUi === 'organization_manager') {
+      return FULL_ROLE_PICKER_OPTIONS.filter((o) => o.id !== 'super_admin' && o.id !== 'organization_manager');
     }
     return FULL_ROLE_PICKER_OPTIONS;
-  }, [sessionRole]);
+  }, [viewerRoleForUi]);
 
   const assignRolePickerOptions = useMemo(() => {
-    if (sessionRole === 'company_manager') {
+    if (viewerRoleForUi === 'company_manager') {
       return FULL_ROLE_PICKER_OPTIONS.filter((o) => o.id === 'employee');
     }
-    if (sessionRole === 'organization_manager') {
+    if (viewerRoleForUi === 'organization_manager') {
       return FULL_ROLE_PICKER_OPTIONS.filter((o) => o.id !== 'super_admin');
     }
     return FULL_ROLE_PICKER_OPTIONS;
-  }, [sessionRole]);
+  }, [viewerRoleForUi]);
+
+  /** Show / load org–company–department fields consistently (avoid hiding rows when role string drifts). */
+  const showCreateDepartmentSection =
+    viewerRoleForUi === 'company_manager' ||
+    viewerRoleForUi === 'organization_manager' ||
+    form.role === 'employee';
+  const createDeptPickerInteractive = shouldLoadDepartmentOptionsForUserForm(
+    viewerRoleForUi,
+    form.role,
+    form.company_id
+  );
+  const showEditDepartmentSection =
+    viewerRoleForUi === 'company_manager' ||
+    viewerRoleForUi === 'organization_manager' ||
+    editForm.role === 'employee';
+  const editDeptPickerInteractive = shouldLoadDepartmentOptionsForUserForm(
+    viewerRoleForUi,
+    editForm.role,
+    editForm.company_id
+  );
 
   const createOrgPickerLocked =
-    sessionRole === 'company_manager' || (sessionRole === 'organization_manager' && createOrgList.length <= 1);
-  const createCompanyPickerLocked = sessionRole === 'company_manager';
+    viewerRoleForUi === 'company_manager' || (viewerRoleForUi === 'organization_manager' && createOrgList.length <= 1);
+  const createCompanyPickerLocked = viewerRoleForUi === 'company_manager';
   const editOrgPickerLocked =
-    sessionRole === 'company_manager' || (sessionRole === 'organization_manager' && editOrgList.length <= 1);
-  const editCompanyPickerLocked = sessionRole === 'company_manager';
-  const assignOrgPickerLocked = sessionRole === 'company_manager';
-  const assignCompanyPickerLocked = sessionRole === 'company_manager';
+    viewerRoleForUi === 'company_manager' || (viewerRoleForUi === 'organization_manager' && editOrgList.length <= 1);
+  const editCompanyPickerLocked = viewerRoleForUi === 'company_manager';
+  const assignOrgPickerLocked = viewerRoleForUi === 'company_manager';
+  const assignCompanyPickerLocked = viewerRoleForUi === 'company_manager';
 
   const load = useCallback(async () => {
     if (!user) {
@@ -1347,63 +1766,462 @@ export default function UserManagementScreen() {
   }, [assignCompanyId]);
 
   useEffect(() => {
+    if (!createModal) return;
     if (!form.organization_id) {
-      setCreateCompanyList([]);
-      setForm((f) => ({ ...f, company_id: '', department_id: '' }));
+      /**
+       * Org / company managers often resolve `organization_id` after companies are prefetched — or
+       * company managers only have `company_id` on the session until `getCompany` fills org.
+       * Clearing the catalog here would wipe options and leave the Company row stuck on "Resolving…".
+       */
+      const keepCompanyList =
+        viewerRoleForUi === 'organization_manager' ||
+        (viewerRoleForUi === 'company_manager' &&
+          (!!String(form.company_id || '').trim() || createCompanyList.length > 0));
+      if (!keepCompanyList) {
+        setCreateCompanyList([]);
+      }
+      if (viewerRoleForUi !== 'company_manager' && viewerRoleForUi !== 'organization_manager') {
+        setForm((f) => ({ ...f, company_id: '', department_id: '' }));
+      }
       return;
     }
     let cancelled = false;
     (async () => {
       try {
-        const comps = await api.getCompanies({ organization: form.organization_id });
-        const list = (Array.isArray(comps) ? comps : []).map((c: any) => ({
-          id: String(c.id),
-          name: c.name || '—',
-        }));
-        if (!cancelled) setCreateCompanyList(list);
+        let list = await loadCompanyOptionsForOrganization(form.organization_id);
+        const hintedComp = String(form.company_id || '').trim();
+        if (list.length === 0 && viewerRoleForUi === 'company_manager' && hintedComp) {
+          try {
+            const c = await api.getCompany(hintedComp);
+            list = [{ id: String(c.id), name: c.name || '—' }];
+          } catch {
+            /* keep list as []; preserve path below may still use prev */
+          }
+        }
+        if (!cancelled) {
+          setCreateCompanyList((prev) => {
+            if (
+              (viewerRoleForUi === 'organization_manager' ||
+                viewerRoleForUi === 'company_manager') &&
+              list.length === 0 &&
+              prev.length > 0
+            ) {
+              return prev;
+            }
+            return list;
+          });
+        }
       } catch {
-        if (!cancelled) setCreateCompanyList([]);
+        if (!cancelled) {
+          setCreateCompanyList((prev) =>
+            (viewerRoleForUi === 'organization_manager' ||
+              viewerRoleForUi === 'company_manager') &&
+            prev.length > 0
+              ? prev
+              : []
+          );
+        }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [form.organization_id]);
+  }, [createModal, form.organization_id, form.company_id, viewerRoleForUi, createCompanyList.length]);
+
+  /** When form has a company id not yet in the catalog (scoped list empty, timing), resolve label and optionally derive organization_id. */
+  useEffect(() => {
+    if (!createModal) return;
+    const cid = String(form.company_id || '').trim();
+    if (!cid) return;
+    if (createCompanyList.some((c) => String(c.id) === cid)) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const co = await api.getCompany(cid);
+        if (cancelled || !co?.id) return;
+        const row = { id: String(co.id), name: co.name || '—' };
+        setCreateCompanyList((prev) =>
+          prev.some((p) => String(p.id) === row.id) ? prev : [...prev, row]
+        );
+        setForm((f) => {
+          if (f.organization_id) return f;
+          const orgRef = co?.organization_id ?? co?.organization;
+          const oid =
+            orgRef != null && typeof orgRef === 'object' && (orgRef as any).id != null
+              ? String((orgRef as any).id).trim()
+              : String(orgRef ?? '').trim();
+          return oid ? { ...f, organization_id: oid } : f;
+        });
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [createModal, form.company_id, createCompanyList, form.organization_id]);
+
+  /** When org managers cannot pick company explicitly (or OM opens with empty company), keep form.company_id in sync with loaded companies so department loading runs. */
+  useEffect(() => {
+    if (!createModal) return;
+    if (createCompanyList.length === 0) return;
+    /** Company managers may have a single scoped company before `organization_id` is hydrated. */
+    /** Organization managers: allow implicit first company once scoped companies loaded (org id may hydrate later). */
+    if (!form.organization_id && viewerRoleForUi !== 'company_manager') {
+      if (viewerRoleForUi !== 'organization_manager') return;
+    }
+    const cid = String(form.company_id || '').trim();
+    const match = createCompanyList.some((c) => String(c.id) === cid);
+    if (match) return;
+    const firstId = String(createCompanyList[0].id).trim();
+    if (!firstId) return;
+    const needsImplicitCompany = viewerRoleForUi === 'company_manager' || viewerRoleForUi === 'organization_manager';
+    if (!cid && !needsImplicitCompany) return;
+    setForm((f) => ({ ...f, company_id: firstId, department_id: '' }));
+  }, [createModal, createCompanyList, form.company_id, form.organization_id, viewerRoleForUi]);
+
+  /** Company managers: no org/company pickers in UI — re-apply auth scope if openCreateUserModal left ids empty. */
+  useEffect(() => {
+    if (!createModal || viewerRoleForUi !== 'company_manager') return;
+    if (form.organization_id && form.company_id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const me = (await api.getCurrentUser()) as any;
+        let nextOrg = String(form.organization_id || '').trim();
+        let nextComp = String(form.company_id || '').trim();
+        if (!nextComp) {
+          const ch = api.companyIdHintsFromAuthUser(me);
+          if (ch[0]) nextComp = String(ch[0]).trim();
+        }
+        if (!nextOrg) {
+          const oh = api.organizationIdHintsFromAuthUser(me);
+          if (oh[0]) nextOrg = String(oh[0]).trim();
+        }
+        if (!nextComp || !nextOrg) {
+          try {
+            const scoped = await loadScopedOrgCompanyForViewer(me, 'company_manager');
+            if (!nextComp && scoped.companies[0]?.id) {
+              nextComp = String(scoped.companies[0].id).trim();
+            }
+            if (!nextOrg && scoped.orgs[0]?.id) {
+              nextOrg = String(scoped.orgs[0].id).trim();
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+        if (nextComp && !nextOrg) {
+          try {
+            const c = await api.getCompany(nextComp);
+            const orgRef = c?.organization_id ?? c?.organization;
+            const oid =
+              orgRef != null && typeof orgRef === 'object' && (orgRef as any).id != null
+                ? String((orgRef as any).id).trim()
+                : String(orgRef ?? '').trim();
+            if (oid) nextOrg = oid;
+          } catch {
+            /* ignore */
+          }
+        }
+        if (cancelled) return;
+        setForm((f) => {
+          const o = (f.organization_id || nextOrg || '').trim();
+          const c = (f.company_id || nextComp || '').trim();
+          if ((!o && !c) || (f.organization_id === o && f.company_id === c)) return f;
+          return { ...f, organization_id: o || f.organization_id, company_id: c || f.company_id };
+        });
+        if (!cancelled && nextComp) {
+          try {
+            const c = await api.getCompany(String(nextComp).trim());
+            if (cancelled || !c?.id) return;
+            const row = { id: String(c.id), name: c.name || '—' };
+            setCreateCompanyList((prev) =>
+              prev.some((p) => String(p.id) === row.id) ? prev : [row]
+            );
+          } catch {
+            if (!cancelled) {
+              setCreateCompanyList([{ id: String(nextComp).trim(), name: '—' }]);
+            }
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [createModal, viewerRoleForUi, form.organization_id, form.company_id]);
+
+  /**
+   * Organization managers (create): hydrate org + companies whenever the modal is open and the company
+   * catalog is still empty. Do NOT bail out only because `organization_id` is already set — `openCreateUserModal`
+   * / auth hints can set org before companies load, which previously skipped this effect forever.
+   */
+  useEffect(() => {
+    if (!createModal || viewerRoleForUi !== 'organization_manager') return;
+    if (createCompanyList.length > 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const me = (await api.getCurrentUser()) as any;
+        const scoped = await loadScopedOrgCompanyForViewer(me, 'organization_manager');
+        let nextOrg = String(form.organization_id || '').trim();
+        if (!nextOrg) {
+          nextOrg = await resolveOrganizationIdForOrganizationManagerUser(me, scoped);
+          if (nextOrg && !cancelled) {
+            setForm((f) => (f.organization_id ? f : { ...f, organization_id: nextOrg }));
+          }
+        }
+        if (!nextOrg || cancelled) return;
+        try {
+          let cos = await loadCompanyOptionsForOrganization(nextOrg);
+          if (cos.length === 0 && scoped.companies.length > 0) cos = scoped.companies;
+          if (!cancelled) setCreateCompanyList(cos);
+        } catch {
+          if (!cancelled) setCreateCompanyList(scoped.companies.length ? scoped.companies : []);
+        }
+        try {
+          const o = await api.getOrganization(nextOrg);
+          if (cancelled) return;
+          setCreateOrgList((prev) => {
+            const id = String((o as any)?.id ?? nextOrg);
+            const name = (o as any)?.name || '—';
+            if (prev.some((p) => String(p.id) === id)) return prev;
+            return dedupeOrgCompanyOptions([...prev, { id, name }]);
+          });
+        } catch {
+          if (cancelled) return;
+          setCreateOrgList((prev) => {
+            if (prev.some((p) => String(p.id) === nextOrg)) return prev;
+            return dedupeOrgCompanyOptions([...prev, { id: nextOrg, name: '—' }]);
+          });
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [createModal, viewerRoleForUi, form.organization_id, createCompanyList.length]);
 
   useEffect(() => {
     if (!editModal) return;
     if (!editForm.organization_id) {
-      setEditCompanyList([]);
-      setEditForm((f) => ({ ...f, company_id: '' }));
+      const keepEditCompanies =
+        viewerRoleForUi === 'organization_manager' ||
+        (viewerRoleForUi === 'company_manager' && !!String(editForm.company_id || '').trim());
+      if (!keepEditCompanies) {
+        setEditCompanyList([]);
+      }
+      if (viewerRoleForUi !== 'company_manager' && viewerRoleForUi !== 'organization_manager') {
+        setEditForm((f) => ({ ...f, company_id: '', department_id: '' }));
+      }
       return;
     }
     let cancelled = false;
     (async () => {
       try {
-        const comps = await api.getCompanies({ organization: editForm.organization_id });
-        const list = (Array.isArray(comps) ? comps : []).map((c: any) => ({
-          id: String(c.id),
-          name: c.name || '—',
-        }));
-        if (!cancelled) setEditCompanyList(list);
+        const list = await loadCompanyOptionsForOrganization(editForm.organization_id);
+        if (!cancelled) {
+          setEditCompanyList((prev) => {
+            if (
+              viewerRoleForUi === 'organization_manager' &&
+              list.length === 0 &&
+              prev.length > 0
+            ) {
+              return prev;
+            }
+            return list;
+          });
+        }
       } catch {
-        if (!cancelled) setEditCompanyList([]);
+        if (!cancelled) {
+          setEditCompanyList((prev) =>
+            viewerRoleForUi === 'organization_manager' && prev.length > 0 ? prev : []
+          );
+        }
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [editForm.organization_id, editModal]);
+  }, [editForm.organization_id, editModal, viewerRoleForUi]);
+
+  /** Edit: merge company row from getCompany when list is missing the selected id (same as create hydration). */
+  useEffect(() => {
+    if (!editModal) return;
+    const cid = String(editForm.company_id || '').trim();
+    if (!cid) return;
+    if (editCompanyList.some((c) => String(c.id) === cid)) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const co = await api.getCompany(cid);
+        if (cancelled || !co?.id) return;
+        const row = { id: String(co.id), name: co.name || '—' };
+        setEditCompanyList((prev) =>
+          prev.some((p) => String(p.id) === row.id) ? prev : [...prev, row]
+        );
+        setEditForm((f) => {
+          if (f.organization_id) return f;
+          const orgRef = co?.organization_id ?? co?.organization;
+          const oid =
+            orgRef != null && typeof orgRef === 'object' && (orgRef as any).id != null
+              ? String((orgRef as any).id).trim()
+              : String(orgRef ?? '').trim();
+          return oid ? { ...f, organization_id: oid } : f;
+        });
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [editModal, editForm.company_id, editCompanyList, editForm.organization_id]);
+
+  /** Edit: when implicit company scope (OM/CM), pick first company if current id not in loaded list. */
+  useEffect(() => {
+    if (!editModal) return;
+    if (editCompanyList.length === 0) return;
+    if (!editForm.organization_id && viewerRoleForUi !== 'company_manager') {
+      if (viewerRoleForUi !== 'organization_manager') return;
+    }
+    const cid = String(editForm.company_id || '').trim();
+    const match = editCompanyList.some((c) => String(c.id) === cid);
+    if (match) return;
+    const firstId = String(editCompanyList[0].id).trim();
+    if (!firstId) return;
+    const needsImplicitCompany = viewerRoleForUi === 'company_manager' || viewerRoleForUi === 'organization_manager';
+    if (!cid && !needsImplicitCompany) return;
+    setEditForm((f) => ({ ...f, company_id: firstId, department_id: '' }));
+  }, [editModal, editCompanyList, editForm.company_id, editForm.organization_id, viewerRoleForUi]);
+
+  /** Edit: company managers — fill org/company from auth scope when row data is incomplete. */
+  useEffect(() => {
+    if (!editModal || viewerRoleForUi !== 'company_manager') return;
+    if (editForm.organization_id && editForm.company_id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const me = (await api.getCurrentUser()) as any;
+        let nextOrg = String(editForm.organization_id || '').trim();
+        let nextComp = String(editForm.company_id || '').trim();
+        if (!nextComp) {
+          const ch = api.companyIdHintsFromAuthUser(me);
+          if (ch[0]) nextComp = String(ch[0]).trim();
+        }
+        if (!nextOrg) {
+          const oh = api.organizationIdHintsFromAuthUser(me);
+          if (oh[0]) nextOrg = String(oh[0]).trim();
+        }
+        if (nextComp && !nextOrg) {
+          try {
+            const c = await api.getCompany(nextComp);
+            const orgRef = c?.organization_id ?? c?.organization;
+            const oid =
+              orgRef != null && typeof orgRef === 'object' && (orgRef as any).id != null
+                ? String((orgRef as any).id).trim()
+                : String(orgRef ?? '').trim();
+            if (oid) nextOrg = oid;
+          } catch {
+            /* ignore */
+          }
+        }
+        if (cancelled) return;
+        setEditForm((f) => {
+          const o = (f.organization_id || nextOrg || '').trim();
+          const c = (f.company_id || nextComp || '').trim();
+          if ((!o && !c) || (f.organization_id === o && f.company_id === c)) return f;
+          return { ...f, organization_id: o || f.organization_id, company_id: c || f.company_id };
+        });
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [editModal, viewerRoleForUi, editForm.organization_id, editForm.company_id]);
+
+  /** Edit: organization managers — same guard as create (org id can exist before company rows hydrate). */
+  useEffect(() => {
+    if (!editModal || viewerRoleForUi !== 'organization_manager') return;
+    if (editCompanyList.length > 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const me = (await api.getCurrentUser()) as any;
+        const scoped = await loadScopedOrgCompanyForViewer(me, 'organization_manager');
+        let nextOrg = String(editForm.organization_id || '').trim();
+        if (!nextOrg) {
+          nextOrg = await resolveOrganizationIdForOrganizationManagerUser(me, scoped);
+          if (nextOrg && !cancelled) {
+            setEditForm((f) => (f.organization_id ? f : { ...f, organization_id: nextOrg }));
+          }
+        }
+        if (!nextOrg || cancelled) return;
+        try {
+          let cos = await loadCompanyOptionsForOrganization(nextOrg);
+          if (cos.length === 0 && scoped.companies.length > 0) cos = scoped.companies;
+          if (!cancelled) setEditCompanyList(cos);
+        } catch {
+          if (!cancelled) setEditCompanyList(scoped.companies.length ? scoped.companies : []);
+        }
+        try {
+          const o = await api.getOrganization(nextOrg);
+          if (cancelled) return;
+          setEditOrgList((prev) => {
+            const id = String((o as any)?.id ?? nextOrg);
+            const name = (o as any)?.name || '—';
+            if (prev.some((p) => String(p.id) === id)) return prev;
+            return dedupeOrgCompanyOptions([...prev, { id, name }]);
+          });
+        } catch {
+          if (cancelled) return;
+          setEditOrgList((prev) => {
+            if (prev.some((p) => String(p.id) === nextOrg)) return prev;
+            return dedupeOrgCompanyOptions([...prev, { id: nextOrg, name: '—' }]);
+          });
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [editModal, viewerRoleForUi, editForm.organization_id, editCompanyList.length]);
+
+  /** Company managers always create employees; keep role aligned so department section + loaders stay in sync with edit. */
+  useEffect(() => {
+    if (!createModal || viewerRoleForUi !== 'company_manager') return;
+    setForm((f) => (f.role === 'employee' ? f : { ...f, role: 'employee' }));
+  }, [createModal, viewerRoleForUi]);
 
   useEffect(() => {
-    if (form.role !== 'employee') {
+    if (!createModal) {
       setDeptCreateOptions([]);
+      prevCreateCompanyIdRef.current = '';
       return;
     }
-    if (!form.company_id) {
+    const cid = String(form.company_id || '').trim();
+    const shouldLoadDepts = shouldLoadDepartmentOptionsForUserForm(
+      viewerRoleForUi,
+      form.role,
+      form.company_id
+    );
+    if (!shouldLoadDepts) {
       setDeptCreateOptions([]);
-      setForm((f) => (f.department_id ? { ...f, department_id: '' } : f));
       prevCreateCompanyIdRef.current = '';
+      if (!cid) {
+        setForm((f) => (f.department_id ? { ...f, department_id: '' } : f));
+      } else if (form.role !== 'employee' && viewerRoleForUi === 'organization_manager') {
+        setForm((f) => (f.department_id ? { ...f, department_id: '' } : f));
+      }
       return;
     }
     const cur = String(form.company_id);
@@ -1413,35 +2231,46 @@ export default function UserManagementScreen() {
     prevCreateCompanyIdRef.current = cur;
     let cancelled = false;
     (async () => {
-      const orgName = createOrgList.find((o) => o.id === form.organization_id)?.name;
-      const compName = createCompanyList.find((c) => c.id === form.company_id)?.name;
-      const list = await loadDepartmentOptions(api, {
-        organizationId: form.organization_id,
-        companyId: form.company_id,
-        organizationName: orgName,
-        companyName: compName,
-      });
+      const list = await loadDepartmentOptionsFromCatalogs(
+        form.organization_id,
+        form.company_id,
+        createOrgList,
+        createCompanyList
+      );
       if (__DEV__) {
-        console.log('Role:', form.role);
-        console.log('Is Employee:', form.role === 'employee');
-        console.log('Department:', form.department_id);
-        console.log('Selected Org:', form.organization_id);
-        console.log('Departments:', list);
+        console.log('[UserMgmt][userForm] MODE: create');
+        console.log('[UserMgmt][userForm] viewerRole:', viewerRoleForUi);
+        console.log('[UserMgmt][userForm] org:', form.organization_id, 'company:', form.company_id, 'dept:', form.department_id);
+        console.log('[UserMgmt][userForm] companies catalog:', createCompanyList.length, 'dept options:', list.length);
       }
       if (!cancelled) setDeptCreateOptions(list);
     })();
     return () => {
       cancelled = true;
     };
-  }, [form.company_id, form.organization_id, form.role, createCompanyList, createOrgList]);
+  }, [
+    createModal,
+    form.company_id,
+    form.organization_id,
+    form.role,
+    createCompanyList,
+    createOrgList,
+    viewerRoleForUi,
+  ]);
 
   useEffect(() => {
-    if (!editModal || editForm.role !== 'employee') {
+    if (!editModal) {
       setDeptEditOptions([]);
-      if (!editModal) prevEditCompanyIdRef.current = '';
+      prevEditCompanyIdRef.current = '';
       return;
     }
-    if (!editForm.company_id) {
+    const cid = String(editForm.company_id || '').trim();
+    const shouldLoadDepts = shouldLoadDepartmentOptionsForUserForm(
+      viewerRoleForUi,
+      editForm.role,
+      editForm.company_id
+    );
+    if (!shouldLoadDepts) {
       setDeptEditOptions([]);
       prevEditCompanyIdRef.current = '';
       return;
@@ -1453,27 +2282,24 @@ export default function UserManagementScreen() {
     prevEditCompanyIdRef.current = cur;
     let cancelled = false;
     (async () => {
-      const orgName = editOrgList.find((o) => o.id === editForm.organization_id)?.name;
-      const compName = editCompanyList.find((c) => c.id === editForm.company_id)?.name;
-      const list = await loadDepartmentOptions(api, {
-        organizationId: editForm.organization_id,
-        companyId: editForm.company_id,
-        organizationName: orgName,
-        companyName: compName,
-      });
+      const list = await loadDepartmentOptionsFromCatalogs(
+        editForm.organization_id,
+        editForm.company_id,
+        editOrgList,
+        editCompanyList
+      );
       if (__DEV__) {
-        console.log('Role (edit):', editForm.role);
-        console.log('Is Employee (edit):', editForm.role === 'employee');
-        console.log('Department (edit):', editForm.department_id);
-        console.log('Selected Org (edit):', editForm.organization_id);
-        console.log('Departments (edit):', list);
+        console.log('[UserMgmt][userForm] MODE: edit');
+        console.log('[UserMgmt][userForm] viewerRole:', viewerRoleForUi);
+        console.log('[UserMgmt][userForm] org:', editForm.organization_id, 'company:', editForm.company_id, 'dept:', editForm.department_id);
+        console.log('[UserMgmt][userForm] companies catalog:', editCompanyList.length, 'dept options:', list.length);
       }
       if (!cancelled) setDeptEditOptions(list);
     })();
     return () => {
       cancelled = true;
     };
-  }, [editModal, editForm.role, editForm.company_id, editForm.organization_id, editCompanyList, editOrgList]);
+  }, [editModal, editForm.role, editForm.company_id, editForm.organization_id, editCompanyList, editOrgList, viewerRoleForUi]);
 
   useEffect(() => {
     const hint = editDeptNameHintRef.current;
@@ -1531,6 +2357,246 @@ export default function UserManagementScreen() {
       setOrgList([]);
     }
   }, []);
+
+  const openCreateUserModal = useCallback(() => {
+    setAddMenuOpen(false);
+    prevCreateCompanyIdRef.current = '';
+    createModalHydrateGenRef.current += 1;
+    const hydrateGen = createModalHydrateGenRef.current;
+
+    const me0 = resolveUserPayloadForRole(user as any);
+    const vrApi = getPrimaryRoleFromUser(me0);
+    const scopeRole: UserRole =
+      viewerRoleForUi === 'organization_manager' ||
+      viewerRoleForUi === 'company_manager' ||
+      viewerRoleForUi === 'super_admin'
+        ? viewerRoleForUi
+        : vrApi;
+
+    let quickOrg = '';
+    let quickComp = '';
+    if (scopeRole === 'company_manager') {
+      const ch = api.companyIdHintsFromAuthUser(me0);
+      if (ch[0]) quickComp = String(ch[0]).trim();
+      const oh = api.organizationIdHintsFromAuthUser(me0);
+      if (oh[0]) quickOrg = String(oh[0]).trim();
+    } else if (scopeRole === 'organization_manager') {
+      const oh = api.organizationIdHintsFromAuthUser(me0);
+      if (oh[0]) quickOrg = String(oh[0]).trim();
+    }
+
+    setForm({
+      email: '',
+      username: '',
+      full_name: '',
+      phone: '',
+      password: '',
+      employee_pin: '',
+      hourly_rate: '',
+      role: 'employee',
+      organization_id: quickOrg,
+      company_id: quickComp,
+      department_id: '',
+    });
+    setCreateOrgList(
+      quickOrg ? dedupeOrgCompanyOptions([{ id: quickOrg, name: '—' }]) : []
+    );
+    if (scopeRole === 'company_manager' && quickComp) {
+      let cmName = '—';
+      const nest =
+        (me0 as any)?.company ??
+        (me0 as any)?.profile?.company ??
+        (me0 as any)?.assigned_company ??
+        (me0 as any)?.selected_company;
+      if (nest && typeof nest === 'object' && String((nest as any).id ?? '') === quickComp) {
+        cmName = String((nest as any).name ?? '').trim() || '—';
+      }
+      setCreateCompanyList([{ id: quickComp, name: cmName }]);
+      void (async () => {
+        try {
+          const c = await api.getCompany(quickComp);
+          if (createModalHydrateGenRef.current !== hydrateGen) return;
+          setCreateCompanyList([{ id: String(c.id), name: c.name || '—' }]);
+        } catch {
+          /* keep placeholder row */
+        }
+      })();
+    } else {
+      setCreateCompanyList([]);
+    }
+    setCreateModal(true);
+
+    void (async () => {
+      let initialOrg = quickOrg;
+      let initialCompany = quickComp;
+      let orgOptions: OrgCompanyOption[] = [];
+      let scopedForOm: { orgs: OrgCompanyOption[]; companies: OrgCompanyOption[] } = { orgs: [], companies: [] };
+      try {
+        const raw = (await api.getCurrentUser()) as any;
+        const me = resolveUserPayloadForRole(
+          user && typeof user === 'object' ? { ...(user as object), ...raw } : raw
+        );
+        const vrApi2 = getPrimaryRoleFromUser(me);
+        const scopeRole2: UserRole =
+          viewerRoleForUi === 'organization_manager' ||
+          viewerRoleForUi === 'company_manager' ||
+          viewerRoleForUi === 'super_admin'
+            ? viewerRoleForUi
+            : vrApi2;
+
+        try {
+          const scoped = await loadScopedOrgCompanyForViewer(me, scopeRole2);
+          scopedForOm = scoped;
+          orgOptions = scoped.orgs;
+          if (scopeRole2 === 'company_manager') {
+            if (scoped.orgs[0]) initialOrg = initialOrg || scoped.orgs[0].id;
+            if (scoped.companies[0]) initialCompany = initialCompany || scoped.companies[0].id;
+          } else if (scopeRole2 === 'organization_manager') {
+            if (scoped.orgs[0]) initialOrg = initialOrg || scoped.orgs[0].id;
+            if (!initialOrg && scoped.companies[0]) {
+              try {
+                const c = await api.getCompany(String(scoped.companies[0].id).trim());
+                const oid = organizationIdFromCompanyRow(c);
+                if (oid) initialOrg = oid;
+              } catch {
+                /* ignore */
+              }
+            }
+          }
+        } catch {
+          orgOptions = [];
+        }
+
+        if (scopeRole2 === 'company_manager') {
+          if (!initialCompany) {
+            const ch = api.companyIdHintsFromAuthUser(me);
+            if (ch[0]) initialCompany = String(ch[0]).trim();
+          }
+          if (!initialOrg) {
+            const oh = api.organizationIdHintsFromAuthUser(me);
+            if (oh[0]) initialOrg = String(oh[0]).trim();
+          }
+          if (initialCompany && !initialOrg) {
+            try {
+              const c = await api.getCompany(initialCompany);
+              const orgRef = c?.organization_id ?? c?.organization;
+              const oid =
+                orgRef != null && typeof orgRef === 'object' && (orgRef as any).id != null
+                  ? String((orgRef as any).id).trim()
+                  : String(orgRef ?? '').trim();
+              if (oid) initialOrg = oid;
+            } catch {
+              /* ignore */
+            }
+          }
+        } else if (scopeRole2 === 'organization_manager' && !initialOrg) {
+          initialOrg = await resolveOrganizationIdForOrganizationManagerUser(me, scopedForOm);
+        }
+
+        if (initialOrg && !orgOptions.some((o) => o.id === initialOrg)) {
+          try {
+            const o = await api.getOrganization(initialOrg);
+            if (o?.id != null) {
+              orgOptions = [...orgOptions, { id: String(o.id), name: o.name || '—' }];
+            } else {
+              orgOptions = [...orgOptions, { id: initialOrg, name: '—' }];
+            }
+          } catch {
+            orgOptions = [...orgOptions, { id: initialOrg, name: '—' }];
+          }
+        }
+
+        if (hydrateGen !== createModalHydrateGenRef.current) return;
+
+        setCreateOrgList(dedupeOrgCompanyOptions(orgOptions));
+
+        if (initialOrg) {
+          try {
+            let cos = await loadCompanyOptionsForOrganization(initialOrg);
+            if (
+              cos.length === 0 &&
+              scopeRole2 === 'organization_manager' &&
+              scopedForOm.companies.length > 0
+            ) {
+              cos = scopedForOm.companies;
+            }
+            if (
+              cos.length === 0 &&
+              scopeRole2 === 'company_manager' &&
+              scopedForOm.companies.length > 0
+            ) {
+              cos = scopedForOm.companies;
+            }
+            if (scopeRole2 === 'company_manager' && initialCompany) {
+              const want = String(initialCompany).trim();
+              const one = cos.filter((x) => String(x.id) === want);
+              if (one.length) {
+                cos = one;
+              } else {
+                try {
+                  const c = await api.getCompany(want);
+                  cos = [{ id: String(c.id), name: c.name || '—' }];
+                } catch {
+                  cos = [{ id: want, name: '—' }];
+                }
+              }
+            }
+            if (hydrateGen !== createModalHydrateGenRef.current) return;
+            setCreateCompanyList(cos);
+          } catch {
+            if (hydrateGen !== createModalHydrateGenRef.current) return;
+            setCreateCompanyList(
+              scopeRole2 === 'organization_manager' && scopedForOm.companies.length > 0
+                ? scopedForOm.companies
+                : scopeRole2 === 'company_manager' && scopedForOm.companies.length > 0
+                  ? scopedForOm.companies
+                  : scopeRole2 === 'company_manager' && initialCompany
+                    ? [{ id: String(initialCompany), name: '—' }]
+                    : []
+            );
+          }
+        } else if (initialCompany && scopeRole2 === 'company_manager') {
+          if (hydrateGen !== createModalHydrateGenRef.current) return;
+          try {
+            const c = await api.getCompany(String(initialCompany).trim());
+            if (hydrateGen !== createModalHydrateGenRef.current) return;
+            setCreateCompanyList([{ id: String(c.id), name: c.name || '—' }]);
+          } catch {
+            setCreateCompanyList([{ id: String(initialCompany).trim(), name: '—' }]);
+          }
+        } else {
+          if (hydrateGen !== createModalHydrateGenRef.current) return;
+          if (
+            (scopeRole2 === 'organization_manager' || scopeRole2 === 'company_manager') &&
+            scopedForOm.companies.length > 0
+          ) {
+            setCreateCompanyList(scopedForOm.companies);
+          } else {
+            setCreateCompanyList([]);
+          }
+        }
+
+        if (hydrateGen !== createModalHydrateGenRef.current) return;
+        setForm((f) => {
+          const nextOrg = (initialOrg || f.organization_id || '').trim();
+          const nextComp = (initialCompany || f.company_id || '').trim();
+          const orgChanged = nextOrg && nextOrg !== String(f.organization_id || '').trim();
+          const compChanged = nextComp && nextComp !== String(f.company_id || '').trim();
+          return {
+            ...f,
+            organization_id: nextOrg || f.organization_id,
+            company_id: nextComp || f.company_id,
+            department_id: orgChanged || compChanged ? '' : f.department_id,
+          };
+        });
+      } catch (e) {
+        if (hydrateGen !== createModalHydrateGenRef.current) return;
+        if (__DEV__) console.warn('[UserManagement] create modal hydrate failed', e);
+        setCreateOrgList([]);
+        /** Do not clear companies here — a partial failure would strand OM on "Loading companies…". */
+      }
+    })();
+  }, [user, sessionRole, viewerRoleForUi]);
 
   const toggleAssignUser = (id: string) => {
     setAssignSelectedUserIds((prev) => {
@@ -1685,7 +2751,7 @@ export default function UserManagementScreen() {
           : canonical === 'company_manager'
             ? 'company_manager'
         : 'employee';
-    const orgId = String(
+    const orgId = normalizeEntityId(
       profile.organization_id ??
         profile.organization ??
         raw.organization_id ??
@@ -1694,7 +2760,7 @@ export default function UserManagementScreen() {
         employee.organization ??
         ''
     );
-    const companyId = String(
+    const companyId = normalizeEntityId(
       profile.company_id ?? profile.company ?? raw.company_id ?? raw.company ?? employee.company_id ?? employee.company ?? ''
     );
     const jobTitle = pickFirstNonEmpty(
@@ -1738,8 +2804,41 @@ export default function UserManagementScreen() {
       try {
         const me = (await api.getCurrentUser()) as any;
         const vr = getPrimaryRoleFromUser(resolveUserPayloadForRole(me));
-        const { orgs } = await loadScopedOrgCompanyForViewer(me, vr);
-        setEditOrgList(orgs);
+        let resolvedOrg = orgId;
+        const resolvedComp = companyId;
+        if (!resolvedOrg && resolvedComp) {
+          try {
+            const c = await api.getCompany(resolvedComp);
+            resolvedOrg = normalizeEntityId(c?.organization_id ?? c?.organization);
+          } catch {
+            /* ignore */
+          }
+        }
+
+        const scoped = await loadScopedOrgCompanyForViewer(me, vr);
+        setEditOrgList(scoped.orgs);
+
+        if (vr === 'organization_manager' && !resolvedOrg) {
+          resolvedOrg = await resolveOrganizationIdForOrganizationManagerUser(me, scoped);
+        }
+
+        if (resolvedOrg) {
+          setEditForm((f) => ({
+            ...f,
+            organization_id: f.organization_id || resolvedOrg,
+          }));
+          try {
+            let cos = await loadCompanyOptionsForOrganization(resolvedOrg);
+            if (cos.length === 0 && vr === 'organization_manager' && scoped.companies.length > 0) {
+              cos = scoped.companies;
+            }
+            setEditCompanyList(cos);
+          } catch {
+            setEditCompanyList(
+              vr === 'organization_manager' && scoped.companies.length > 0 ? scoped.companies : []
+            );
+          }
+        }
       } catch {
         setEditOrgList([]);
       }
@@ -1804,6 +2903,10 @@ export default function UserManagementScreen() {
       return;
     }
     if (viewerRole === 'organization_manager' && form.role === 'super_admin') {
+      Alert.alert('Error', 'This role is not available for your account.');
+      return;
+    }
+    if (viewerRole === 'organization_manager' && form.role === 'organization_manager') {
       Alert.alert('Error', 'This role is not available for your account.');
       return;
     }
@@ -1884,6 +2987,8 @@ export default function UserManagementScreen() {
 
         const profileNested = clean({
           phone: phoneApi,
+          mobile_number: phoneApi,
+          mobile: phoneApi,
           employee_pin: employeePin,
           hourly_rate: hourlyRateNum,
           organization: orgId,
@@ -1894,6 +2999,8 @@ export default function UserManagementScreen() {
         });
         const profileNestedById = clean({
           phone: phoneApi,
+          mobile_number: phoneApi,
+          mobile: phoneApi,
           employee_pin: employeePin,
           hourly_rate: hourlyRateNum,
           organization_id: orgId,
@@ -1906,6 +3013,8 @@ export default function UserManagementScreen() {
         const withProfileByRef = clean({
           ...basePayload,
           phone: phoneApi,
+          mobile_number: phoneApi,
+          mobile: phoneApi,
           employee_pin: employeePin,
           hourly_rate: hourlyRateNum,
           organization: orgId,
@@ -1915,6 +3024,8 @@ export default function UserManagementScreen() {
         const withProfileById = clean({
           ...basePayload,
           phone: phoneApi,
+          mobile_number: phoneApi,
+          mobile: phoneApi,
           employee_pin: employeePin,
           hourly_rate: hourlyRateNum,
           organization_id: orgId,
@@ -1948,11 +3059,9 @@ export default function UserManagementScreen() {
                 clean({ ...roleNamePayload, password_confirm: pwd }),
               ]
             : [];
+        // Try rich signup bodies first so employees are not created as email-only before profile/names/phone apply.
         const rawAttempts: Record<string, any>[] = [
           ...roleFirst,
-          ...withPwdPairs(strictMinimal),
-          clean({ email, username, password: pwd, password1: pwd, password2: pwd }),
-          clean({ email, username: email, password: pwd, password_confirm: pwd }),
           ...(hasNestedProfile
             ? [
                 ...withPwdPairs(
@@ -1979,6 +3088,14 @@ export default function UserManagementScreen() {
                     profile: profileNestedById,
                   })
                 ),
+                ...withPwdPairs(
+                  clean({
+                    email,
+                    username,
+                    password: pwd,
+                    user_profile: profileNestedById,
+                  })
+                ),
               ]
             : []),
           withProfileByRef,
@@ -1988,6 +3105,9 @@ export default function UserManagementScreen() {
           roleNamePayload,
           clean({ ...roleNamePayload, re_password: pwd }),
           clean({ ...roleNamePayload, password_confirm: pwd }),
+          ...withPwdPairs(strictMinimal),
+          clean({ email, username, password: pwd, password1: pwd, password2: pwd }),
+          clean({ email, username: email, password: pwd, password_confirm: pwd }),
           strictMinimal,
           clean({ ...strictMinimal, re_password: pwd }),
           clean({ ...strictMinimal, password2: pwd }),
@@ -2052,11 +3172,13 @@ export default function UserManagementScreen() {
               first_name: firstName,
               last_name: lastNameResolved || '—',
               status: 'active',
+              phone: phoneApi,
+              employee_pin: employeePin,
             });
           } catch {
             /* employee row may already exist */
           }
-          const deptOpt = deptCreateOptions.find((d) => d.id === form.department_id);
+          const deptOpt = optById(deptCreateOptions, form.department_id);
           if (deptOpt && form.department_id) {
             try {
               const linked = await api.findSchedulerEmployeeForAuthUser({
@@ -2071,6 +3193,22 @@ export default function UserManagementScreen() {
               /* ignore */
             }
           }
+        }
+        try {
+          await hydrateCreatedUserDisplayFields(
+            createdUserId,
+            email,
+            fullName,
+            firstName,
+            lastNameResolved,
+            phoneApi,
+            companyId,
+            desiredRole,
+            employeePin,
+            hourlyRateNum
+          );
+        } catch {
+          /* best-effort: user exists even if PATCH shapes differ */
         }
       }
       setCreateModal(false);
@@ -2261,7 +3399,7 @@ export default function UserManagementScreen() {
           rawEmp.company_id ?? (typeof rawEmp.company === 'object' ? rawEmp.company?.id : rawEmp.company) ?? ''
         ).trim();
         const companyChanged = nextCompany !== '' && prevCompany !== nextCompany;
-        const deptOpt = deptEditOptions.find((d) => d.id === editForm.department_id);
+        const deptOpt = optById(deptEditOptions, editForm.department_id);
 
         const empPayload: Record<string, any> = {
           email: editForm.email.trim(),
@@ -2568,11 +3706,19 @@ export default function UserManagementScreen() {
           <View style={styles.addWrap}>
             <TouchableOpacity
               style={styles.addBtn}
-              onPress={() => setAddMenuOpen((o) => !o)}
+              onPress={() => {
+                if (viewerRoleForUi === 'organization_manager' || viewerRoleForUi === 'company_manager') {
+                  void openCreateUserModal();
+                } else {
+                  setAddMenuOpen((o) => !o);
+                }
+              }}
               activeOpacity={0.9}
             >
               <Text style={styles.addBtnText}>+ Add users</Text>
-              <MaterialCommunityIcons name="chevron-down" size={22} color="#fff" />
+              {viewerRoleForUi !== 'organization_manager' && viewerRoleForUi !== 'company_manager' ? (
+                <MaterialCommunityIcons name="chevron-down" size={22} color="#fff" />
+              ) : null}
         </TouchableOpacity>
       </View>
         </View>
@@ -2600,7 +3746,11 @@ export default function UserManagementScreen() {
               <View style={styles.createUserTitleBlock}>
                 <Text style={styles.createUserTitle}>Add New User</Text>
                 <Text style={styles.createUserSubtitle}>
-                  Create a new user account and assign a role.
+                  {viewerRoleForUi === 'company_manager'
+                    ? 'Create a new user for your company and assign a department.'
+                    : viewerRoleForUi === 'organization_manager'
+                      ? 'Create a new user — select a company and department, and assign a role.'
+                      : 'Create a new user account and assign a role.'}
                 </Text>
               </View>
               <TouchableOpacity onPress={() => !saving && setCreateModal(false)} hitSlop={12} style={styles.createCloseBtn}>
@@ -2613,6 +3763,7 @@ export default function UserManagementScreen() {
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator
             >
+              
               <Text style={styles.fieldLabel}>Username</Text>
               <TextInput
                 style={styles.inputOutlined}
@@ -2635,7 +3786,7 @@ export default function UserManagementScreen() {
               <Text style={styles.fieldLabel}>Full Name</Text>
               <TextInput
                 style={styles.inputOutlined}
-                placeholder="Full name"
+                placeholder="John Doe"
                 value={form.full_name}
                 onChangeText={(t) => setForm((f) => ({ ...f, full_name: t }))}
                 placeholderTextColor="#94a3b8"
@@ -2653,7 +3804,7 @@ export default function UserManagementScreen() {
               <Text style={styles.fieldLabel}>Password</Text>
               <TextInput
                 style={styles.inputOutlined}
-                placeholder="Password"
+                placeholder="Temporary password"
                 value={form.password}
                 onChangeText={(t) => setForm((f) => ({ ...f, password: t }))}
                 secureTextEntry
@@ -2678,59 +3829,107 @@ export default function UserManagementScreen() {
                 keyboardType="decimal-pad"
               />
               <Text style={styles.fieldLabel}>Role</Text>
-              <TouchableOpacity
-                style={styles.selectField}
-                onPress={() => setCreateRolePicker(true)}
-                disabled={saving || (sessionRole === 'company_manager' && createEditRolePickerOptions.length <= 1)}
-              >
-                <Text style={styles.selectFieldText}>{createFormRoleLabel(form.role)}</Text>
-                <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
-              </TouchableOpacity>
-              <Text style={styles.fieldLabel}>Organization</Text>
-              <TouchableOpacity
-                style={[styles.selectField, createOrgPickerLocked && styles.selectFieldDisabled]}
-                onPress={() => !createOrgPickerLocked && setCreateOrgPicker(true)}
-                disabled={saving || createOrgPickerLocked}
-              >
-                <Text style={[styles.selectFieldText, !form.organization_id && styles.selectPlaceholder]}>
-                  {form.organization_id
-                    ? createOrgList.find((o) => o.id === form.organization_id)?.name || 'Select organization'
-                    : 'Select organization'}
-                </Text>
-                <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
-              </TouchableOpacity>
-              <Text style={styles.fieldLabel}>Company</Text>
-          <TouchableOpacity
-                style={[
-                  styles.selectField,
-                  (!form.organization_id || createCompanyPickerLocked) && styles.selectFieldDisabled,
-                ]}
-                onPress={() => form.organization_id && !createCompanyPickerLocked && setCreateCompanyPicker(true)}
-                disabled={saving || !form.organization_id || createCompanyPickerLocked}
-              >
-                <Text style={[styles.selectFieldText, !form.company_id && styles.selectPlaceholder]}>
-                  {!form.organization_id
-                    ? 'Select organization first'
-                    : form.company_id
-                      ? createCompanyList.find((c) => c.id === form.company_id)?.name || 'Select company'
-                      : 'Select company'}
-                </Text>
-                <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
-          </TouchableOpacity>
-              {form.role === 'employee' ? (
+              {viewerRoleForUi === 'company_manager' ? (
+                <View style={[styles.selectField, styles.selectFieldDisabled]} pointerEvents="none">
+                  <Text style={styles.selectFieldText}>Employee</Text>
+                </View>
+              ) : (
+                <TouchableOpacity
+                  style={styles.selectField}
+                  onPress={() => setCreateRolePicker(true)}
+                  disabled={saving}
+                >
+                  <Text style={styles.selectFieldText}>{createFormRoleLabel(form.role)}</Text>
+                  <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
+                </TouchableOpacity>
+              )}
+              {viewerRoleForUi === 'company_manager' ? (
+                <>
+                  <Text style={styles.fieldLabel}>Company</Text>
+                  <View style={[styles.selectField, styles.selectFieldDisabled]} pointerEvents="none">
+                    <Text style={[styles.selectFieldText, !form.company_id && styles.selectPlaceholder]}>
+                      {optById(createCompanyList, form.company_id)?.name ||
+                        (createCompanyList.length === 1 ? createCompanyList[0].name : '') ||
+                        (form.company_id ? String(form.company_id) : '') ||
+                        'Resolving your company…'}
+                    </Text>
+                  </View>
+                </>
+              ) : viewerRoleForUi === 'organization_manager' ? (
+                <>
+                  <Text style={styles.fieldLabel}>Company</Text>
+                  <TouchableOpacity
+                    style={[
+                      styles.selectField,
+                      (saving || createCompanyList.length === 0) && styles.selectFieldDisabled,
+                    ]}
+                    onPress={() => createCompanyList.length > 0 && setCreateCompanyPicker(true)}
+                    disabled={saving || createCompanyList.length === 0}
+                  >
+                    <Text style={[styles.selectFieldText, !form.company_id && styles.selectPlaceholder]}>
+                      {createCompanyList.length === 0
+                        ? 'Loading companies…'
+                        : form.company_id
+                          ? optById(createCompanyList, form.company_id)?.name || 'Select company'
+                          : 'Select company'}
+                    </Text>
+                    <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.fieldLabel}>Organization</Text>
+                  <TouchableOpacity
+                    style={[styles.selectField, createOrgPickerLocked && styles.selectFieldDisabled]}
+                    onPress={() => !createOrgPickerLocked && setCreateOrgPicker(true)}
+                    disabled={saving || createOrgPickerLocked}
+                  >
+                    <Text style={[styles.selectFieldText, !form.organization_id && styles.selectPlaceholder]}>
+                      {form.organization_id
+                        ? optById(createOrgList, form.organization_id)?.name || 'Select organization'
+                        : 'Select organization'}
+                    </Text>
+                    <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
+                  </TouchableOpacity>
+                  <Text style={styles.fieldLabel}>Company</Text>
+                  <TouchableOpacity
+                    style={[
+                      styles.selectField,
+                      (!form.organization_id || createCompanyPickerLocked) && styles.selectFieldDisabled,
+                    ]}
+                    onPress={() => form.organization_id && !createCompanyPickerLocked && setCreateCompanyPicker(true)}
+                    disabled={saving || !form.organization_id || createCompanyPickerLocked}
+                  >
+                    <Text style={[styles.selectFieldText, !form.company_id && styles.selectPlaceholder]}>
+                      {!form.organization_id
+                        ? 'Select organization first'
+                        : form.company_id
+                          ? optById(createCompanyList, form.company_id)?.name || 'Select company'
+                          : 'Select company'}
+                    </Text>
+                    <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
+                  </TouchableOpacity>
+                </>
+              )}
+              {showCreateDepartmentSection ? (
                 <>
                   <Text style={styles.fieldLabel}>Department</Text>
                   <TouchableOpacity
-                    style={[styles.selectField, !form.company_id && styles.selectFieldDisabled]}
-                    onPress={() => form.company_id && setCreateDeptPicker(true)}
-                    disabled={saving || !form.company_id}
+                    style={[
+                      styles.selectField,
+                      (saving || !createDeptPickerInteractive) && styles.selectFieldDisabled,
+                    ]}
+                    onPress={() => createDeptPickerInteractive && setCreateDeptPicker(true)}
+                    disabled={saving || !createDeptPickerInteractive}
                   >
                     <Text style={[styles.selectFieldText, !form.department_id && styles.selectPlaceholder]}>
                       {!form.company_id
                         ? 'Select company first'
-                        : form.department_id
-                          ? deptCreateOptions.find((d) => d.id === form.department_id)?.name || 'Department'
-                          : 'Select department'}
+                        : form.role !== 'employee'
+                          ? 'Set role to Employee to choose a department'
+                          : form.department_id
+                            ? optById(deptCreateOptions, form.department_id)?.name || 'Department'
+                            : 'Select department'}
                     </Text>
                     <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                   </TouchableOpacity>
@@ -2769,6 +3968,7 @@ export default function UserManagementScreen() {
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
             >
+              
               <Text style={styles.fieldLabel}>Username</Text>
               <TextInput
                 style={styles.inputOutlined}
@@ -2821,62 +4021,110 @@ export default function UserManagementScreen() {
               />
 
               <Text style={styles.fieldLabel}>Role</Text>
-              <TouchableOpacity
-                style={styles.selectField}
-                onPress={() => setEditRolePicker(true)}
-                disabled={saving || (sessionRole === 'company_manager' && createEditRolePickerOptions.length <= 1)}
-              >
-                <Text style={styles.selectFieldText}>{createFormRoleLabel(editForm.role)}</Text>
-                <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
+              {viewerRoleForUi === 'company_manager' ? (
+                <View style={[styles.selectField, styles.selectFieldDisabled]} pointerEvents="none">
+                  <Text style={styles.selectFieldText}>{createFormRoleLabel(editForm.role)}</Text>
+                </View>
+              ) : (
+                <TouchableOpacity
+                  style={styles.selectField}
+                  onPress={() => setEditRolePicker(true)}
+                  disabled={saving}
+                >
+                  <Text style={styles.selectFieldText}>{createFormRoleLabel(editForm.role)}</Text>
+                  <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                 </TouchableOpacity>
+              )}
 
-              <Text style={styles.fieldLabel}>Organization</Text>
-              <TouchableOpacity
-                style={[styles.selectField, editOrgPickerLocked && styles.selectFieldDisabled]}
-                onPress={() => !editOrgPickerLocked && setEditOrgPicker(true)}
-                disabled={saving || editOrgPickerLocked}
-              >
-                <Text style={[styles.selectFieldText, !editForm.organization_id && styles.selectPlaceholder]}>
-                  {editForm.organization_id
-                    ? editOrgList.find((o) => o.id === editForm.organization_id)?.name || 'Select organization'
-                    : 'Select organization'}
-                </Text>
-                <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
-              </TouchableOpacity>
+              {viewerRoleForUi === 'company_manager' ? (
+                <>
+                  <Text style={styles.fieldLabel}>Company</Text>
+                  <View style={[styles.selectField, styles.selectFieldDisabled]} pointerEvents="none">
+                    <Text style={[styles.selectFieldText, !editForm.company_id && styles.selectPlaceholder]}>
+                      {optById(editCompanyList, editForm.company_id)?.name ||
+                        (editCompanyList.length === 1 ? editCompanyList[0].name : '') ||
+                        (editForm.company_id ? String(editForm.company_id) : '') ||
+                        ''}
+                    </Text>
+                  </View>
+                </>
+              ) : viewerRoleForUi === 'organization_manager' ? (
+                <>
+                  <Text style={styles.fieldLabel}>Company</Text>
+                  <TouchableOpacity
+                    style={[
+                      styles.selectField,
+                      (saving || editCompanyList.length === 0) && styles.selectFieldDisabled,
+                    ]}
+                    onPress={() => editCompanyList.length > 0 && setEditCompanyPicker(true)}
+                    disabled={saving || editCompanyList.length === 0}
+                  >
+                    <Text style={[styles.selectFieldText, !editForm.company_id && styles.selectPlaceholder]}>
+                      {editCompanyList.length === 0
+                        ? ''
+                        : editForm.company_id
+                          ? optById(editCompanyList, editForm.company_id)?.name || 'Select company'
+                          : 'Select company'}
+                    </Text>
+                    <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.fieldLabel}>Organization</Text>
+                  <TouchableOpacity
+                    style={[styles.selectField, editOrgPickerLocked && styles.selectFieldDisabled]}
+                    onPress={() => !editOrgPickerLocked && setEditOrgPicker(true)}
+                    disabled={saving || editOrgPickerLocked}
+                  >
+                    <Text style={[styles.selectFieldText, !editForm.organization_id && styles.selectPlaceholder]}>
+                      {editForm.organization_id
+                        ? optById(editOrgList, editForm.organization_id)?.name || 'Select organization'
+                        : 'Select organization'}
+                    </Text>
+                    <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
+                  </TouchableOpacity>
 
-              <Text style={styles.fieldLabel}>Company</Text>
-              <TouchableOpacity
-                style={[
-                  styles.selectField,
-                  (!editForm.organization_id || editCompanyPickerLocked) && styles.selectFieldDisabled,
-                ]}
-                onPress={() => editForm.organization_id && !editCompanyPickerLocked && setEditCompanyPicker(true)}
-                disabled={saving || !editForm.organization_id || editCompanyPickerLocked}
-              >
-                <Text style={[styles.selectFieldText, !editForm.company_id && styles.selectPlaceholder]}>
-                  {!editForm.organization_id
-                    ? 'Select organization first'
-                    : editForm.company_id
-                      ? editCompanyList.find((c) => c.id === editForm.company_id)?.name || 'Select company'
-                      : 'Select company'}
-                </Text>
-                <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
-              </TouchableOpacity>
+                  <Text style={styles.fieldLabel}>Company</Text>
+                  <TouchableOpacity
+                    style={[
+                      styles.selectField,
+                      (!editForm.organization_id || editCompanyPickerLocked) && styles.selectFieldDisabled,
+                    ]}
+                    onPress={() => editForm.organization_id && !editCompanyPickerLocked && setEditCompanyPicker(true)}
+                    disabled={saving || !editForm.organization_id || editCompanyPickerLocked}
+                  >
+                    <Text style={[styles.selectFieldText, !editForm.company_id && styles.selectPlaceholder]}>
+                      {!editForm.organization_id
+                        ? 'Select organization first'
+                        : editForm.company_id
+                          ? optById(editCompanyList, editForm.company_id)?.name || 'Select company'
+                          : 'Select company'}
+                    </Text>
+                    <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
+                  </TouchableOpacity>
+                </>
+              )}
 
-              {editForm.role === 'employee' ? (
+              {showEditDepartmentSection ? (
                 <>
                   <Text style={styles.fieldLabel}>Department</Text>
                   <TouchableOpacity
-                    style={[styles.selectField, !editForm.company_id && styles.selectFieldDisabled]}
-                    onPress={() => editForm.company_id && setEditDeptPicker(true)}
-                    disabled={saving || !editForm.company_id}
+                    style={[
+                      styles.selectField,
+                      (saving || !editDeptPickerInteractive) && styles.selectFieldDisabled,
+                    ]}
+                    onPress={() => editDeptPickerInteractive && setEditDeptPicker(true)}
+                    disabled={saving || !editDeptPickerInteractive}
                   >
                     <Text style={[styles.selectFieldText, !editForm.department_id && styles.selectPlaceholder]}>
                       {!editForm.company_id
                         ? 'Select company first'
-                        : editForm.department_id
-                          ? deptEditOptions.find((d) => d.id === editForm.department_id)?.name || 'Department'
-                          : 'Select department'}
+                        : editForm.role !== 'employee'
+                          ? 'Only employees use departments — switch role to Employee'
+                          : editForm.department_id
+                            ? optById(deptEditOptions, editForm.department_id)?.name || 'Department'
+                            : 'Select department'}
                     </Text>
                     <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                   </TouchableOpacity>
@@ -2920,14 +4168,14 @@ export default function UserManagementScreen() {
         visible={createDeptPicker}
         title="Select department"
         options={deptCreateOptions.map((d) => ({ id: d.id, label: d.name }))}
-        onSelect={(id) => setForm((f) => ({ ...f, department_id: id }))}
+        onSelect={(id) => setForm((f) => ({ ...f, department_id: String(id) }))}
         onClose={() => setCreateDeptPicker(false)}
       />
       <OptionPickerModal
         visible={editDeptPicker}
         title="Select department"
         options={deptEditOptions.map((d) => ({ id: d.id, label: d.name }))}
-        onSelect={(id) => setEditForm((f) => ({ ...f, department_id: id }))}
+        onSelect={(id) => setEditForm((f) => ({ ...f, department_id: String(id) }))}
         onClose={() => setEditDeptPicker(false)}
       />
 
@@ -2935,42 +4183,7 @@ export default function UserManagementScreen() {
         <Pressable style={styles.addMenuOverlay} onPress={() => setAddMenuOpen(false)}>
           <View style={[styles.addMenuOuter, { pointerEvents: 'box-none' }]}>
             <Pressable style={styles.addMenu} onPress={(e) => e.stopPropagation()}>
-              <TouchableOpacity
-                style={styles.addMenuItem}
-                onPress={async () => {
-                  setAddMenuOpen(false);
-                  let initialOrg = '';
-                  let initialCompany = '';
-                  try {
-                    const me = (await api.getCurrentUser()) as any;
-                    const vr = getPrimaryRoleFromUser(resolveUserPayloadForRole(me));
-                    const { orgs, companies } = await loadScopedOrgCompanyForViewer(me, vr);
-                    setCreateOrgList(orgs);
-                    if (vr === 'company_manager') {
-                      if (orgs[0]) initialOrg = orgs[0].id;
-                      if (companies[0]) initialCompany = companies[0].id;
-                    } else if (vr === 'organization_manager' && orgs.length === 1) {
-                      initialOrg = orgs[0].id;
-                    }
-                  } catch {
-                    setCreateOrgList([]);
-                  }
-                  setForm({
-                    email: '',
-                    username: '',
-                    full_name: '',
-                    phone: '',
-                    password: '',
-                    employee_pin: '',
-                    hourly_rate: '',
-                    role: 'employee',
-                    organization_id: initialOrg,
-                    company_id: initialCompany,
-                    department_id: '',
-                  });
-                  setCreateModal(true);
-                }}
-              >
+              <TouchableOpacity style={styles.addMenuItem} onPress={() => void openCreateUserModal()}>
                 <Text style={styles.addMenuItemText}>Add single user</Text>
               </TouchableOpacity>
               <View style={styles.addMenuDivider} />
@@ -3100,7 +4313,7 @@ export default function UserManagementScreen() {
             <TouchableOpacity
               style={styles.selectField}
               onPress={() => setAssignRolePicker(true)}
-              disabled={saving || (sessionRole === 'company_manager' && assignRolePickerOptions.length <= 1)}
+              disabled={saving || (viewerRoleForUi === 'company_manager' && assignRolePickerOptions.length <= 1)}
             >
               <Text style={styles.selectFieldText}>{assignRoleLabel(assignRole)}</Text>
               <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
@@ -3137,14 +4350,14 @@ export default function UserManagementScreen() {
         visible={createOrgPicker}
         title="Organization"
         options={createOrgList.map((o) => ({ id: o.id, label: o.name }))}
-        onSelect={(id) => setForm((f) => ({ ...f, organization_id: id, company_id: '' }))}
+        onSelect={(id) => setForm((f) => ({ ...f, organization_id: String(id), company_id: '' }))}
         onClose={() => setCreateOrgPicker(false)}
       />
       <OptionPickerModal
         visible={createCompanyPicker}
         title="Company"
         options={createCompanyList.map((c) => ({ id: c.id, label: c.name }))}
-        onSelect={(id) => setForm((f) => ({ ...f, company_id: id }))}
+        onSelect={(id) => setForm((f) => ({ ...f, company_id: String(id) }))}
         onClose={() => setCreateCompanyPicker(false)}
       />
       <OptionPickerModal
@@ -3164,14 +4377,14 @@ export default function UserManagementScreen() {
         visible={editOrgPicker}
         title="Organization"
         options={editOrgList.map((o) => ({ id: o.id, label: o.name }))}
-        onSelect={(id) => setEditForm((f) => ({ ...f, organization_id: id, company_id: '' }))}
+        onSelect={(id) => setEditForm((f) => ({ ...f, organization_id: String(id), company_id: '' }))}
         onClose={() => setEditOrgPicker(false)}
       />
       <OptionPickerModal
         visible={editCompanyPicker}
         title="Company"
         options={editCompanyList.map((c) => ({ id: c.id, label: c.name }))}
-        onSelect={(id) => setEditForm((f) => ({ ...f, company_id: id }))}
+        onSelect={(id) => setEditForm((f) => ({ ...f, company_id: String(id) }))}
         onClose={() => setEditCompanyPicker(false)}
       />
       <OptionPickerModal
@@ -3349,6 +4562,7 @@ const styles = StyleSheet.create({
   createUserSubtitle: { fontSize: 14, color: '#64748b', marginTop: 8, lineHeight: 20 },
   createCloseBtn: { padding: 4 },
   fieldLabel: { fontSize: 14, fontWeight: '700', color: '#0f172a', marginBottom: 8, marginTop: 14 },
+  fieldHint: { fontSize: 13, color: '#64748b', marginBottom: 10, marginTop: 4 },
   inputOutlined: {
     borderWidth: 1,
     borderColor: '#0f172a',

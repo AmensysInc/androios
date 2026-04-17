@@ -207,8 +207,11 @@ export default function MissedShiftsScreen() {
 
   const loadMeta = useCallback(async () => {
     try {
-      const orgsRaw = await api.getOrganizations(isOrgManager ? { organization_manager: user?.id } : undefined);
-      setOrganizations(Array.isArray(orgsRaw) ? orgsRaw : []);
+      const orgsRaw = await api.getOrganizations();
+      const orgList = Array.isArray(orgsRaw) ? orgsRaw : [];
+      setOrganizations(
+        isOrgManager ? api.filterOrganizationsForOperationsManager(orgList, user?.id) : orgList
+      );
 
       let compRaw: any[] = [];
       if (isOrgManager || role === 'company_manager') {

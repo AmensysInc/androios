@@ -358,6 +358,8 @@ function mergeAuthUserWritePayload(current: Record<string, any> | null | undefin
     last_name: patch.last_name ?? cur.last_name,
     full_name: patch.full_name ?? cur.full_name ?? prof.full_name,
     phone: patch.phone ?? cur.phone ?? prof.phone,
+    mobile_number: patch.mobile_number ?? cur.mobile_number ?? prof.mobile_number,
+    mobile: patch.mobile ?? cur.mobile ?? prof.mobile,
     employee_pin: patch.employee_pin ?? prof.employee_pin ?? prof.pin,
     hourly_rate: patch.hourly_rate ?? prof.hourly_rate,
     organization_id: patch.organization_id ?? cur.organization_id ?? prof.organization_id,
@@ -923,10 +925,60 @@ export async function deleteCalendarEvent(id: string) {
 }
 
 // —— Scheduler: organizations ——
+
+/**
+ * Collect user ids from an organization row that may reference a manager under several API field names.
+ * Used for client-side scoping when list filters like `?organization_manager=` are not supported (400).
+ */
+export function organizationManagerUserIdsFromOrganizationRow(o: any): string[] {
+  const out: string[] = [];
+  const push = (raw: any) => {
+    if (raw == null || raw === '') return;
+    if (typeof raw === 'object' && !Array.isArray(raw)) {
+      const id = (raw as any).id ?? (raw as any).pk;
+      if (id != null && String(id).trim() !== '') out.push(String(id).trim());
+      return;
+    }
+    const s = String(raw).trim();
+    if (s) out.push(s);
+  };
+  if (!o || typeof o !== 'object') return [];
+  push((o as any).organization_manager_id);
+  push((o as any).organization_manager);
+  push((o as any).operations_manager_id);
+  push((o as any).operations_manager);
+  push((o as any).org_manager_id);
+  push((o as any).org_manager);
+  const arrFields = [(o as any).organization_managers, (o as any).managers, (o as any).org_managers];
+  for (const arr of arrFields) {
+    if (!Array.isArray(arr)) continue;
+    for (const x of arr) push(x);
+  }
+  return [...new Set(out)];
+}
+
+/** Organizations whose manager FK(s) match the given user id (client-side filter). */
+export function filterOrganizationsForOperationsManager(
+  organizations: any[] | undefined,
+  userId: string | undefined | null
+): SchedulerOrganization[] {
+  const uid = String(userId ?? '').trim();
+  if (!uid || !Array.isArray(organizations)) return [];
+  return organizations.filter((o) => organizationManagerUserIdsFromOrganizationRow(o).includes(uid));
+}
+
 export async function getOrganizations(
   params?: Record<string, any>
 ): Promise<SchedulerOrganization[]> {
-  const raw = await apiClient.get<any>('/scheduler/organizations/', params);
+  /** Several deployments 400 on `organization_manager` / `operations_manager` query keys — never send them. */
+  let safe: Record<string, any> | undefined = params;
+  if (params && typeof params === 'object') {
+    const rest = { ...params };
+    delete rest.organization_manager;
+    delete rest.operations_manager;
+    safe = Object.keys(rest).length ? rest : undefined;
+  }
+  const raw = await apiClient.get<any>('/scheduler/organizations/', safe);
   return normalizePaginatedList<SchedulerOrganization>(raw);
 }
 
@@ -1858,6 +1910,9 @@ export async function createEmployeeLinkedToUser(input: {
   email?: string;
   job_title?: string;
   status?: string;
+  /** Optional contact / PIN — serializers often accept these without changing core models. */
+  phone?: string;
+  employee_pin?: string;
 }): Promise<any> {
   const cid = String(input.companyId || '').trim();
   const uid = String(input.userId || '').trim();
@@ -1877,6 +1932,10 @@ export async function createEmployeeLinkedToUser(input: {
     job_title: input.job_title,
     position: input.job_title,
     status: input.status || 'active',
+    phone: input.phone,
+    mobile_number: input.phone,
+    employee_pin: input.employee_pin,
+    pin: input.employee_pin,
   });
   const uidNum = /^\d+$/.test(uid) ? parseInt(uid, 10) : NaN;
   const bodies: Record<string, any>[] = [
@@ -1915,6 +1974,8 @@ export async function assignSchedulerEmployeeToCompany(input: {
   email?: string;
   job_title?: string;
   status?: string;
+  phone?: string;
+  employee_pin?: string;
 }): Promise<any> {
   try {
     return await createEmployeeLinkedToUser(input);
@@ -1949,6 +2010,10 @@ export async function assignSchedulerEmployeeToCompany(input: {
         position: input.job_title,
         title: input.job_title,
         status: input.status || 'active',
+        phone: input.phone,
+        mobile_number: input.phone,
+        employee_pin: input.employee_pin,
+        pin: input.employee_pin,
       }),
       strip({
         company_id: cid,
@@ -1957,6 +2022,10 @@ export async function assignSchedulerEmployeeToCompany(input: {
         email: input.email,
         job_title: input.job_title,
         position: input.job_title,
+        phone: input.phone,
+        mobile_number: input.phone,
+        employee_pin: input.employee_pin,
+        pin: input.employee_pin,
       }),
       strip({
         company: cid,
@@ -1964,6 +2033,8 @@ export async function assignSchedulerEmployeeToCompany(input: {
         last_name: input.last_name,
         job_title: input.job_title,
         position: input.job_title,
+        phone: input.phone,
+        employee_pin: input.employee_pin,
       }),
       strip({ company_id: cid, job_title: input.job_title, position: input.job_title }),
       strip({ company: cid, job_title: input.job_title, position: input.job_title }),
