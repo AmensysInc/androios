@@ -1,5 +1,6 @@
 import React from 'react';
-import { createDrawerNavigator } from '@react-navigation/drawer';
+import { createDrawerNavigator, DrawerToggleButton } from '@react-navigation/drawer';
+import { getFocusedRouteNameFromRoute } from '@react-navigation/native';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth, type User } from '../context/AuthContext';
@@ -24,7 +25,7 @@ import TimeClockScreen from '../screens/scheduler/TimeClockScreen';
 import EmployeeScheduleScreen from '../screens/scheduler/EmployeeScheduleScreen';
 import MissedShiftsScreen from '../screens/scheduler/MissedShiftsScreen';
 import HotelCleaningScreen from '../screens/hotel/HotelCleaningScreen';
-import EmployeeHotelScreen from '../screens/hotel/EmployeeHotelScreen';
+import EmployeeRoomsStack from './EmployeeRoomsStack';
 import { useHotelCleaningAccess } from '../hooks/useHotelCleaningAccess';
 
 const Drawer = createDrawerNavigator();
@@ -138,7 +139,7 @@ function CustomDrawerContent({ navigation }: any) {
           <>
             <Text style={styles.sectionLabel}>Motel</Text>
             <TouchableOpacity style={styles.menuItem} onPress={() => navigation.navigate('Hotel')}>
-              <Text style={styles.menuLabel}>Hotel</Text>
+              <Text style={styles.menuLabel}>House Keeping</Text>
             </TouchableOpacity>
           </>
         )}
@@ -232,8 +233,19 @@ export default function MainDrawer() {
       <Drawer.Screen name="TimeClock" component={TimeClockScreen} options={{ title: 'Time Clock' }} />
       <Drawer.Screen name="EmployeeSchedule" component={EmployeeScheduleScreen} options={{ title: 'Employee Schedule' }} />
       <Drawer.Screen name="MissedShifts" component={MissedShiftsScreen} options={{ title: 'Missed Shifts' }} />
-      <Drawer.Screen name="Hotel" component={HotelCleaningScreen} options={{ title: 'Hotel' }} />
-      <Drawer.Screen name="EmployeeHotel" component={EmployeeHotelScreen} options={{ title: 'Rooms' }} />
+      <Drawer.Screen name="Hotel" component={HotelCleaningScreen} options={{ title: 'House Keeping' }} />
+      <Drawer.Screen
+        name="EmployeeHotel"
+        component={EmployeeRoomsStack}
+        options={({ route }) => {
+          const routeName = getFocusedRouteNameFromRoute(route) ?? 'EmployeeRoomsList';
+          return {
+            title: 'Rooms',
+            headerShown: routeName === 'EmployeeRoomsList',
+            headerLeft: () => <DrawerToggleButton tintColor="#0f172a" />,
+          };
+        }}
+      />
     </Drawer.Navigator>
   );
 }

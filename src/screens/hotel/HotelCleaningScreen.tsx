@@ -318,8 +318,16 @@ export default function HotelCleaningScreen() {
     }
     setSubmitBusy(true);
     try {
-      await api.uploadMotelCleaningImages(sessionId, images);
-      await api.completeMotelCleaning(sessionId);
+      const assets: api.MotelCleaningImageAsset[] = images.slice(0, 5).map((img, i) => {
+        const fieldKey = api.MOTEL_CLEANING_PROOF_FIELD_KEYS[i] ?? 'door';
+        return {
+          uri: img.uri,
+          fieldKey,
+          fileName: `${fieldKey}.jpg`,
+          mimeType: img.mimeType ?? 'image/jpeg',
+        };
+      });
+      await api.completeMotelCleaningWithPhotos(sessionId, assets);
       setUploadOpen(false);
       setImages([]);
       setSessionId(null);

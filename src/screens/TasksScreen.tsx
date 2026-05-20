@@ -20,6 +20,29 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
 import { HttpError } from '../lib/api-client';
+import { fetchTasksForTasksPage } from '../lib/tasksPageFetch';
+import {
+  applyTasksPageClientFilters,
+  catalogsFromPickerOptions,
+} from '../lib/tasksPageWorkflow';
+import {
+  classifyTaskType,
+  companyNameFromTask,
+  eventId,
+  organizationNameFromTask,
+  taskChecklistSourceName,
+  taskDueDisplay,
+  taskIsCompleted,
+  taskIsInProgress,
+  isTaskVisibleToUser,
+  taskStatusLabel,
+  taskTypeLabel,
+  taskUserId,
+  taskWorkflowStatus,
+} from '../lib/tasksWorkflow';
+import { useTasksScopeFilters } from '../hooks/useTasksScopeFilters';
+import { companyIdHintsFromAuthUser, invalidateCalendarEventsCache, invalidateWorkTasksCache } from '../api';
+import { devWarn } from '../lib/logger';
 
 
 type PickerOption = { id: string; label: string };
@@ -136,26 +159,6 @@ function getDateRangeForPreset(preset: string): { start: Date; end: Date } {
   return { start: s, end: e };
 }
 
-/** Stable id for calendar event rows (delete / patch / list keys). */
-function eventId(ev: any): string {
-  const id = ev?.id ?? ev?.pk ?? ev?.uuid;
-  if (id == null || id === '') return '';
-  return String(id);
-}
-
-function taskUserId(t: any): string {
-  const userLike =
-    t?.user_id ??
-    t?.assigned_user_id ??
-    t?.assignee_id ??
-    t?.owner_id ??
-    (typeof t?.user === 'object' ? t?.user?.id : t?.user) ??
-    (typeof t?.assigned_user === 'object' ? t?.assigned_user?.id : t?.assigned_user) ??
-    (typeof t?.assignee === 'object' ? t?.assignee?.id : t?.assignee) ??
-    (typeof t?.owner === 'object' ? t?.owner?.id : t?.owner);
-  return userLike == null ? '' : String(userLike);
-}
-
 /** Display name from task payload only (no email — email is resolved via member directory). */
 function taskAssignedNameOnly(t: any): string {
   const candidates = [
@@ -204,84 +207,6 @@ function taskPriority(t: any): string {
   return '';
 }
 
-type TaskScope = 'personal' | 'admin_assigned' | 'template';
-
-function isTaskLikeEvent(t: any): boolean {
-  if (!t || typeof t !== 'object') return false;
-  if (t.is_task === true || t.for_task === true) return true;
-  const etRaw = t.event_type ?? t.type ?? t.kind;
-  if (etRaw && typeof etRaw === 'object') {
-    const nested = String(
-      (etRaw as any).name ?? (etRaw as any).slug ?? (etRaw as any).label ?? ''
-    ).toLowerCase();
-    if (nested.includes('task')) return true;
-  }
-  const et = String(etRaw ?? '').toLowerCase();
-  if (et.includes('task')) return true;
-  // Some backends store tasks as calendar "events" with a subtype/category.
-  const sub = String(t.event_subtype ?? t.task_category ?? t.category ?? '').toLowerCase();
-  if (sub.includes('task')) return true;
-  // Heuristic: if task-specific fields exist, treat as task.
-  if (t.priority != null && String(t.priority).trim() !== '') return true;
-  if (t.completed === true || t.is_completed === true || t.done === true || t.is_done === true) return true;
-  // Assigned work items often omit event_type but include title + assignee FKs.
-  const hasAssignee =
-    t.assigned_user_id != null ||
-    t.assignee_id != null ||
-    (typeof t.assigned_user === 'object' && t.assigned_user != null) ||
-    (typeof t.assignee === 'object' && t.assignee != null);
-  const title = String(t.title ?? t.name ?? '').trim();
-  if (title && hasAssignee) {
-    const avoid = (s: string) =>
-      s.includes('meeting') || s.includes('focus') || s.includes('habit') || s.includes('routine');
-    if (typeof etRaw === 'object' && etRaw != null) {
-      const nest = String((etRaw as any).name ?? (etRaw as any).slug ?? '').toLowerCase();
-      if (avoid(nest)) return false;
-    }
-    if (avoid(et) || avoid(sub)) return false;
-    return true;
-  }
-  return false;
-}
-
-function eventOverlapsRange(ev: any, start: Date, end: Date): boolean {
-  const stRaw =
-    ev?.start_time ??
-    ev?.start ??
-    ev?.scheduled_at ??
-    ev?.date ??
-    ev?.start_date ??
-    ev?.created_at ??
-    ev?.created;
-  if (!stRaw) {
-    const enOnly = ev?.end_time ?? ev?.end ?? ev?.end_date;
-    if (!enOnly) return false;
-    const en = new Date(enOnly);
-    if (Number.isNaN(en.getTime())) return false;
-    return en.getTime() >= start.getTime() && en.getTime() <= end.getTime();
-  }
-  const st = new Date(stRaw);
-  if (Number.isNaN(st.getTime())) return false;
-  const enRaw = ev?.end_time ?? ev?.end ?? ev?.end_date;
-  const en = enRaw ? new Date(enRaw) : null;
-  if (en && !Number.isNaN(en.getTime())) {
-    return st.getTime() <= end.getTime() && en.getTime() >= start.getTime();
-  }
-  return st.getTime() >= start.getTime() && st.getTime() <= end.getTime();
-}
-
-function taskScopeCategory(t: any): TaskScope {
-  if (t.template_id != null && String(t.template_id).trim() !== '') return 'template';
-  if (t.template && typeof t.template === 'object') return 'template';
-  const et = String(t.event_subtype ?? t.task_category ?? t.category ?? '').toLowerCase();
-  if (et.includes('template')) return 'template';
-  if (t.assigned_by_admin || t.is_admin_assigned || et.includes('admin')) return 'admin_assigned';
-  const src = String(t.source ?? '').toLowerCase();
-  if (src.includes('template')) return 'template';
-  if (src.includes('admin')) return 'admin_assigned';
-  return 'personal';
-}
-
 function formatDatetimeLocal(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -308,27 +233,11 @@ function taskNotesText(t: any): string {
 }
 
 function taskCreatedLine(t: any): string {
-  const raw = t?.created_at ?? t?.created ?? t?.date_created ?? t?.start_time;
+  const raw = t?.created_at ?? t?.created ?? t?.date_created;
   if (!raw) return '';
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) return '';
   return `Created ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`;
-}
-
-function taskIsCompleted(t: any): boolean {
-  if (t?.completed === true || t?.is_completed === true) return true;
-  if (t?.done === true || t?.is_done === true) return true;
-  if (t?.completed_at || t?.completed_on || t?.completed_date) return true;
-  const raw = t?.status ?? t?.task_status ?? t?.event_status ?? t?.state ?? '';
-  const st = String(raw).toLowerCase().replace(/[\s-]+/g, '_');
-  if (['completed', 'complete', 'done', 'closed', 'resolved'].includes(st)) return true;
-  if (st.endsWith('_completed')) return true;
-  return false;
-}
-
-/** Label for the status pill (matches common backend enums). */
-function taskStatusLabel(t: any): 'Completed' | 'Pending' {
-  return taskIsCompleted(t) ? 'Completed' : 'Pending';
 }
 
 function displayLocalFromStr(s: string): string {
@@ -545,7 +454,13 @@ export default function TasksScreen() {
   const [startStr, setStartStr] = useState('');
   const [endStr, setEndStr] = useState('');
   const [saving, setSaving] = useState(false);
-  const [createPicker, setCreatePicker] = useState<'assign' | 'priority' | 'start' | 'end' | null>(null);
+  const [createPicker, setCreatePicker] = useState<
+    'assign' | 'priority' | 'start' | 'end' | 'organization' | 'company' | null
+  >(null);
+  const [createOrgId, setCreateOrgId] = useState('');
+  const [createCompanyId, setCreateCompanyId] = useState('');
+  const [createCompanyOptions, setCreateCompanyOptions] = useState<PickerOption[]>([]);
+  const [createOrgOptions, setCreateOrgOptions] = useState<PickerOption[]>([]);
 
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
@@ -575,30 +490,22 @@ export default function TasksScreen() {
   const [subSaving, setSubSaving] = useState(false);
   const [subPicker, setSubPicker] = useState<'assign' | 'priority' | 'start' | 'end' | null>(null);
 
-  const [filterScope, setFilterScope] = useState('all');
   const [filterMember, setFilterMember] = useState('all');
   const [filterPriority, setFilterPriority] = useState('all');
-  const [filterDate, setFilterDate] = useState('today');
-  const [filterStatus, setFilterStatus] = useState('pending');
+  const [filterDate, setFilterDate] = useState('all');
+  const [filterStatus, setFilterStatus] = useState('all');
 
   const [memberOptions, setMemberOptions] = useState<PickerOption[]>([{ id: 'all', label: 'All Members' }]);
   /** Resolve calendar assignee id/email to display name (from getUsers). */
   const [memberDisplayById, setMemberDisplayById] = useState<Record<string, string>>({});
   const [memberDisplayByEmail, setMemberDisplayByEmail] = useState<Record<string, string>>({});
   const [memberIdByEmail, setMemberIdByEmail] = useState<Record<string, string>>({});
-  const [picker, setPicker] = useState<'scope' | 'member' | 'priority' | 'date' | 'status' | null>(null);
+  const [scopeCompaniesRaw, setScopeCompaniesRaw] = useState<any[]>([]);
+  const [picker, setPicker] = useState<'member' | 'date' | 'status' | 'organization' | 'company' | null>(
+    null
+  );
 
   const canViewAllMembers = ['super_admin', 'organization_manager', 'company_manager'].includes(role || '');
-
-  const scopeOptions: PickerOption[] = useMemo(
-    () => [
-      { id: 'all', label: 'All Tasks' },
-      { id: 'personal', label: 'Personal' },
-      { id: 'admin_assigned', label: 'Admin Assigned' },
-      { id: 'template', label: 'Template' },
-    ],
-    []
-  );
 
   const priorityOptions: PickerOption[] = useMemo(
     () => [
@@ -632,17 +539,45 @@ export default function TasksScreen() {
   const statusOptions: PickerOption[] = useMemo(
     () => [
       { id: 'pending', label: 'Pending' },
-      { id: 'all', label: 'All' },
+      { id: 'in_progress', label: 'In Progress' },
       { id: 'completed', label: 'Completed' },
+      { id: 'all', label: 'All statuses' },
     ],
     []
   );
+
+  const {
+    showOrgFilter,
+    showCompanyFilter,
+    organizationOptions,
+    companyOptions,
+    filterOrgId,
+    filterCompanyId,
+    setFilterCompanyId,
+    onSelectOrganization,
+    scopeReady,
+  } = useTasksScopeFilters(user, role);
+
+  const managerCompanyIds = useMemo(() => {
+    if (role !== 'company_manager' || !user) return new Set<string>();
+    const hints = companyIdHintsFromAuthUser(user as any);
+    if (hints.length > 0) return new Set(hints);
+    return new Set(companyOptions.filter((o) => o.id !== 'all').map((o) => o.id));
+  }, [role, user, companyOptions]);
+
+  const teamUserIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const o of memberOptions) {
+      if (o.id !== 'all') ids.add(o.id);
+    }
+    return ids;
+  }, [memberOptions]);
 
   const assignCreateOptions: PickerOption[] = useMemo(() => {
     const base: PickerOption[] = [{ id: 'self', label: 'Assign to myself' }];
     if (!canViewAllMembers) return base;
     const rest = memberOptions.filter((o) => o.id !== 'all');
-    return [...base, ...rest];
+    return [{ id: 'none', label: 'Unassigned' }, ...base, ...rest];
   }, [canViewAllMembers, memberOptions]);
 
   const assignMemberPickOptions: PickerOption[] = useMemo(() => {
@@ -668,8 +603,22 @@ export default function TasksScreen() {
       return;
     }
     try {
-      const raw = await api.getUsers();
-      const list = Array.isArray(raw) ? raw : [];
+      let list: any[] = [];
+      const cid = filterCompanyId !== 'all' ? filterCompanyId : '';
+      if (cid) {
+        const empRaw = await api.getEmployees({ company: cid, status: 'active' });
+        list = (Array.isArray(empRaw) ? empRaw : []).map((e: any) => ({
+          id: e.user_id ?? (typeof e.user === 'object' ? e.user?.id : e.user),
+          email: e.email ?? e.user?.email,
+          first_name: e.first_name,
+          last_name: e.last_name,
+          full_name: e.full_name,
+        }));
+        list = list.filter((u: any) => u.id != null && String(u.id).trim() !== '');
+      } else {
+        const raw = await api.getUsers();
+        list = Array.isArray(raw) ? raw : [];
+      }
       const opts: PickerOption[] = [{ id: 'all', label: 'All Members' }];
       const byId: Record<string, string> = {};
       const byEmail: Record<string, string> = {};
@@ -702,200 +651,196 @@ export default function TasksScreen() {
       setMemberDisplayByEmail({});
       setMemberIdByEmail({});
     }
-  }, [canViewAllMembers]);
+  }, [canViewAllMembers, filterCompanyId]);
+
+  useEffect(() => {
+    if (!scopeReady) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await api.getCompanies();
+        if (!cancelled) setScopeCompaniesRaw(Array.isArray(raw) ? raw : []);
+      } catch {
+        if (!cancelled) setScopeCompaniesRaw([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [scopeReady, filterOrgId]);
+
+  const scopeCatalogs = useMemo(
+    () => catalogsFromPickerOptions(organizationOptions, companyOptions, scopeCompaniesRaw),
+    [organizationOptions, companyOptions, scopeCompaniesRaw]
+  );
 
   const load = useCallback(async () => {
     try {
-      console.log('[tasks] Fetching tasks...');
-      const { start, end } = getDateRangeForPreset(filterDate);
-      // Prefer server-side filtering, but fall back to broader queries and client filtering
-      // because many backends do not support `event_type=task` or time-range filters consistently.
-      const rangeParams: Record<string, any> = {
-        start_time__gte: start.toISOString(),
-        start_time__lte: end.toISOString(),
-      };
-      const taskRangeParams: Record<string, any> = { event_type: 'task', ...rangeParams };
-      const mergeUnique = (items: any[]) => {
-        const seen = new Set<string>();
-        const out: any[] = [];
-        for (const t of items) {
-          const key = eventId(t) || `${String(t?.title || t?.name || '')}|${String(t?.start_time || t?.created_at || '')}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          out.push(t);
-        }
-        return out;
-      };
-      const fetchBy = async (base: Record<string, any>, extra?: Record<string, any>) => {
-        const params = { ...(base || {}), ...(extra || {}) };
-        if (typeof __DEV__ !== 'undefined' && __DEV__) {
-          console.log('[tasks] GET /calendar/events/', params);
-        }
-        const res = await api.getCalendarEvents(params);
-        return Array.isArray(res) ? res : [];
-      };
-
-      const applyClientTaskFilter = (items: any[]) =>
-        items.filter(Boolean).filter((t) => isTaskLikeEvent(t) && eventOverlapsRange(t, start, end));
-
-      const userScopeParams = (id: string) => [
-        { user: id },
-        { assigned_user: id },
-        { assignee: id },
-        { owner: id },
-        { user__id: id },
-        { assigned_user__id: id },
-      ];
-
-      let raw: any[] = [];
-      try {
-        if (canViewAllMembers && filterMember !== 'all') {
-          const scoped = userScopeParams(filterMember);
-          const first = await Promise.all(scoped.map((extra) => fetchBy(taskRangeParams, extra)));
-          raw = mergeUnique(first.flat());
-        } else if (!canViewAllMembers) {
-          const uid = user?.id;
-          if (!uid) {
-            raw = [];
-          } else {
-            const first = await Promise.all(userScopeParams(uid).map((extra) => fetchBy(taskRangeParams, extra)));
-            raw = mergeUnique(first.flat());
-          }
-        } else {
-          raw = await fetchBy(taskRangeParams);
-        }
-      } catch {
-        raw = [];
-      }
-
-      let tasksOnly = applyClientTaskFilter(raw);
-      if (typeof __DEV__ !== 'undefined' && __DEV__) {
-        console.log('[tasks] initial fetch results', { raw: raw.length, tasksOnly: tasksOnly.length });
-      }
-
-      // If nothing matches as a task in range, broaden the query (ignore event_type / bad filters) and filter client-side.
-      if (tasksOnly.length === 0) {
-        const uid = user?.id;
-        const extraSets: Array<Record<string, any> | undefined> = [];
-        if (canViewAllMembers && filterMember !== 'all') {
-          for (const p of userScopeParams(filterMember)) extraSets.push(p);
-        } else if (!canViewAllMembers && uid) {
-          for (const p of userScopeParams(uid)) extraSets.push(p);
-        } else if (uid) {
-          extraSets.push(undefined, { user: uid });
-        } else {
-          extraSets.push(undefined);
-        }
-
-        const batches = await Promise.all(
-          extraSets.map(async (extra) => {
-            const a = await fetchBy(rangeParams, extra).catch(() => []);
-            if (a.length > 0) return a;
-            const b = await fetchBy({}, extra).catch(() => []);
-            return b;
-          })
-        );
-        raw = mergeUnique(batches.flat());
-        tasksOnly = applyClientTaskFilter(raw);
-        if (typeof __DEV__ !== 'undefined' && __DEV__) {
-          console.log('[tasks] broadened fetch results', { raw: raw.length, tasksOnly: tasksOnly.length });
-        }
-      }
-      // Admin view: if the backend enforces scoping and we still got nothing, fetch per-user and merge.
-      // This keeps "All Tasks" working without backend model/API changes.
-      if (tasksOnly.length === 0 && canViewAllMembers && filterMember === 'all') {
-        const ids = memberOptions.map((o) => o.id).filter((id) => id !== 'all');
-        const subset = ids.slice(0, 40); // safety cap
-        if (subset.length > 0) {
-          const perUser = await Promise.all(
-            subset.map(async (id) => {
-              const rp = { start_time__gte: start.toISOString(), start_time__lte: end.toISOString() };
-              const batches = await Promise.all(
-                userScopeParams(id).map((extra) => fetchBy(rp, extra).catch(() => []))
-              );
-              return batches.flat();
-            })
-          );
-          const merged = mergeUnique(perUser.flat());
-          const tasksFromUsers = merged.filter((t) => isTaskLikeEvent(t) && eventOverlapsRange(t, start, end));
-          setTasks(tasksFromUsers);
-          return;
-        }
-      }
-      if (typeof __DEV__ !== 'undefined' && __DEV__ && tasksOnly.length === 0) {
-        console.warn('[tasks] no task-like events returned', { filterDate, canViewAllMembers, filterMember });
-      }
-      if (typeof __DEV__ !== 'undefined' && __DEV__) {
-        console.log('[tasks] setTasks', { count: tasksOnly.length });
-      }
-      setTasks(tasksOnly);
+      const rows = await fetchTasksForTasksPage({
+        role: role ?? null,
+        userId: String(user?.id ?? ''),
+        canViewAllMembers,
+        organizations: scopeCatalogs.organizations,
+        companies: scopeCatalogs.companies,
+      });
+      setTasks(rows);
     } catch (e) {
-      console.warn(e);
+      devWarn(e);
       setTasks([]);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [user?.id, canViewAllMembers, filterMember, filterDate, memberOptions]);
+  }, [user?.id, role, canViewAllMembers, scopeCatalogs]);
+
+  const bustTaskCacheAndReload = useCallback(() => {
+    invalidateCalendarEventsCache();
+    invalidateWorkTasksCache();
+    load();
+  }, [load]);
 
   useEffect(() => {
     loadMembers();
   }, [loadMembers]);
 
   useEffect(() => {
+    if (canViewAllMembers && !scopeReady) return;
     load();
-  }, [load]);
+  }, [load, canViewAllMembers, scopeReady]);
+
+  useEffect(() => {
+    setFilterMember('all');
+  }, [filterOrgId, filterCompanyId]);
 
   const filteredTasks = useMemo(() => {
-    return tasks.filter((t) => {
-      const done = taskIsCompleted(t);
-      if (filterStatus === 'pending' && done) return false;
-      if (filterStatus === 'completed' && !done) return false;
-
-      if (filterPriority !== 'all') {
-        const pr = taskPriority(t);
-        const normalized = pr || 'medium';
-        if (normalized !== filterPriority) return false;
+    const { start, end } = getDateRangeForPreset(filterDate);
+    return applyTasksPageClientFilters(
+      tasks,
+      {
+        organizationId: filterOrgId,
+        companyId: filterCompanyId,
+        memberId: filterMember,
+        datePreset: filterDate,
+        status: filterStatus,
+        priority: filterPriority,
+        rangeStart: start,
+        rangeEnd: end,
+        skipDateFilter: filterDate === 'all',
+      },
+      {
+        role: role ?? null,
+        userId: String(user?.id ?? ''),
+        canViewAllMembers,
+        organizations: scopeCatalogs.organizations,
+        companies: scopeCatalogs.companies,
+        managerCompanyIds,
+        teamUserIds,
       }
-
-      if (filterScope !== 'all') {
-        const cat = taskScopeCategory(t);
-        if (filterScope === 'personal' && cat !== 'personal') return false;
-        if (filterScope === 'admin_assigned' && cat !== 'admin_assigned') return false;
-        if (filterScope === 'template' && cat !== 'template') return false;
-      }
-
-      if (canViewAllMembers && filterMember !== 'all') {
-        const tid = taskUserId(t);
-        if (tid && tid !== filterMember) return false;
-      }
-
-      return true;
-    });
-  }, [tasks, filterStatus, filterPriority, filterScope, filterMember, canViewAllMembers]);
+    );
+  }, [
+    tasks,
+    filterOrgId,
+    filterCompanyId,
+    filterMember,
+    filterDate,
+    filterStatus,
+    filterPriority,
+    canViewAllMembers,
+    role,
+    user?.id,
+    scopeCatalogs,
+    managerCompanyIds,
+    teamUserIds,
+  ]);
 
   const listTasks = useMemo(() => filteredTasks.filter((t) => !taskParentId(t)), [filteredTasks]);
 
   const onRefresh = () => {
     setRefreshing(true);
-    load();
+    bustTaskCacheAndReload();
   };
 
   const resetCreateForm = useCallback(() => {
-    const now = new Date();
-    const end = new Date(now.getTime() + 60 * 60 * 1000);
-    setStartStr(formatDatetimeLocal(now));
-    setEndStr(formatDatetimeLocal(end));
+    setStartStr('');
+    setEndStr('');
     setNewTitle('');
     setNewDescription('');
     setCreatePriority('medium');
     setAllDay(false);
     setCreateAssignKey('self');
     setCreatePicker(null);
+    setCreateOrgId('');
+    setCreateCompanyId('');
   }, []);
+
+  const showCreateOrgCompany = showOrgFilter || showCompanyFilter;
+
+  const loadCreateCompanyOptions = useCallback(async (orgId: string) => {
+    try {
+      const raw = await api.getCompanies();
+      const list = Array.isArray(raw) ? raw : [];
+      const opts: PickerOption[] = [];
+      for (const c of list) {
+        const id = String((c as any).id ?? '').trim();
+        if (!id) continue;
+        const oid =
+          String(
+            (c as any).organization_id ??
+              ((c as any).organization && typeof (c as any).organization === 'object'
+                ? (c as any).organization.id
+                : (c as any).organization) ??
+              ''
+          ).trim();
+        if (orgId && orgId !== 'all' && oid !== orgId) continue;
+        opts.push({ id, label: String((c as any).name ?? id) });
+      }
+      setCreateCompanyOptions(opts);
+      if (opts.length === 1) setCreateCompanyId(opts[0].id);
+    } catch {
+      setCreateCompanyOptions([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!modalOpen || !showCreateOrgCompany) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await api.getOrganizations();
+        const list = Array.isArray(raw) ? raw : [];
+        const opts: PickerOption[] = [];
+        for (const o of list) {
+          const id = String((o as any).id ?? '').trim();
+          if (!id) continue;
+          opts.push({ id, label: String((o as any).name ?? id) });
+        }
+        if (!cancelled) setCreateOrgOptions(opts);
+      } catch {
+        if (!cancelled) setCreateOrgOptions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [modalOpen, showCreateOrgCompany]);
+
+  useEffect(() => {
+    if (!modalOpen) return;
+    void loadCreateCompanyOptions(createOrgId);
+  }, [modalOpen, createOrgId, loadCreateCompanyOptions]);
 
   const openNewTask = () => {
     resetCreateForm();
+    const defaultOrg =
+      filterOrgId && filterOrgId !== 'all'
+        ? filterOrgId
+        : organizationOptions.find((o) => o.id !== 'all')?.id ?? '';
+    const defaultCo =
+      filterCompanyId && filterCompanyId !== 'all'
+        ? filterCompanyId
+        : companyOptions.find((o) => o.id !== 'all')?.id ?? '';
+    setCreateOrgId(defaultOrg);
+    setCreateCompanyId(defaultCo);
     setModalOpen(true);
   };
 
@@ -905,9 +850,17 @@ export default function TasksScreen() {
       Alert.alert('Validation', 'Title is required');
       return;
     }
+    if (!startStr.trim()) {
+      Alert.alert('Validation', allDay ? 'Select a date' : 'Select a start date and time');
+      return;
+    }
     let start = parseUserDateTime(startStr);
     if (!start) {
       Alert.alert('Validation', allDay ? 'Select a valid date' : 'Enter a valid start date/time');
+      return;
+    }
+    if (!allDay && !endStr.trim()) {
+      Alert.alert('Validation', 'Select an end date and time');
       return;
     }
     let end = parseUserDateTime(endStr);
@@ -929,27 +882,52 @@ export default function TasksScreen() {
       }
     }
 
-    const targetUser = createAssignKey === 'self' ? user?.id : createAssignKey;
-    if (!targetUser) {
-      Alert.alert('Validation', 'Select a user to assign');
+    const assigneeId =
+      createAssignKey === 'none'
+        ? undefined
+        : createAssignKey === 'self'
+          ? user?.id
+            ? String(user.id)
+            : undefined
+          : createAssignKey;
+
+    if (createAssignKey !== 'none' && !assigneeId) {
+      Alert.alert('Validation', 'Select a user to assign, or choose Unassigned');
       return;
+    }
+
+    const orgForCreate = String(createOrgId ?? '').trim();
+    const coForCreate = String(createCompanyId ?? '').trim();
+    if (showCreateOrgCompany) {
+      if (!orgForCreate || orgForCreate === 'all') {
+        Alert.alert('Validation', 'Select an organization');
+        return;
+      }
+      if (!coForCreate || coForCreate === 'all') {
+        Alert.alert('Validation', 'Select a company');
+        return;
+      }
     }
 
     setSaving(true);
     try {
-      await api.createTaskEvent({
+      const created = await api.createWorkTask({
         title,
         description: newDescription.trim() || undefined,
         priority: createPriority,
-        isAllDay: allDay,
-        startIso: start.toISOString(),
-        endIso: end.toISOString(),
-        assigneeUserId: String(targetUser),
+        assigneeUserId: assigneeId,
+        organizationId: orgForCreate || undefined,
+        companyId: coForCreate || undefined,
+        dueDateIso: start.toISOString(),
       });
       setModalOpen(false);
       setCreatePicker(null);
       resetCreateForm();
-      load();
+      invalidateCalendarEventsCache();
+      if (created && typeof created === 'object') {
+        setTasks((prev) => dedupeTasks([created, ...prev]));
+      }
+      bustTaskCacheAndReload();
     } catch (e: unknown) {
       Alert.alert('Error', formatTaskApiError(e));
     } finally {
@@ -982,8 +960,17 @@ export default function TasksScreen() {
     );
     try {
       let updatedTask: any = null;
+      const tt = String(task?.task_type ?? '').toLowerCase();
+      const useWorkTaskApi = tt === 'manual' || tt === 'assigned';
       try {
-        updatedTask = await api.updateTaskCompleted(id, next);
+        if (useWorkTaskApi) {
+          updatedTask = await api.updateWorkTaskStatus(
+            id,
+            next ? 'completed' : taskIsInProgress(task) ? 'in_progress' : 'pending'
+          );
+        } else {
+          updatedTask = await api.updateTaskCompleted(id, next);
+        }
       } catch (e: unknown) {
         const fallbacks = [
           { completed: next },
@@ -1017,10 +1004,9 @@ export default function TasksScreen() {
           })
         );
       }
-      load();
+      bustTaskCacheAndReload();
     } catch (e: unknown) {
-      // Roll back by reloading from server.
-      load();
+      bustTaskCacheAndReload();
       Alert.alert('Error', formatTaskApiError(e));
     }
   };
@@ -1087,7 +1073,7 @@ export default function TasksScreen() {
       });
       setEditTask(null);
       setEditPicker(null);
-      load();
+      bustTaskCacheAndReload();
     } catch (e: unknown) {
       Alert.alert('Error', formatTaskApiError(e));
     } finally {
@@ -1129,7 +1115,7 @@ export default function TasksScreen() {
     try {
       await api.assignTaskEvent(id, assignToId);
       setAssignTask(null);
-      load();
+      bustTaskCacheAndReload();
     } catch (e: unknown) {
       Alert.alert('Error', formatTaskApiError(e));
     } finally {
@@ -1201,7 +1187,7 @@ export default function TasksScreen() {
       });
       setSubtaskParent(null);
       setSubPicker(null);
-      load();
+      bustTaskCacheAndReload();
     } catch (e: unknown) {
       Alert.alert('Error', formatTaskApiError(e));
     } finally {
@@ -1226,7 +1212,7 @@ export default function TasksScreen() {
     const run = async () => {
       try {
         await api.deleteCalendarEvent(id);
-        load();
+        bustTaskCacheAndReload();
       } catch (e: any) {
         Alert.alert('Error', e?.message || 'Failed to delete');
       }
@@ -1251,20 +1237,32 @@ export default function TasksScreen() {
 
   const pickerConfig = useMemo(() => {
     switch (picker) {
-      case 'scope':
-        return { title: 'Tasks', options: scopeOptions, selectedId: filterScope };
       case 'member':
         return { title: 'Member', options: memberOptions, selectedId: filterMember };
-      case 'priority':
-        return { title: 'Priority', options: priorityOptions, selectedId: filterPriority };
       case 'date':
         return { title: 'Date', options: dateOptions, selectedId: filterDate };
       case 'status':
         return { title: 'Status', options: statusOptions, selectedId: filterStatus };
+      case 'organization':
+        return { title: 'Organization', options: organizationOptions, selectedId: filterOrgId };
+      case 'company':
+        return { title: 'Company', options: companyOptions, selectedId: filterCompanyId };
       default:
         return { title: '', options: [] as PickerOption[], selectedId: undefined };
     }
-  }, [picker, scopeOptions, memberOptions, priorityOptions, dateOptions, statusOptions, filterScope, filterMember, filterPriority, filterDate, filterStatus]);
+  }, [
+    picker,
+    memberOptions,
+    dateOptions,
+    statusOptions,
+    organizationOptions,
+    companyOptions,
+    filterMember,
+    filterDate,
+    filterStatus,
+    filterOrgId,
+    filterCompanyId,
+  ]);
 
   if (loading) {
     return (
@@ -1284,6 +1282,15 @@ export default function TasksScreen() {
   );
 
   const currentAssigneeName = (task: any) => {
+    const summary = task?.assigned_to_summary;
+    if (typeof summary === 'string' && summary.trim()) return summary.trim();
+    if (Array.isArray(summary) && summary.length > 0) {
+      const first = summary[0];
+      if (typeof first === 'string') return first;
+      if (first && typeof first === 'object') {
+        return String(first.email ?? first.name ?? first.id ?? '').trim();
+      }
+    }
     const named = taskAssignedNameOnly(task);
     if (named) return named;
     const uid = taskUserId(task);
@@ -1323,7 +1330,11 @@ export default function TasksScreen() {
                   </View>
                   <Text style={styles.pageTitle}>Tasks</Text>
                 </View>
-                <Text style={styles.pageSubtitle}>Manage your tasks and events in one place</Text>
+                <Text style={styles.pageSubtitle}>
+                  {canViewAllMembers
+                    ? 'Manual and shift-assigned checklist tasks for your organization'
+                    : 'Tasks assigned to you from shifts and direct assignments'}
+                </Text>
               </View>
               <View style={styles.actionsRow}>
                 <TouchableOpacity style={styles.refreshBtn} onPress={onRefresh} activeOpacity={0.85}>
@@ -1341,13 +1352,34 @@ export default function TasksScreen() {
                 <MaterialCommunityIcons name="filter-variant" size={18} color="#64748b" />
                 <Text style={styles.filtersLabel}>Filters:</Text>
               </View>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterScroll}>
-                {filterChip('scope', labelFor(scopeOptions, filterScope, 'All Tasks'))}
-                {filterChip('member', labelFor(memberOptions, filterMember, 'All Members'))}
-                {filterChip('priority', labelFor(priorityOptions, filterPriority, 'All Priorities'))}
-                {filterChip('date', labelFor(dateOptions, filterDate, 'Today'))}
-                {filterChip('status', labelFor(statusOptions, filterStatus, 'Pending'))}
-              </ScrollView>
+              <View style={styles.filterWrap}>
+                {showOrgFilter ? (
+                  <View style={styles.filterField}>
+                    <Text style={styles.filterFieldLabel}>Organization</Text>
+                    {filterChip('organization', labelFor(organizationOptions, filterOrgId, 'All organizations'))}
+                  </View>
+                ) : null}
+                {showCompanyFilter ? (
+                  <View style={styles.filterField}>
+                    <Text style={styles.filterFieldLabel}>Company</Text>
+                    {filterChip('company', labelFor(companyOptions, filterCompanyId, 'All companies'))}
+                  </View>
+                ) : null}
+                {canViewAllMembers ? (
+                  <View style={styles.filterField}>
+                    <Text style={styles.filterFieldLabel}>Member</Text>
+                    {filterChip('member', labelFor(memberOptions, filterMember, 'All Members'))}
+                  </View>
+                ) : null}
+                <View style={styles.filterField}>
+                  <Text style={styles.filterFieldLabel}>Date</Text>
+                  {filterChip('date', labelFor(dateOptions, filterDate, 'Today'))}
+                </View>
+                <View style={styles.filterField}>
+                  <Text style={styles.filterFieldLabel}>Status</Text>
+                  {filterChip('status', labelFor(statusOptions, filterStatus, 'All statuses'))}
+                </View>
+              </View>
             </View>
           </View>
         }
@@ -1373,6 +1405,30 @@ export default function TasksScreen() {
           const subs = tid ? tasks.filter((t) => taskParentId(t) === tid) : [];
           const notes = taskNotesText(item);
           const itemDone = taskIsCompleted(item);
+          const itemInProgress = taskIsInProgress(item);
+          const statusPillStyle = itemDone
+            ? styles.statusPillDone
+            : itemInProgress
+              ? styles.statusPillInProgress
+              : styles.statusPillPending;
+          const statusIcon = itemDone
+            ? 'check-circle'
+            : itemInProgress
+              ? 'progress-clock'
+              : 'clock-outline';
+          const typeKind = classifyTaskType(item);
+          const typePillStyle =
+            typeKind === 'checklist_assigned'
+              ? styles.typePillAssigned
+              : typeKind === 'checklist_template'
+                ? styles.typePillTemplate
+                : styles.typePillManual;
+          const assigneeLabel = currentAssigneeName(item);
+          const orgName = organizationNameFromTask(item);
+          const coName = companyNameFromTask(item);
+          const created = taskCreatedLine(item);
+          const dueLine = taskDueDisplay(item);
+          const checklistSource = taskChecklistSourceName(item);
           return (
             <View style={styles.card}>
               <View style={styles.cardTopRow}>
@@ -1383,27 +1439,51 @@ export default function TasksScreen() {
                 </TouchableOpacity>
                 <View style={styles.cardMain}>
                   <Text style={[styles.taskTitle, itemDone && styles.taskTitleDone]} numberOfLines={2}>
-                    {item.title || 'Task'}
+                    {item.title || item.task_name || 'Task'}
                   </Text>
-                  <Text style={styles.taskMeta}>{taskCreatedLine(item)}</Text>
+                  {created ? <Text style={styles.taskCreated}>{created}</Text> : null}
+                  <View style={styles.taskDetailBlock}>
+                    {orgName ? <Text style={styles.taskDetailLine}>{orgName}</Text> : null}
+                    {coName ? <Text style={styles.taskDetailLine}>{coName}</Text> : null}
+                    {assigneeLabel && assigneeLabel !== '—' ? (
+                      <Text style={styles.taskDetailLine}>Assigned: {assigneeLabel}</Text>
+                    ) : canViewAllMembers ? (
+                      <Text style={styles.taskDetailLineMuted}>Unassigned</Text>
+                    ) : null}
+                    {dueLine ? <Text style={styles.taskDetailLine}>Due: {dueLine}</Text> : null}
+                    {checklistSource ? (
+                      <Text style={styles.taskDetailLine}>Checklist: {checklistSource}</Text>
+                    ) : null}
+                  </View>
                 </View>
-                <View style={styles.cardBadgesRow}>
+                <View style={styles.cardBadgesCol}>
+                  <View style={[styles.typePill, typePillStyle]}>
+                    <Text style={styles.typePillText}>{taskTypeLabel(item)}</Text>
+                  </View>
+                  <View style={[styles.statusPill, statusPillStyle]}>
+                    <MaterialCommunityIcons
+                      name={statusIcon}
+                      size={14}
+                      color={itemDone ? '#fff' : itemInProgress ? '#1d4ed8' : '#64748b'}
+                    />
+                    <Text
+                      style={
+                        itemDone
+                          ? styles.statusPillTextDone
+                          : itemInProgress
+                            ? styles.statusPillTextInProgress
+                            : styles.statusPillTextPending
+                      }
+                    >
+                      {taskWorkflowStatus(item) === 'pending' ? 'pending' : taskStatusLabel(item)}
+                    </Text>
+                  </View>
                   <View style={[styles.priorityPill, { backgroundColor: pb.bg, borderColor: pb.border }]}>
                     <Text style={[styles.priorityPillText, { color: pb.text }]}>{pr}</Text>
                   </View>
-                  <View style={[styles.statusPill, itemDone ? styles.statusPillDone : styles.statusPillPending]}>
-                    <MaterialCommunityIcons
-                      name={itemDone ? 'check-circle' : 'clock-outline'}
-                      size={14}
-                      color={itemDone ? '#fff' : '#64748b'}
-                    />
-                    <Text style={itemDone ? styles.statusPillTextDone : styles.statusPillTextPending}>
-                      {taskStatusLabel(item)}
-                    </Text>
-                  </View>
                 </View>
                 <TouchableOpacity onPress={() => tid && toggleExpanded(tid)} hitSlop={8} style={styles.chevronHit}>
-                  <MaterialCommunityIcons name={isOpen ? 'chevron-up' : 'chevron-down'} size={24} color="#64748b" />
+                  <MaterialCommunityIcons name={isOpen ? 'chevron-right' : 'chevron-right'} size={24} color="#64748b" />
                 </TouchableOpacity>
               </View>
 
@@ -1416,13 +1496,31 @@ export default function TasksScreen() {
                         <View style={[styles.priorityPill, styles.priorityPillSm, { backgroundColor: pb.bg, borderColor: pb.border }]}>
                           <Text style={[styles.priorityPillText, { color: pb.text }]}>{pr}</Text>
                         </View>
-                        <View style={[styles.statusPill, styles.statusPillSm, itemDone ? styles.statusPillDone : styles.statusPillPending]}>
+                        <View
+                          style={[
+                            styles.statusPill,
+                            styles.statusPillSm,
+                            itemDone
+                              ? styles.statusPillDone
+                              : itemInProgress
+                                ? styles.statusPillInProgress
+                                : styles.statusPillPending,
+                          ]}
+                        >
                           <MaterialCommunityIcons
-                            name={itemDone ? 'check-circle' : 'clock-outline'}
+                            name={itemDone ? 'check-circle' : itemInProgress ? 'progress-clock' : 'clock-outline'}
                             size={14}
-                            color={itemDone ? '#fff' : '#64748b'}
+                            color={itemDone ? '#fff' : itemInProgress ? '#1d4ed8' : '#64748b'}
                           />
-                          <Text style={itemDone ? styles.statusPillTextDone : styles.statusPillTextPending}>
+                          <Text
+                            style={
+                              itemDone
+                                ? styles.statusPillTextDone
+                                : itemInProgress
+                                  ? styles.statusPillTextInProgress
+                                  : styles.statusPillTextPending
+                            }
+                          >
                             {taskStatusLabel(item)}
                           </Text>
                         </View>
@@ -1495,11 +1593,11 @@ export default function TasksScreen() {
         options={pickerConfig.options}
         selectedId={pickerConfig.selectedId}
         onSelect={(id) => {
-          if (picker === 'scope') setFilterScope(id);
           if (picker === 'member') setFilterMember(id);
-          if (picker === 'priority') setFilterPriority(id);
           if (picker === 'date') setFilterDate(id);
           if (picker === 'status') setFilterStatus(id);
+          if (picker === 'organization') onSelectOrganization(id);
+          if (picker === 'company') setFilterCompanyId(id);
         }}
         onClose={() => setPicker(null)}
       />
@@ -1549,7 +1647,39 @@ export default function TasksScreen() {
                 </TouchableOpacity>
                 </View>
 
-              <Text style={styles.fieldLabel}>Assign to User</Text>
+              {showCreateOrgCompany ? (
+                  <>
+                    <Text style={styles.fieldLabel}>Organization *</Text>
+                    <TouchableOpacity
+                      style={styles.selectField}
+                      onPress={() => setCreatePicker('organization')}
+                      activeOpacity={0.85}
+                    >
+                      <Text style={styles.selectFieldText} numberOfLines={1}>
+                        {labelFor(createOrgOptions, createOrgId, 'Select organization')}
+                      </Text>
+                      <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
+                    </TouchableOpacity>
+
+                    <Text style={styles.fieldLabel}>Company *</Text>
+                    <TouchableOpacity
+                      style={styles.selectField}
+                      onPress={() => setCreatePicker('company')}
+                      activeOpacity={0.85}
+                      disabled={!createOrgId}
+                    >
+                      <Text
+                        style={[styles.selectFieldText, !createOrgId && styles.selectFieldTextDisabled]}
+                        numberOfLines={1}
+                      >
+                        {labelFor(createCompanyOptions, createCompanyId, 'Select company')}
+                      </Text>
+                      <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
+                    </TouchableOpacity>
+                  </>
+                ) : null}
+
+                <Text style={styles.fieldLabel}>Assign to User</Text>
                 <TouchableOpacity style={styles.selectField} onPress={() => setCreatePicker('assign')} activeOpacity={0.85}>
                   <Text style={styles.selectFieldText} numberOfLines={1}>
                     {labelFor(assignCreateOptions, createAssignKey, 'Assign to myself')}
@@ -1666,20 +1796,45 @@ export default function TasksScreen() {
                   ) : (
                     <>
                       <Text style={styles.createModalPickerTitle}>
-                        {createPicker === 'assign' ? 'Assign to User' : 'Priority'}
+                        {createPicker === 'assign'
+                          ? 'Assign to User'
+                          : createPicker === 'organization'
+                            ? 'Organization'
+                            : createPicker === 'company'
+                              ? 'Company'
+                              : 'Priority'}
                       </Text>
                       <FlatList
-                        data={createPicker === 'assign' ? assignCreateOptions : createPriorityOptions}
+                        data={
+                          createPicker === 'assign'
+                            ? assignCreateOptions
+                            : createPicker === 'organization'
+                              ? createOrgOptions
+                              : createPicker === 'company'
+                                ? createCompanyOptions
+                                : createPriorityOptions
+                        }
                         keyExtractor={(i) => i.id}
                         keyboardShouldPersistTaps="handled"
                         style={styles.createModalPickerList}
                         renderItem={({ item: opt }) => {
-                          const selectedId = createPicker === 'assign' ? createAssignKey : createPriority;
+                          const selectedId =
+                            createPicker === 'assign'
+                              ? createAssignKey
+                              : createPicker === 'organization'
+                                ? createOrgId
+                                : createPicker === 'company'
+                                  ? createCompanyId
+                                  : createPriority;
                           return (
                             <TouchableOpacity
                               style={modalStyles.row}
                               onPress={() => {
                                 if (createPicker === 'assign') setCreateAssignKey(opt.id);
+                                else if (createPicker === 'organization') {
+                                  setCreateOrgId(opt.id);
+                                  setCreateCompanyId('');
+                                } else if (createPicker === 'company') setCreateCompanyId(opt.id);
                                 else setCreatePriority(opt.id);
                                 setCreatePicker(null);
                               }}
@@ -2297,20 +2452,29 @@ const styles = StyleSheet.create({
   },
   filtersLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 12 },
   filtersLabel: { fontSize: 14, fontWeight: '600', color: '#475569' },
-  filterScroll: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingRight: 8 },
+  filterWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    alignItems: 'flex-end',
+  },
+  filterField: { minWidth: 140, flexGrow: 1, flexBasis: '45%', maxWidth: '100%' },
+  filterFieldLabel: { fontSize: 12, fontWeight: '600', color: '#64748b', marginBottom: 6 },
   filterChip: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     gap: 6,
     paddingVertical: 10,
     paddingHorizontal: 12,
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#e2e8f0',
-    backgroundColor: '#f8fafc',
-    maxWidth: 200,
+    backgroundColor: '#fff',
+    minHeight: 44,
+    alignSelf: 'stretch',
   },
-  filterChipText: { flexShrink: 1, fontSize: 14, fontWeight: '500', color: '#0f172a' },
+  filterChipText: { flex: 1, fontSize: 14, fontWeight: '500', color: '#0f172a' },
 
   contentCard: {
     backgroundColor: '#fff',
@@ -2409,8 +2573,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8fafc',
     borderColor: '#e2e8f0',
   },
+  statusPillInProgress: {
+    backgroundColor: '#dbeafe',
+    borderColor: '#93c5fd',
+  },
   statusPillTextDone: { fontSize: 12, fontWeight: '700', color: '#fff' },
   statusPillTextPending: { fontSize: 12, fontWeight: '700', color: '#64748b' },
+  statusPillTextInProgress: { fontSize: 12, fontWeight: '700', color: '#1d4ed8' },
   expandedMetaRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2530,6 +2699,21 @@ const styles = StyleSheet.create({
   taskTitle: { fontSize: 16, fontWeight: '600', color: '#0f172a' },
   taskTitleDone: { textDecorationLine: 'line-through', color: '#94a3b8' },
   taskMeta: { fontSize: 13, color: '#64748b', marginTop: 4 },
+  taskCreated: { fontSize: 13, color: '#64748b', marginTop: 4 },
+  taskDetailBlock: { marginTop: 8, gap: 2 },
+  taskDetailLine: { fontSize: 14, color: '#334155', lineHeight: 20 },
+  taskDetailLineMuted: { fontSize: 14, color: '#94a3b8', lineHeight: 20, fontStyle: 'italic' },
+  cardBadgesCol: { alignItems: 'flex-end', gap: 6, marginLeft: 8 },
+  typePill: {
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  typePillManual: { backgroundColor: '#e0f2fe', borderColor: '#7dd3fc' },
+  typePillAssigned: { backgroundColor: '#ede9fe', borderColor: '#c4b5fd' },
+  typePillTemplate: { backgroundColor: '#f1f5f9', borderColor: '#cbd5e1' },
+  typePillText: { fontSize: 12, fontWeight: '700', color: '#0369a1' },
   deleteBtn: { padding: 8, marginLeft: 4 },
   deleteBtnPressed: { opacity: 0.7 },
 
@@ -2614,6 +2798,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8fafc',
   },
   selectFieldText: { flex: 1, fontSize: 16, color: '#0f172a' },
+  selectFieldTextDisabled: { color: '#94a3b8' },
   input: {
     borderWidth: 1,
     borderColor: '#e2e8f0',

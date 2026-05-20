@@ -24,6 +24,8 @@ import {
   addPendingLocalLeaveRequest,
   addPendingLocalSwapRequest,
 } from '../lib/schedulerPendingRequestsLocal';
+import { fetchEmployeeTaskEventsInRange } from '../lib/employeeTasks';
+import { devWarn } from '../lib/logger';
 
 function formatTime(ms: number) {
   const d = new Date(ms);
@@ -80,22 +82,6 @@ function scrubBody(o: Record<string, any>): Record<string, any> {
     out[k] = v;
   }
   return out;
-}
-
-function isTaskLikeEvent(t: any): boolean {
-  if (!t || typeof t !== 'object') return false;
-  const etRaw = t.event_type ?? t.type ?? t.kind;
-  if (etRaw && typeof etRaw === 'object') {
-    const nested = String((etRaw as any).name ?? (etRaw as any).slug ?? (etRaw as any).label ?? '').toLowerCase();
-    if (nested.includes('task')) return true;
-  }
-  const et = String(etRaw ?? '').toLowerCase();
-  if (et.includes('task')) return true;
-  const sub = String(t.event_subtype ?? t.task_category ?? t.category ?? '').toLowerCase();
-  if (sub.includes('task')) return true;
-  if (t.is_task === true || t.for_task === true) return true;
-  if (t.priority != null && String(t.priority).trim() !== '') return true;
-  return false;
 }
 
 function eventStartMs(ev: any): number | null {
@@ -194,17 +180,7 @@ export default function EmployeeDashboard() {
   const load = useCallback(async () => {
     if (!user?.id) return;
     try {
-      let emp = await api.findSchedulerEmployeeForAuthUser(user);
-      if (!emp) {
-        try {
-          const fresh = await api.getCurrentUser();
-          if (fresh && typeof fresh === 'object') {
-            emp = await api.findSchedulerEmployeeForAuthUser({ ...user, ...(fresh as object) });
-          }
-        } catch {
-          /* ignore */
-        }
-      }
+      const emp = await api.findSchedulerEmployeeForAuthUser(user);
       setEmployee(emp);
       if (!emp) {
         setLoading(false);
@@ -227,31 +203,11 @@ export default function EmployeeDashboard() {
           companyId,
         }),
         api.getTimeClockEntriesForEmployee(empId),
-        (async () => {
-          const startIso = weekStart.toISOString();
-          const endIso = weekEnd.toISOString();
-          const uid = empUserId || String(user.id);
-          const base = { event_type: 'task', start_time__gte: startIso, start_time__lte: endIso };
-          const tries: Record<string, any>[] = [
-            { ...base, assigned_user: uid },
-            { ...base, assignee: uid },
-            { ...base, user: uid },
-            { ...base, owner: uid },
-            { start_time__gte: startIso, start_time__lte: endIso, assigned_user: uid },
-            { start_time__gte: startIso, start_time__lte: endIso, user: uid },
-          ];
-          for (const params of tries) {
-            try {
-              const res = await api.getCalendarEvents(params);
-              const list = Array.isArray(res) ? res : [];
-              const tasksOnly = list.filter(Boolean).filter(isTaskLikeEvent);
-              if (tasksOnly.length > 0) return tasksOnly;
-            } catch {
-              /* try next */
-            }
-          }
-          return [];
-        })(),
+        fetchEmployeeTaskEventsInRange({
+          rangeStart: weekStart,
+          rangeEnd: weekEnd,
+          userId: empUserId || String(user.id),
+        }),
       ]);
       const shiftsArr = Array.isArray(shiftList) ? shiftList : [];
       setShifts(shiftsArr);
@@ -262,13 +218,12 @@ export default function EmployeeDashboard() {
         try {
           const raw = await api.getEmployees({
             company: effectiveCompanyId,
-            page_size: 500,
             status: 'active',
           });
           coworkList = Array.isArray(raw) ? raw : [];
         } catch {
           try {
-            const raw2 = await api.getEmployees({ company: effectiveCompanyId, page_size: 500 });
+            const raw2 = await api.getEmployees({ company: effectiveCompanyId });
             coworkList = Array.isArray(raw2) ? raw2 : [];
           } catch {
             coworkList = [];
@@ -322,7 +277,7 @@ export default function EmployeeDashboard() {
         }
       }
     } catch (e) {
-      console.warn(e);
+      devWarn(e);
     } finally {
       setLoading(false);
       setRefreshing(false);

@@ -14,6 +14,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import { getPrimaryRoleFromUser } from '../types/auth';
 import * as api from '../api';
+import { buildCalendarRangeParams } from '../lib/schedulerParams';
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
 
@@ -158,17 +159,7 @@ export default function CalendarScreen() {
         setEmployeeId(null);
       }
       if (loadOwnEmployeeShifts && user?.id) {
-        let emp = await api.findSchedulerEmployeeForAuthUser(user);
-        if (!emp) {
-          try {
-            const fresh = await api.getCurrentUser();
-            if (fresh && typeof fresh === 'object') {
-              emp = await api.findSchedulerEmployeeForAuthUser({ ...user, ...(fresh as object) });
-            }
-          } catch {
-            /* ignore */
-          }
-        }
+        const emp = await api.findSchedulerEmployeeForAuthUser(user);
         empId = emp != null ? String((emp as any).id ?? (emp as any).pk ?? '').trim() || null : null;
         empCompanyId = api.companyIdFromSchedulerEmployee(emp, user);
         empUserId = String((emp as any).user_id ?? (emp as any).user?.id ?? user?.id ?? '').trim() || undefined;
@@ -177,11 +168,13 @@ export default function CalendarScreen() {
       const monthStart = new Date(viewMonth.getFullYear(), viewMonth.getMonth(), 1);
       const monthEnd = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 0, 23, 59, 59);
       const [eventsRaw, shiftsRaw] = await Promise.all([
-        api.getCalendarEvents({
-          user: user?.id,
-          start_time__gte: monthStart.toISOString(),
-          end_time__lte: monthEnd.toISOString(),
-        }),
+        api.getCalendarEvents(
+          buildCalendarRangeParams({
+            rangeStart: monthStart,
+            rangeEnd: monthEnd,
+            userId: user?.id,
+          })
+        ),
         empId
           ? api.getShiftsForEmployeeInRange({
               employeeId: empId,
@@ -195,7 +188,7 @@ export default function CalendarScreen() {
       setEvents(eventsRaw);
       setShifts(Array.isArray(shiftsRaw) ? shiftsRaw : []);
     } catch (e) {
-      console.warn(e);
+      /* ignore load errors — empty calendar */
     } finally {
       setLoading(false);
       setRefreshing(false);

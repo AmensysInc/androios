@@ -19,6 +19,31 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
 import { HttpError } from '../lib/api-client';
+import { useTasksScopeFilters } from '../hooks/useTasksScopeFilters';
+import {
+  canAccessChecklistTemplates,
+  isDuplicateTemplate,
+  isDuplicateTemplateTask,
+} from '../lib/checklistWorkflow';
+import { devWarn } from '../lib/logger';
+
+type PickerOption = { id: string; label: string };
+
+function templateOrgId(t: any): string {
+  const o = t?.organization;
+  if (o != null && typeof o === 'object') return String((o as any).id ?? '').trim();
+  return String(t?.organization_id ?? t?.organization ?? '').trim();
+}
+
+function templateCompanyId(t: any): string {
+  const c = t?.company;
+  if (c != null && typeof c === 'object') return String((c as any).id ?? '').trim();
+  return String(t?.company_id ?? t?.company ?? '').trim();
+}
+
+function labelFor(options: PickerOption[], id: string, fallback: string) {
+  return options.find((o) => o.id === id)?.label ?? fallback;
+}
 
 function templateRowId(t: any): string {
   const id = t?.id ?? t?.pk ?? t?.uuid;
@@ -57,207 +82,39 @@ const PRIORITY_OPTIONS = [
   { id: 'high', label: 'High' },
 ];
 
-function pad2(n: number): string {
-  return String(n).padStart(2, '0');
+function templateTaskCreatedLine(tk: any): string {
+  const raw = tk?.created_at ?? tk?.created;
+  if (!raw) return '';
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return '';
+  return `Created ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`;
 }
 
-function sameCalDay(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+function templateTaskPriority(tk: any): string {
+  const p = String(tk?.priority ?? 'medium').toLowerCase();
+  if (p === 'high' || p === 'low') return p;
+  return 'medium';
 }
 
-const WD_LABELS = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
-const WHEEL_H = 36;
-const WHEEL_VISIBLE = 5;
-
-function TemplateDueDateTimePanel({
-  initialMs,
-  onCommit,
-  allowClear,
-}: {
-  initialMs: number;
-  onCommit: (isoLocal: string | null) => void;
-  allowClear?: boolean;
-}) {
-  const [cursor, setCursor] = useState(() => new Date());
-  const [dayDraft, setDayDraft] = useState(() => new Date());
-  const [hour, setHour] = useState(9);
-  const [minute, setMinute] = useState(0);
-
-  useEffect(() => {
-    const d = new Date(initialMs);
-    const safe = Number.isNaN(d.getTime()) ? new Date() : d;
-    setDayDraft(safe);
-    setCursor(new Date(safe.getFullYear(), safe.getMonth(), 1));
-    setHour(safe.getHours());
-    setMinute(safe.getMinutes());
-  }, [initialMs]);
-
-  const y = cursor.getFullYear();
-  const m = cursor.getMonth();
-  const firstWd = (new Date(y, m, 1).getDay() + 6) % 7;
-  const dim = new Date(y, m + 1, 0).getDate();
-  const cells: (number | null)[] = [];
-  for (let i = 0; i < firstWd; i++) cells.push(null);
-  for (let d = 1; d <= dim; d++) cells.push(d);
-  while (cells.length % 7 !== 0) cells.push(null);
-  while (cells.length < 42) cells.push(null);
-
-  const now = new Date();
-  const monthTitle = cursor.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
-
-  const commit = () => {
-    const dt = new Date(dayDraft.getFullYear(), dayDraft.getMonth(), dayDraft.getDate(), hour, minute, 0, 0);
-    const iso = `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}T${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`;
-    onCommit(iso);
-  };
-
-  return (
-    <View style={dueStyles.wrap}>
-      <View style={dueStyles.split}>
-        <View style={dueStyles.calSide}>
-          <View style={dueStyles.monthRow}>
-            <TouchableOpacity onPress={() => setCursor(new Date(y, m - 1, 1))} hitSlop={8}>
-              <MaterialCommunityIcons name="chevron-left" size={22} color="#0f172a" />
-            </TouchableOpacity>
-            <Text style={dueStyles.monthTitle}>{monthTitle}</Text>
-            <TouchableOpacity onPress={() => setCursor(new Date(y, m + 1, 1))} hitSlop={8}>
-              <MaterialCommunityIcons name="chevron-right" size={22} color="#0f172a" />
-            </TouchableOpacity>
-          </View>
-          <View style={dueStyles.weekRow}>
-            {WD_LABELS.map((w) => (
-              <Text key={w} style={dueStyles.wdCell}>
-                {w}
-              </Text>
-            ))}
-          </View>
-          <View style={dueStyles.grid}>
-            {cells.map((cell, idx) => {
-              if (cell == null) return <View key={`e-${idx}`} style={dueStyles.cell} />;
-              const cd = new Date(y, m, cell);
-              const sel = sameCalDay(cd, dayDraft);
-              const isToday = sameCalDay(cd, now);
-              return (
-                <TouchableOpacity
-                  key={idx}
-                  style={[dueStyles.cell, sel && dueStyles.cellSel, isToday && !sel && dueStyles.cellToday]}
-                  onPress={() => setDayDraft(cd)}
-                >
-                  <Text style={[dueStyles.cellTxt, sel && dueStyles.cellTxtSel]}>{cell}</Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-        <View style={dueStyles.timeSide}>
-          <Text style={dueStyles.timeLabel}>Time</Text>
-          <View style={dueStyles.wheels}>
-            <ScrollView style={dueStyles.wheel} nestedScrollEnabled showsVerticalScrollIndicator={false}>
-              {Array.from({ length: 24 }, (_, h) => (
-                <TouchableOpacity key={h} style={dueStyles.wheelItem} onPress={() => setHour(h)}>
-                  <Text style={[dueStyles.wheelTxt, hour === h && dueStyles.wheelTxtOn]}>{pad2(h)}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-            <ScrollView style={dueStyles.wheel} nestedScrollEnabled showsVerticalScrollIndicator={false}>
-              {Array.from({ length: 60 }, (_, mm) => (
-                <TouchableOpacity key={mm} style={dueStyles.wheelItem} onPress={() => setMinute(mm)}>
-                  <Text style={[dueStyles.wheelTxt, minute === mm && dueStyles.wheelTxtOn]}>{pad2(mm)}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </View>
-        </View>
-      </View>
-      <View style={dueStyles.footer}>
-        {allowClear ? (
-          <TouchableOpacity onPress={() => onCommit(null)}>
-            <Text style={dueStyles.link}>Clear</Text>
-          </TouchableOpacity>
-        ) : (
-          <View />
-        )}
-        <TouchableOpacity
-          onPress={() => {
-            const t = new Date();
-            setDayDraft(t);
-            setCursor(new Date(t.getFullYear(), t.getMonth(), 1));
-            setHour(t.getHours());
-            setMinute(t.getMinutes());
-          }}
-        >
-          <Text style={dueStyles.link}>Now</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={dueStyles.doneBtn} onPress={commit}>
-          <Text style={dueStyles.doneTxt}>Done</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
+function templateTaskNotes(tk: any): string {
+  return String(tk?.description ?? tk?.notes ?? '').trim();
 }
 
-const dueStyles = StyleSheet.create({
-  wrap: { paddingHorizontal: 8, paddingBottom: 8 },
-  split: { flexDirection: 'row', gap: 10, flexWrap: 'wrap', justifyContent: 'center' },
-  calSide: { flex: 1, minWidth: 220 },
-  monthRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
-  monthTitle: { fontSize: 14, fontWeight: '700', color: '#0f172a' },
-  weekRow: { flexDirection: 'row', marginBottom: 4 },
-  wdCell: { flex: 1, textAlign: 'center', fontSize: 10, fontWeight: '600', color: '#64748b' },
-  grid: { flexDirection: 'row', flexWrap: 'wrap' },
-  cell: { width: '14.28%', height: 32, alignItems: 'center', justifyContent: 'center' },
-  cellSel: { borderWidth: 2, borderColor: '#2563eb', borderRadius: 6 },
-  cellToday: { backgroundColor: '#e2e8f0', borderRadius: 999 },
-  cellTxt: { fontSize: 13, color: '#0f172a' },
-  cellTxtSel: { fontWeight: '700' },
-  timeSide: { width: 120 },
-  timeLabel: { fontSize: 11, fontWeight: '600', color: '#64748b', textAlign: 'center', marginBottom: 4 },
-  wheels: { flexDirection: 'row', gap: 6 },
-  wheel: {
-    flex: 1,
-    height: WHEEL_H * WHEEL_VISIBLE,
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-    borderRadius: 8,
-    backgroundColor: '#f8fafc',
-  },
-  wheelItem: { height: WHEEL_H, alignItems: 'center', justifyContent: 'center' },
-  wheelTxt: { fontSize: 15, color: '#94a3b8' },
-  wheelTxtOn: { color: '#0f172a', fontWeight: '700' },
-  footer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: 12,
-    paddingHorizontal: 4,
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  link: { fontSize: 14, fontWeight: '600', color: '#2563eb' },
-  doneBtn: { backgroundColor: '#2563eb', paddingVertical: 8, paddingHorizontal: 18, borderRadius: 8 },
-  doneTxt: { color: '#fff', fontWeight: '700', fontSize: 14 },
-});
-
-function parseTaskDue(s: string): string | null {
-  const t = s.trim();
-  if (!t) return null;
-  const d = new Date(t);
-  if (!Number.isNaN(d.getTime())) return d.toISOString();
-  return null;
+function templateTaskCompanyName(tk: any, templateItem: any): string {
+  const fromRow = tk?.company_name ?? (typeof tk?.company === 'object' ? tk?.company?.name : '');
+  if (fromRow && String(fromRow).trim()) return String(fromRow).trim();
+  return String(templateItem?.company?.name ?? '').trim();
 }
 
-function defaultDueStr(): string {
-  const d = new Date();
-  d.setHours(d.getHours() + 1, 0, 0, 0);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+function priorityBadgeStyle(pr: string) {
+  if (pr === 'high') return { bg: '#fee2e2', text: '#b91c1c', border: '#fecaca' };
+  if (pr === 'low') return { bg: '#f1f5f9', text: '#475569', border: '#e2e8f0' };
+  return { bg: '#dbeafe', text: '#1d4ed8', border: '#bfdbfe' };
 }
 
 export default function TemplateScreen() {
   const { user, role } = useAuth();
   const [templates, setTemplates] = useState<any[]>([]);
-  const [assignments, setAssignments] = useState<any[]>([]);
-  const [teamMembers, setTeamMembers] = useState<{ user_id: string; full_name: string | null; email: string }[]>([]);
   const [templateTasks, setTemplateTasks] = useState<Record<string, any[]>>({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -265,143 +122,217 @@ export default function TemplateScreen() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [menuForId, setMenuForId] = useState<string | null>(null);
 
-  const [assignModal, setAssignModal] = useState<{ templateId: string; templateName: string } | null>(null);
-  const [assignSearch, setAssignSearch] = useState('');
-  const [assignChecked, setAssignChecked] = useState<Record<string, boolean>>({});
-  const [assigning, setAssigning] = useState(false);
-
   const [createModal, setCreateModal] = useState(false);
   const [newName, setNewName] = useState('');
   const [newDescription, setNewDescription] = useState('');
   const [newCategory, setNewCategory] = useState('');
+  const [createOrgId, setCreateOrgId] = useState('');
+  const [createCompanyId, setCreateCompanyId] = useState('');
+  const [createCompanyOptions, setCreateCompanyOptions] = useState<PickerOption[]>([]);
+  const [createPicker, setCreatePicker] = useState<'organization' | 'company' | null>(null);
+  const [filterPicker, setFilterPicker] = useState<'organization' | 'company' | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const [editModal, setEditModal] = useState<{ id: string; name: string; description: string; technology: string } | null>(null);
+  const {
+    showOrgFilter,
+    showCompanyFilter,
+    organizationOptions,
+    companyOptions,
+    filterOrgId,
+    filterCompanyId,
+    setFilterCompanyId,
+    onSelectOrganization,
+    scopeReady,
+  } = useTasksScopeFilters(user, role ?? null);
+
+  const [editModal, setEditModal] = useState<{
+    id: string;
+    name: string;
+    description: string;
+    technology: string;
+    organizationId: string;
+    companyId: string;
+  } | null>(null);
+  const [editCompanyOptions, setEditCompanyOptions] = useState<PickerOption[]>([]);
+  const [editPicker, setEditPicker] = useState<'organization' | 'company' | null>(null);
   const [editSaving, setEditSaving] = useState(false);
 
   const [taskModal, setTaskModal] = useState<{ templateId: string; templateName: string } | null>(null);
   const [taskTitle, setTaskTitle] = useState('');
   const [taskDescription, setTaskDescription] = useState('');
   const [taskPriority, setTaskPriority] = useState('medium');
-  const [taskDueStr, setTaskDueStr] = useState('');
-  const [taskAssignChecked, setTaskAssignChecked] = useState<Record<string, boolean>>({});
   const [taskSaving, setTaskSaving] = useState(false);
   const [taskPicker, setTaskPicker] = useState<'priority' | null>(null);
-  const [taskDueOpen, setTaskDueOpen] = useState(false);
 
-  const isAdmin =
-    role === 'super_admin' || role === 'organization_manager' || role === 'company_manager';
+  const [taskExpanded, setTaskExpanded] = useState<Record<string, boolean>>({});
+  const [editTaskModal, setEditTaskModal] = useState<{
+    id: string;
+    templateId: string;
+    templateName: string;
+    originalTitle: string;
+  } | null>(null);
+  const [editTaskTitle, setEditTaskTitle] = useState('');
+  const [editTaskDescription, setEditTaskDescription] = useState('');
+  const [editTaskPriority, setEditTaskPriority] = useState('medium');
+  const [editTaskSaving, setEditTaskSaving] = useState(false);
+  const [editTaskDeleting, setEditTaskDeleting] = useState(false);
+  const [editTaskPicker, setEditTaskPicker] = useState<'priority' | null>(null);
+
+  const canManageChecklists = canAccessChecklistTemplates(role);
+  const isAdmin = canManageChecklists;
 
   const norm = (v: any) => (v != null ? String(v) : '');
 
   const loadTemplates = useCallback(async () => {
     try {
-      const raw = await api.getTemplates();
+      const params: Record<string, string> = {};
+      if (filterOrgId && filterOrgId !== 'all') params.organization_id = filterOrgId;
+      if (filterCompanyId && filterCompanyId !== 'all') params.company_id = filterCompanyId;
+      const raw = await api.getTemplates(Object.keys(params).length ? params : undefined);
       setTemplates(Array.isArray(raw) ? raw : []);
     } catch (e) {
-      console.warn(e);
+      devWarn(e);
     }
-  }, []);
-
-  const loadAssignments = useCallback(async () => {
-    try {
-      const raw = await api.getTemplateAssignments();
-      setAssignments(Array.isArray(raw) ? raw : []);
-    } catch (e) {
-      console.warn(e);
-    }
-  }, []);
+  }, [filterOrgId, filterCompanyId]);
 
   const loadTasksForTemplates = useCallback(async (list: any[]) => {
     const next: Record<string, any[]> = {};
-    await Promise.all(
-      list.map(async (t) => {
-        const id = templateRowId(t);
-        if (!id) return;
-        try {
-          const tasks = await api.getTemplateTasks(id);
-          next[id] = Array.isArray(tasks) ? tasks : [];
-        } catch {
-          next[id] = [];
-        }
-      })
-    );
+    for (const t of list) {
+      const id = templateRowId(t);
+      if (id) next[id] = [];
+    }
+    try {
+      const grouped = await api.getChecklistTemplateTasksGrouped();
+      for (const id of Object.keys(next)) {
+        if (grouped[id]?.length) next[id] = grouped[id];
+      }
+    } catch (e) {
+      devWarn(e);
+    }
     setTemplateTasks(next);
   }, []);
 
-  const loadTeamMembers = useCallback(async () => {
-    if (!user || !isAdmin) return;
+  const loadCreateCompanyOptions = useCallback(async (orgId: string) => {
     try {
-      if (role === 'super_admin') {
-        const users = await api.getUsers();
-        setTeamMembers(
-          (users || []).map((u: any) => ({
-            user_id: String(u.id),
-            full_name: u.profile?.full_name || u.full_name || null,
-            email: u.email || '',
-          }))
-        );
-        return;
+      const raw = await api.getCompanies();
+      const list = Array.isArray(raw) ? raw : [];
+      const opts: PickerOption[] = [];
+      for (const c of list) {
+        const id = String((c as any).id ?? '').trim();
+        if (!id) continue;
+        const oid = String(
+          (c as any).organization_id ??
+            ((c as any).organization && typeof (c as any).organization === 'object'
+              ? (c as any).organization.id
+              : (c as any).organization) ??
+            ''
+        ).trim();
+        if (orgId && orgId !== 'all' && oid !== orgId) continue;
+        opts.push({ id, label: String((c as any).name ?? id) });
       }
-      const companies = await api.getCompanies();
-      const list = Array.isArray(companies) ? companies : [];
-      const companyIds = list.map((c: any) => c?.id).filter(Boolean);
-      const seen = new Set<string>();
-      const members: { user_id: string; full_name: string | null; email: string }[] = [];
-      for (const cid of companyIds) {
-        const emps = await api.getEmployees({ company: cid, status: 'active' });
-        (Array.isArray(emps) ? emps : []).forEach((emp: any) => {
-          const uid = emp.user || emp.user_id;
-          if (uid && !seen.has(String(uid))) {
-            seen.add(String(uid));
-            members.push({
-              user_id: String(uid),
-              full_name: `${emp.first_name ?? ''} ${emp.last_name ?? ''}`.trim() || null,
-              email: emp.email || '',
-            });
-          }
-        });
-      }
-      setTeamMembers(members);
-    } catch (e) {
-      console.warn(e);
+      setCreateCompanyOptions(opts);
+      if (opts.length === 1) setCreateCompanyId(opts[0].id);
+    } catch {
+      setCreateCompanyOptions([]);
     }
-  }, [user, role, isAdmin]);
+  }, []);
+
+  const [createOrgOptions, setCreateOrgOptions] = useState<PickerOption[]>([]);
+
+  useEffect(() => {
+    if ((!createModal && !editModal) || !isAdmin) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await api.getOrganizations();
+        const list = Array.isArray(raw) ? raw : [];
+        const opts: PickerOption[] = [];
+        for (const o of list) {
+          const id = String((o as any).id ?? '').trim();
+          if (!id) continue;
+          opts.push({ id, label: String((o as any).name ?? id) });
+        }
+        if (!cancelled) setCreateOrgOptions(opts);
+      } catch {
+        if (!cancelled) setCreateOrgOptions([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [createModal, editModal, isAdmin]);
+
+  useEffect(() => {
+    if (!createModal) return;
+    void loadCreateCompanyOptions(createOrgId);
+  }, [createModal, createOrgId, loadCreateCompanyOptions]);
 
   const load = useCallback(async () => {
-    await loadTemplates();
-    await loadAssignments();
-    await loadTeamMembers();
+    try {
+      await loadTemplates();
+    } catch (e) {
+      devWarn(e);
+    }
     setLoading(false);
     setRefreshing(false);
-  }, [loadTemplates, loadAssignments, loadTeamMembers]);
+  }, [loadTemplates]);
 
   useEffect(() => {
+    if (!canManageChecklists) {
+      setLoading(false);
+      return;
+    }
+    if (!scopeReady) return;
     load();
-  }, [load]);
+  }, [load, scopeReady, canManageChecklists]);
+
+  const displayedTemplates = useMemo(() => {
+    let list = templates;
+    const orgId = filterOrgId !== 'all' ? filterOrgId : '';
+    const coId = filterCompanyId !== 'all' ? filterCompanyId : '';
+    if (orgId) {
+      list = list.filter((t) => {
+        const rowOrg = templateOrgId(t);
+        return !rowOrg || rowOrg === orgId;
+      });
+    }
+    if (coId) {
+      list = list.filter((t) => {
+        const rowCo = templateCompanyId(t);
+        return !rowCo || rowCo === coId;
+      });
+    }
+    return list;
+  }, [templates, filterOrgId, filterCompanyId]);
 
   useEffect(() => {
-    if (templates.length === 0) {
+    if (displayedTemplates.length === 0) {
       setTemplateTasks({});
       return;
     }
-    void loadTasksForTemplates(templates);
-  }, [templates, loadTasksForTemplates]);
+    void loadTasksForTemplates(displayedTemplates);
+  }, [displayedTemplates, loadTasksForTemplates]);
 
   const onRefresh = () => {
     setRefreshing(true);
     load();
   };
 
-  const assignedUserIds = (templateId: string) =>
-    assignments
-      .filter((a) => norm(a.template_id || a.template?.id || a.template) === norm(templateId))
-      .map((a) => norm(a.user_id || a.user?.id || a.user));
-
   const openCreateModal = () => {
     setNewName('');
     setNewDescription('');
     setNewCategory('');
+    setCreatePicker(null);
+    const defaultOrg =
+      filterOrgId && filterOrgId !== 'all'
+        ? filterOrgId
+        : organizationOptions.find((o) => o.id !== 'all')?.id ?? '';
+    const defaultCo =
+      filterCompanyId && filterCompanyId !== 'all'
+        ? filterCompanyId
+        : companyOptions.find((o) => o.id !== 'all')?.id ?? '';
+    setCreateOrgId(defaultOrg);
+    setCreateCompanyId(defaultCo);
     setCreateModal(true);
   };
 
@@ -411,6 +342,16 @@ export default function TemplateScreen() {
       Alert.alert('Validation', 'Enter a template name');
       return;
     }
+    const orgId = String(createOrgId ?? '').trim();
+    const companyId = String(createCompanyId ?? '').trim();
+    if (!companyId) {
+      Alert.alert('Validation', 'Select a company');
+      return;
+    }
+    if (isDuplicateTemplate(templates, name, companyId, orgId || undefined)) {
+      Alert.alert('Validation', 'A checklist with this name already exists for this company.');
+      return;
+    }
     setSaving(true);
     try {
       await api.createTemplate(
@@ -418,11 +359,12 @@ export default function TemplateScreen() {
           name,
           description: newDescription.trim() || undefined,
           category: newCategory.trim() || undefined,
+          organizationId: orgId || undefined,
+          companyId,
         })
       );
       setCreateModal(false);
       await loadTemplates();
-      await loadAssignments();
     } catch (e: unknown) {
       Alert.alert('Error', formatTemplateError(e));
     } finally {
@@ -435,68 +377,6 @@ export default function TemplateScreen() {
     Object.keys(out).forEach((k) => (out[k] === undefined || out[k] === '') && delete out[k]);
     return out;
   }
-
-  const openAssign = (templateId: string, templateName: string) => {
-    setAssignSearch('');
-    setAssignChecked({});
-    setAssignModal({ templateId, templateName });
-  };
-
-  const filteredForAssign = useMemo(() => {
-    if (!assignModal) return [];
-    const taken = new Set(assignedUserIds(assignModal.templateId));
-    const q = assignSearch.trim().toLowerCase();
-    return teamMembers.filter((m) => {
-      if (taken.has(m.user_id)) return false;
-      if (!q) return true;
-      const n = (m.full_name || '').toLowerCase();
-      const e = (m.email || '').toLowerCase();
-      return n.includes(q) || e.includes(q);
-    });
-  }, [assignModal, assignSearch, teamMembers, assignments]);
-
-  const submitBatchAssign = async () => {
-    if (!assignModal) return;
-    const ids = Object.entries(assignChecked)
-      .filter(([, v]) => v)
-      .map(([k]) => k);
-    if (ids.length === 0) {
-      Alert.alert('Assign', 'Select at least one user');
-      return;
-    }
-    setAssigning(true);
-    try {
-      for (const uid of ids) {
-        await api.assignTemplate(assignModal.templateId, uid);
-      }
-      await loadAssignments();
-      setAssignModal(null);
-      setAssignChecked({});
-    } catch (e: unknown) {
-      Alert.alert('Error', formatTemplateError(e));
-    } finally {
-      setAssigning(false);
-    }
-  };
-
-  const handleUnassign = (templateId: string, userId: string) => {
-    const run = async () => {
-      try {
-        await api.unassignTemplate(templateId, userId);
-        await loadAssignments();
-      } catch (e: unknown) {
-        Alert.alert('Error', formatTemplateError(e));
-      }
-    };
-    if (Platform.OS === 'web' && typeof (globalThis as any).confirm === 'function') {
-      if ((globalThis as any).confirm('Remove this user from the checklist?')) void run();
-      return;
-    }
-    Alert.alert('Remove user', 'Remove this user from the checklist?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Remove', style: 'destructive', onPress: () => void run() },
-    ]);
-  };
 
   const deleteTemplate = (t: any) => {
     const id = templateRowId(t);
@@ -520,15 +400,47 @@ export default function TemplateScreen() {
     ]);
   };
 
+  const loadEditCompanyOptions = useCallback(async (orgId: string) => {
+    try {
+      const raw = await api.getCompanies();
+      const list = Array.isArray(raw) ? raw : [];
+      const opts: PickerOption[] = [];
+      for (const c of list) {
+        const id = String((c as any).id ?? '').trim();
+        if (!id) continue;
+        const oid = String(
+          (c as any).organization_id ??
+            ((c as any).organization && typeof (c as any).organization === 'object'
+              ? (c as any).organization.id
+              : (c as any).organization) ??
+            ''
+        ).trim();
+        if (orgId && orgId !== 'all' && oid !== orgId) continue;
+        opts.push({ id, label: String((c as any).name ?? id) });
+      }
+      setEditCompanyOptions(opts);
+    } catch {
+      setEditCompanyOptions([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!editModal) return;
+    void loadEditCompanyOptions(editModal.organizationId);
+  }, [editModal?.organizationId, editModal, loadEditCompanyOptions]);
+
   const openEdit = (t: any) => {
     const id = templateRowId(t);
     if (!id) return;
     setMenuForId(null);
+    setEditPicker(null);
     setEditModal({
       id,
       name: String(t.name || t.title || ''),
       description: String(t.description || ''),
       technology: String(t.category || t.technology || ''),
+      organizationId: templateOrgId(t),
+      companyId: templateCompanyId(t),
     });
   };
 
@@ -539,6 +451,10 @@ export default function TemplateScreen() {
       Alert.alert('Validation', 'Name is required');
       return;
     }
+    if (!editModal.companyId) {
+      Alert.alert('Validation', 'Select a company');
+      return;
+    }
     setEditSaving(true);
     try {
       await api.updateTemplate(
@@ -547,6 +463,8 @@ export default function TemplateScreen() {
           name,
           description: editModal.description.trim() || undefined,
           category: editModal.technology.trim() || undefined,
+          organizationId: editModal.organizationId || undefined,
+          companyId: editModal.companyId,
         })
       );
       setEditModal(null);
@@ -562,10 +480,7 @@ export default function TemplateScreen() {
     setTaskTitle('');
     setTaskDescription('');
     setTaskPriority('medium');
-    setTaskDueStr(defaultDueStr());
-    setTaskAssignChecked({});
     setTaskPicker(null);
-    setTaskDueOpen(false);
     setTaskModal({ templateId, templateName });
   };
 
@@ -576,10 +491,11 @@ export default function TemplateScreen() {
       Alert.alert('Validation', 'Task title is required');
       return;
     }
-    const dueIso = parseTaskDue(taskDueStr);
-    const assignees = Object.entries(taskAssignChecked)
-      .filter(([, v]) => v)
-      .map(([k]) => k);
+    const existing = templateTasks[taskModal.templateId] || [];
+    if (isDuplicateTemplateTask(existing, title)) {
+      Alert.alert('Validation', 'A task with this title already exists in this template.');
+      return;
+    }
 
     setTaskSaving(true);
     try {
@@ -589,13 +505,11 @@ export default function TemplateScreen() {
           title,
           description: taskDescription.trim() || undefined,
           priority: taskPriority,
-          due_date: dueIso || undefined,
-          assigned_users: assignees.length ? assignees : undefined,
-          user_ids: assignees.length ? assignees : undefined,
         })
       );
       setTaskModal(null);
-      await loadTasksForTemplates(templates);
+      setTaskPicker(null);
+      await loadTasksForTemplates(displayedTemplates.length ? displayedTemplates : templates);
     } catch (e: unknown) {
       Alert.alert('Error', formatTemplateError(e));
     } finally {
@@ -603,18 +517,108 @@ export default function TemplateScreen() {
     }
   };
 
-  const taskDueMs = useMemo(() => {
-    const d = new Date(taskDueStr);
-    return Number.isNaN(d.getTime()) ? Date.now() : d.getTime();
-  }, [taskDueStr]);
-
   const labelPriority = (id: string) => PRIORITY_OPTIONS.find((p) => p.id === id)?.label ?? id;
 
   const toggleExpanded = (id: string) => {
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
-  const taskCompleted = (t: any) => !!(t.completed || t.is_done || t.done);
+  const toggleTaskExpanded = (id: string) => {
+    setTaskExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const openEditTask = (tk: any, templateId: string, templateName: string) => {
+    const id = taskRowId(tk);
+    if (!id) {
+      Alert.alert('Error', 'This task cannot be edited (missing id).');
+      return;
+    }
+    setEditTaskModal({
+      id,
+      templateId,
+      templateName,
+      originalTitle: tk.title || tk.task_name || 'Task',
+    });
+    setEditTaskTitle(tk.title || tk.task_name || '');
+    setEditTaskDescription(templateTaskNotes(tk));
+    setEditTaskPriority(templateTaskPriority(tk));
+    setEditTaskPicker(null);
+  };
+
+  const submitEditTask = async () => {
+    if (!editTaskModal) return;
+    const title = editTaskTitle.trim();
+    if (!title) {
+      Alert.alert('Validation', 'Task title is required');
+      return;
+    }
+    setEditTaskSaving(true);
+    try {
+      await api.updateChecklistTemplateTask(editTaskModal.id, {
+        title,
+        description: editTaskDescription.trim() || undefined,
+        priority: editTaskPriority,
+      });
+      setEditTaskModal(null);
+      setEditTaskPicker(null);
+      await loadTasksForTemplates(displayedTemplates.length ? displayedTemplates : templates);
+    } catch (e: unknown) {
+      Alert.alert('Error', formatTemplateError(e));
+    } finally {
+      setEditTaskSaving(false);
+    }
+  };
+
+  const deleteTemplateTaskRow = (tk: any, fromModal?: boolean) => {
+    const id = taskRowId(tk);
+    if (!id) {
+      Alert.alert('Error', 'This task cannot be deleted (missing id).');
+      return;
+    }
+    const title = tk.title || tk.task_name || 'this task';
+    Alert.alert('Delete Task', `Delete "${title}"?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => {
+          void (async () => {
+            if (fromModal) setEditTaskDeleting(true);
+            try {
+              await api.deleteChecklistTemplateTask(id);
+              if (fromModal) {
+                setEditTaskModal(null);
+                setEditTaskPicker(null);
+              }
+              setTaskExpanded((prev) => {
+                const next = { ...prev };
+                delete next[id];
+                return next;
+              });
+              await loadTasksForTemplates(displayedTemplates.length ? displayedTemplates : templates);
+            } catch (e: unknown) {
+              Alert.alert('Error', formatTemplateError(e));
+            } finally {
+              if (fromModal) setEditTaskDeleting(false);
+            }
+          })();
+        },
+      },
+    ]);
+  };
+
+  if (!canManageChecklists) {
+    return (
+      <View style={styles.centered}>
+        <MaterialCommunityIcons name="book-lock-outline" size={56} color="#cbd5e1" />
+        <Text style={[styles.pageTitle, { marginTop: 16, textAlign: 'center' }]}>Check Lists</Text>
+        <Text style={[styles.pageSubtitle, { textAlign: 'center', maxWidth: 320, marginTop: 8 }]}>
+          Checklist templates are managed by administrators during shift scheduling. Your assigned work appears on
+          the Tasks page.
+        </Text>
+      </View>
+    );
+  }
 
   if (loading) {
     return (
@@ -627,17 +631,20 @@ export default function TemplateScreen() {
   return (
     <View style={styles.root}>
       <FlatList
-        data={templates}
+        data={displayedTemplates}
         keyExtractor={(item, index) => templateRowId(item) || `tpl-${index}`}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         removeClippedSubviews={false}
-        contentContainerStyle={templates.length === 0 ? styles.listEmpty : styles.listContent}
+        contentContainerStyle={displayedTemplates.length === 0 ? styles.listEmpty : styles.listContent}
         ListHeaderComponent={
           <View style={styles.headerBlock}>
             <View style={styles.headerTop}>
               <View style={styles.headerTitles}>
                 <Text style={styles.pageTitle}>Check Lists</Text>
-                <Text style={styles.pageSubtitle}>Create and manage Check List with tasks and assignments</Text>
+                <Text style={styles.pageSubtitle}>
+                  Reusable checklist blueprints by organization and company. Assign tasks to employees during shift
+                  scheduling — not from this page.
+                </Text>
               </View>
               {isAdmin && (
                 <TouchableOpacity style={styles.primaryBtn} onPress={openCreateModal} activeOpacity={0.9}>
@@ -646,7 +653,42 @@ export default function TemplateScreen() {
               )}
             </View>
 
-            {templates.length === 0 ? (
+            {isAdmin && (showOrgFilter || showCompanyFilter) ? (
+              <View style={styles.scopeFilterRow}>
+                {showOrgFilter ? (
+                  <View style={styles.scopeFilterCol}>
+                    <Text style={styles.scopeFilterLabel}>Organization</Text>
+                    <TouchableOpacity
+                      style={styles.scopeSelect}
+                      onPress={() => setFilterPicker('organization')}
+                      activeOpacity={0.85}
+                    >
+                      <Text style={styles.scopeSelectText} numberOfLines={1}>
+                        {labelFor(organizationOptions, filterOrgId, 'All organizations')}
+                      </Text>
+                      <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
+                    </TouchableOpacity>
+                  </View>
+                ) : null}
+                {showCompanyFilter ? (
+                  <View style={styles.scopeFilterCol}>
+                    <Text style={styles.scopeFilterLabel}>Company</Text>
+                    <TouchableOpacity
+                      style={styles.scopeSelect}
+                      onPress={() => setFilterPicker('company')}
+                      activeOpacity={0.85}
+                    >
+                      <Text style={styles.scopeSelectText} numberOfLines={1}>
+                        {labelFor(companyOptions, filterCompanyId, 'All companies')}
+                      </Text>
+                      <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
+                    </TouchableOpacity>
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
+
+            {displayedTemplates.length === 0 ? (
               <View style={styles.emptyCard}>
                 <MaterialCommunityIcons name="book-open-page-variant-outline" size={64} color="#cbd5e1" />
                 <Text style={styles.emptyTitle}>No templates created yet</Text>
@@ -662,10 +704,7 @@ export default function TemplateScreen() {
         }
         renderItem={({ item }) => {
           const tid = templateRowId(item);
-          const assigned = assignedUserIds(tid);
           const tasks = templateTasks[tid] || [];
-          const doneCount = tasks.filter(taskCompleted).length;
-          const progress = tasks.length ? Math.round((doneCount / tasks.length) * 100) : 0;
           const isOpen = !!expanded[tid];
           const showMenu = menuForId === tid;
 
@@ -677,23 +716,38 @@ export default function TemplateScreen() {
                 </View>
                 <View style={styles.cardTitleBlock}>
                   <Text style={styles.cardTitle}>{item.name || item.title || 'Checklist'}</Text>
-                  {item.description ? <Text style={styles.cardDesc}>{item.description}</Text> : null}
+                  {item.description ? (
+                    <Text style={styles.cardDesc}>{item.description}</Text>
+                  ) : (
+                    <Text style={styles.cardDescMuted}>No description available</Text>
+                  )}
+                  <View style={styles.cardScopeBlock}>
+                    <View style={styles.cardScopeItem}>
+                      <Text style={styles.cardScopeLabel}>ORGANIZATION</Text>
+                      <View style={styles.cardScopeValueRow}>
+                        <MaterialCommunityIcons name="lock-outline" size={14} color="#94a3b8" />
+                        <Text style={styles.cardScopeValue} numberOfLines={1}>
+                          {item.organization?.name || '—'}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.cardScopeItem}>
+                      <Text style={styles.cardScopeLabel}>COMPANY</Text>
+                      <View style={styles.cardScopeValueRow}>
+                        <MaterialCommunityIcons name="lock-outline" size={14} color="#94a3b8" />
+                        <Text style={styles.cardScopeValue} numberOfLines={1}>
+                          {item.company?.name || '—'}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
                   {(item.category || item.technology) ? (
                     <View style={styles.tagBadge}>
                       <Text style={styles.tagBadgeText}>{item.category || item.technology}</Text>
                     </View>
                   ) : null}
-                  <Text style={styles.cardMeta}>
-                    {assigned.length} users · {doneCount}/{tasks.length} completed
-                  </Text>
                 </View>
                 <View style={styles.cardActions}>
-                  {isAdmin && (
-                    <TouchableOpacity style={styles.assignUsersBtn} onPress={() => openAssign(tid, item.name || item.title || 'Checklist')}>
-                      <MaterialCommunityIcons name="account-plus-outline" size={18} color="#2563eb" />
-                      <Text style={styles.assignUsersBtnText}>Assign Users</Text>
-                    </TouchableOpacity>
-                  )}
                   {isAdmin && (
                     <View style={styles.gearWrap}>
                       <TouchableOpacity
@@ -732,54 +786,19 @@ export default function TemplateScreen() {
                 </View>
               </View>
 
-              <View style={styles.progressBlock}>
-                <View style={styles.progressLabelRow}>
-                  <Text style={styles.progressLabel}>Progress</Text>
-                  <Text style={styles.progressPct}>{progress}%</Text>
-                </View>
-                <View style={styles.progressTrack}>
-                  <View style={[styles.progressFill, { width: `${progress}%` }]} />
-                </View>
-              </View>
-
               {isOpen ? (
                 <>
                   <View style={styles.section}>
-                    <Text style={styles.sectionTitle}>Assigned Users ({assigned.length})</Text>
-                    {assigned.length === 0 ? (
-                      <Text style={styles.sectionEmpty}>No users assigned yet</Text>
-                    ) : (
-                      <View style={styles.userChips}>
-                        {assigned.map((uid) => {
-                          const m = teamMembers.find((t) => t.user_id === uid);
-                          return (
-                            <TouchableOpacity
-                              key={uid}
-                              style={styles.userChip}
-                              onPress={() => isAdmin && handleUnassign(tid, uid)}
-                              disabled={!isAdmin}
-                            >
-                              <View style={styles.avatar}>
-                                <Text style={styles.avatarTxt}>
-                                  {(m?.full_name || m?.email || '?').charAt(0).toUpperCase()}
-                                </Text>
-                              </View>
-                              <View>
-                                <Text style={styles.userChipName}>{m?.full_name || m?.email || uid}</Text>
-                                {m?.email ? <Text style={styles.userChipEmail}>{m.email}</Text> : null}
-                              </View>
-                            </TouchableOpacity>
-                          );
-                        })}
-                      </View>
-                    )}
-                  </View>
-
-                  <View style={styles.section}>
                     <View style={styles.sectionHeadRow}>
-                      <Text style={styles.sectionTitle}>Tasks ({tasks.length})</Text>
+                      <View style={styles.sectionTitleRow}>
+                        <MaterialCommunityIcons name="calendar-month-outline" size={20} color="#0f172a" />
+                        <Text style={styles.sectionTitle}>Tasks ({tasks.length})</Text>
+                      </View>
                       {isAdmin && (
-                        <TouchableOpacity style={styles.addTaskBtn} onPress={() => openTaskModal(tid, item.name || item.title || 'Checklist')}>
+                        <TouchableOpacity
+                          style={styles.addTaskBtn}
+                          onPress={() => openTaskModal(tid, item.name || item.title || 'Checklist')}
+                        >
                           <MaterialCommunityIcons name="plus" size={18} color="#fff" />
                           <Text style={styles.addTaskBtnText}>Add Task</Text>
                         </TouchableOpacity>
@@ -791,24 +810,118 @@ export default function TemplateScreen() {
                         <Text style={styles.tasksEmptyText}>No tasks created yet</Text>
                       </View>
                     ) : (
-                      tasks.map((tk, idx) => (
-                        <View key={taskRowId(tk) ? `${tid}-${taskRowId(tk)}` : `task-${tid}-${idx}`} style={styles.taskRow}>
-                          <MaterialCommunityIcons
-                            name={taskCompleted(tk) ? 'check-circle' : 'checkbox-blank-circle-outline'}
-                            size={22}
-                            color={taskCompleted(tk) ? '#22c55e' : '#94a3b8'}
-                          />
-                          <View style={styles.taskBody}>
-                            <Text style={styles.taskTitle}>{tk.title || tk.name || 'Task'}</Text>
-                            {tk.description ? <Text style={styles.taskDesc}>{tk.description}</Text> : null}
-                            {(tk.due_date || tk.due_at) ? (
-                              <Text style={styles.taskDue}>
-                                Due: {new Date(tk.due_date || tk.due_at).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}
-                              </Text>
+                      tasks.map((tk, idx) => {
+                        const kid = taskRowId(tk);
+                        const taskOpen = kid ? !!taskExpanded[kid] : false;
+                        const pr = templateTaskPriority(tk);
+                        const pb = priorityBadgeStyle(pr);
+                        const coName = templateTaskCompanyName(tk, item);
+                        const created = templateTaskCreatedLine(tk);
+                        const notes = templateTaskNotes(tk);
+                        const tplName = item.name || item.title || 'Checklist';
+
+                        return (
+                          <View
+                            key={kid ? `${tid}-${kid}` : `task-${tid}-${idx}`}
+                            style={[styles.tplTaskCard, taskOpen && styles.tplTaskCardOpen]}
+                          >
+                            <TouchableOpacity
+                              style={styles.tplTaskCollapsed}
+                              onPress={() => kid && toggleTaskExpanded(kid)}
+                              activeOpacity={0.85}
+                            >
+                              <View style={styles.tplTaskCollapsedMain}>
+                                <Text style={styles.tplTaskCollapsedTitle} numberOfLines={2}>
+                                  {tk.title || tk.name || 'Task'}
+                                </Text>
+                                {created ? <Text style={styles.tplTaskCreated}>{created}</Text> : null}
+                              </View>
+                              <View style={styles.tplTaskCollapsedMeta}>
+                                {coName ? (
+                                  <View style={styles.tplMetaChip}>
+                                    <MaterialCommunityIcons name="office-building-outline" size={14} color="#64748b" />
+                                    <Text style={styles.tplMetaChipText} numberOfLines={1}>
+                                      {coName}
+                                    </Text>
+                                  </View>
+                                ) : null}
+                                <View style={[styles.tplPriorityPill, { backgroundColor: pb.bg, borderColor: pb.border }]}>
+                                  <Text style={[styles.tplPriorityPillText, { color: pb.text }]}>{pr}</Text>
+                                </View>
+                                <View style={styles.tplTypePill}>
+                                  <MaterialCommunityIcons name="book-open-variant" size={12} color="#475569" />
+                                  <Text style={styles.tplTypePillText}>Template</Text>
+                                </View>
+                                <MaterialCommunityIcons
+                                  name={taskOpen ? 'chevron-down' : 'chevron-right'}
+                                  size={22}
+                                  color="#64748b"
+                                />
+                              </View>
+                            </TouchableOpacity>
+
+                            {taskOpen ? (
+                              <View style={styles.tplTaskExpanded}>
+                                <View style={styles.tplTaskExpandedHead}>
+                                  <View style={{ flex: 1 }}>
+                                    <Text style={styles.tplTaskExpandedTitle}>{tk.title || tk.name || 'Task'}</Text>
+                                    <View style={styles.tplTaskExpandedMeta}>
+                                      {coName ? (
+                                        <View style={styles.tplMetaChip}>
+                                          <MaterialCommunityIcons name="office-building-outline" size={14} color="#64748b" />
+                                          <Text style={styles.tplMetaChipText}>{coName}</Text>
+                                        </View>
+                                      ) : null}
+                                      <View
+                                        style={[styles.tplPriorityPill, { backgroundColor: pb.bg, borderColor: pb.border }]}
+                                      >
+                                        <Text style={[styles.tplPriorityPillText, { color: pb.text }]}>{pr}</Text>
+                                      </View>
+                                      <View style={[styles.tplTypePill, styles.tplTypePillBlue]}>
+                                        <MaterialCommunityIcons name="book-open-variant" size={12} color="#1d4ed8" />
+                                        <Text style={[styles.tplTypePillText, styles.tplTypePillTextBlue]}>Template Task</Text>
+                                      </View>
+                                    </View>
+                                  </View>
+                                  {isAdmin ? (
+                                    <TouchableOpacity
+                                      style={styles.tplEditBtn}
+                                      onPress={() => openEditTask(tk, tid, tplName)}
+                                      activeOpacity={0.85}
+                                    >
+                                      <MaterialCommunityIcons name="pencil-outline" size={18} color="#475569" />
+                                      <Text style={styles.tplEditBtnText}>Edit</Text>
+                                    </TouchableOpacity>
+                                  ) : null}
+                                </View>
+
+                                <Text style={styles.tplNotesLabel}>Notes</Text>
+                                <View style={styles.tplNotesBox}>
+                                  {notes ? (
+                                    <Text style={styles.tplNotesBody}>{notes}</Text>
+                                  ) : (
+                                    <View style={styles.tplNotesPlaceholder}>
+                                      <MaterialCommunityIcons name="text-box-outline" size={20} color="#94a3b8" />
+                                      <Text style={styles.tplNotesPlaceholderText}>No notes</Text>
+                                    </View>
+                                  )}
+                                </View>
+
+                                {isAdmin ? (
+                                  <TouchableOpacity
+                                    style={styles.tplDeleteTaskBtn}
+                                    onPress={() => deleteTemplateTaskRow(tk)}
+                                    activeOpacity={0.85}
+                                  >
+                                    <MaterialCommunityIcons name="trash-can-outline" size={20} color="#dc2626" />
+                                    <Text style={styles.tplDeleteTaskText}>Delete Task</Text>
+                                  </TouchableOpacity>
+                                ) : null}
+                              </View>
                             ) : null}
                           </View>
-                        </View>
-                      ))
+                        );
+                      })
                     )}
                   </View>
                 </>
@@ -817,93 +930,6 @@ export default function TemplateScreen() {
           );
         }}
       />
-
-      {/* Assign users — single modal; high z-index box */}
-      <Modal visible={!!assignModal} transparent animationType="fade" onRequestClose={() => setAssignModal(null)}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.overlayDim}>
-          <View style={styles.assignRoot}>
-            <Pressable
-              style={StyleSheet.absoluteFill}
-              onPress={() => {
-                setAssignModal(null);
-                setAssignChecked({});
-              }}
-            />
-            <View style={styles.assignBox}>
-              <View style={styles.assignHeader}>
-                <Text style={styles.assignTitle}>Assign Users to {assignModal?.templateName}</Text>
-                <TouchableOpacity
-                  onPress={() => {
-                    setAssignModal(null);
-                    setAssignChecked({});
-                  }}
-                  hitSlop={12}
-                >
-                  <MaterialCommunityIcons name="close" size={24} color="#64748b" />
-                </TouchableOpacity>
-              </View>
-              <View style={styles.searchRow}>
-                <MaterialCommunityIcons name="magnify" size={22} color="#94a3b8" />
-                <TextInput
-                  style={styles.searchInput}
-                  value={assignSearch}
-                  onChangeText={setAssignSearch}
-                  placeholder="Search users..."
-                  placeholderTextColor="#94a3b8"
-                />
-              </View>
-              <FlatList
-                data={filteredForAssign}
-                keyExtractor={(m) => m.user_id}
-                style={styles.assignList}
-                keyboardShouldPersistTaps="handled"
-                ListEmptyComponent={<Text style={styles.assignEmpty}>No users match</Text>}
-                renderItem={({ item: m }) => {
-                  const checked = !!assignChecked[m.user_id];
-                  return (
-                    <TouchableOpacity
-                      style={[styles.assignUserRow, checked && styles.assignUserRowOn]}
-                      onPress={() => setAssignChecked((prev) => ({ ...prev, [m.user_id]: !checked }))}
-                    >
-                      <MaterialCommunityIcons
-                        name={checked ? 'checkbox-marked' : 'checkbox-blank-outline'}
-                        size={24}
-                        color={checked ? '#2563eb' : '#94a3b8'}
-                      />
-                      <View style={styles.assignAvatar}>
-                        <Text style={styles.assignAvatarTxt}>{(m.full_name || m.email || '?').charAt(0).toUpperCase()}</Text>
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.assignName}>{m.full_name || m.email || 'User'}</Text>
-                        {m.email ? <Text style={styles.assignEmail}>{m.email}</Text> : null}
-                      </View>
-                    </TouchableOpacity>
-                  );
-                }}
-              />
-              <View style={styles.assignFooter}>
-                <TouchableOpacity
-                  style={styles.cancelOutline}
-                  onPress={() => {
-                    setAssignModal(null);
-                    setAssignChecked({});
-                  }}
-                >
-                  <Text style={styles.cancelOutlineText}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.assignPrimary, assigning && styles.disabled]}
-                  onPress={() => void submitBatchAssign()}
-                  disabled={assigning}
-                >
-                  <MaterialCommunityIcons name="account-plus" size={20} color="#fff" />
-                  <Text style={styles.assignPrimaryText}>{assigning ? 'Assigning…' : 'Assign'}</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
 
       {/* Create checklist */}
       <Modal
@@ -924,13 +950,45 @@ export default function TemplateScreen() {
                 <View style={styles.createHeader}>
                   <View style={styles.createTitleBlock}>
                     <Text style={styles.createTitle}>Create New Check-List</Text>
-                    <Text style={styles.createSubtitle}>Create a new Check-List template to organize tasks and assignments.</Text>
+                    <Text style={styles.createSubtitle}>
+                      Create a checklist template for a company. Tasks apply to everyone who works at that company.
+                    </Text>
                   </View>
                   <TouchableOpacity onPress={() => setCreateModal(false)} hitSlop={12}>
                     <MaterialCommunityIcons name="close" size={24} color="#64748b" />
                   </TouchableOpacity>
                 </View>
-                <Text style={[styles.fieldLabel, styles.fieldLabelFirst]}>Template Name</Text>
+
+                {isAdmin ? (
+                  <>
+                    <Text style={[styles.fieldLabel, styles.fieldLabelFirst]}>Organization *</Text>
+                    <TouchableOpacity
+                      style={styles.selectField}
+                      onPress={() => setCreatePicker('organization')}
+                      activeOpacity={0.85}
+                    >
+                      <Text style={styles.selectText} numberOfLines={1}>
+                        {labelFor(createOrgOptions, createOrgId, 'Select organization')}
+                      </Text>
+                      <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
+                    </TouchableOpacity>
+
+                    <Text style={styles.fieldLabel}>Company *</Text>
+                    <TouchableOpacity
+                      style={styles.selectField}
+                      onPress={() => setCreatePicker('company')}
+                      activeOpacity={0.85}
+                      disabled={!createOrgId}
+                    >
+                      <Text style={[styles.selectText, !createOrgId && styles.selectFieldPh]} numberOfLines={1}>
+                        {labelFor(createCompanyOptions, createCompanyId, 'Select company')}
+                      </Text>
+                      <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
+                    </TouchableOpacity>
+                  </>
+                ) : null}
+
+                <Text style={[styles.fieldLabel, isAdmin ? undefined : styles.fieldLabelFirst]}>Template Name</Text>
                 <TextInput
                   style={styles.inputCreate}
                   value={newName}
@@ -943,7 +1001,7 @@ export default function TemplateScreen() {
                   style={[styles.inputCreate, styles.textArea]}
                   value={newDescription}
                   onChangeText={setNewDescription}
-                  placeholder="Brief description"
+                  placeholder="Brief description of the learning template"
                   placeholderTextColor="#94a3b8"
                   multiline
                   textAlignVertical="top"
@@ -957,7 +1015,13 @@ export default function TemplateScreen() {
                   placeholderTextColor="#94a3b8"
                 />
                 <View style={styles.createActions}>
-                  <TouchableOpacity style={styles.cancelOutline} onPress={() => setCreateModal(false)}>
+                  <TouchableOpacity
+                    style={styles.cancelOutline}
+                    onPress={() => {
+                      setCreatePicker(null);
+                      setCreateModal(false);
+                    }}
+                  >
                     <Text style={styles.cancelOutlineText}>Cancel</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={[styles.saveBlue, saving && styles.disabled]} onPress={() => void submitCreate()} disabled={saving}>
@@ -966,8 +1030,84 @@ export default function TemplateScreen() {
                 </View>
               </Pressable>
             </ScrollView>
+
+            {createPicker ? (
+              <View style={styles.createPickerLayer}>
+                <Pressable style={StyleSheet.absoluteFill} onPress={() => setCreatePicker(null)} />
+                <View style={styles.createPickerBox}>
+                  <Text style={styles.createPickerTitle}>
+                    {createPicker === 'organization' ? 'Organization' : 'Company'}
+                  </Text>
+                  <FlatList
+                    data={createPicker === 'organization' ? createOrgOptions : createCompanyOptions}
+                    keyExtractor={(i) => i.id}
+                    keyboardShouldPersistTaps="handled"
+                    renderItem={({ item: opt }) => {
+                      const selectedId = createPicker === 'organization' ? createOrgId : createCompanyId;
+                      return (
+                        <TouchableOpacity
+                          style={styles.createPickerRow}
+                          onPress={() => {
+                            if (createPicker === 'organization') {
+                              setCreateOrgId(opt.id);
+                              setCreateCompanyId('');
+                            } else {
+                              setCreateCompanyId(opt.id);
+                            }
+                            setCreatePicker(null);
+                          }}
+                        >
+                          <Text style={styles.createPickerRowText}>{opt.label}</Text>
+                          {selectedId === opt.id ? (
+                            <MaterialCommunityIcons name="check" size={22} color="#2563eb" />
+                          ) : (
+                            <View style={{ width: 22 }} />
+                          )}
+                        </TouchableOpacity>
+                      );
+                    }}
+                  />
+                </View>
+              </View>
+            ) : null}
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal visible={filterPicker != null} transparent animationType="fade" onRequestClose={() => setFilterPicker(null)}>
+        <View style={styles.overlayDim}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setFilterPicker(null)} />
+          <View style={styles.filterPickerBox}>
+            <Text style={styles.createPickerTitle}>
+              {filterPicker === 'organization' ? 'Organization' : 'Company'}
+            </Text>
+            <FlatList
+              data={filterPicker === 'organization' ? organizationOptions : companyOptions}
+              keyExtractor={(i) => i.id}
+              keyboardShouldPersistTaps="handled"
+              renderItem={({ item: opt }) => {
+                const selectedId = filterPicker === 'organization' ? filterOrgId : filterCompanyId;
+                return (
+                  <TouchableOpacity
+                    style={styles.createPickerRow}
+                    onPress={() => {
+                      if (filterPicker === 'organization') onSelectOrganization(opt.id);
+                      else setFilterCompanyId(opt.id);
+                      setFilterPicker(null);
+                    }}
+                  >
+                    <Text style={styles.createPickerRowText}>{opt.label}</Text>
+                    {selectedId === opt.id ? (
+                      <MaterialCommunityIcons name="check" size={22} color="#2563eb" />
+                    ) : (
+                      <View style={{ width: 22 }} />
+                    )}
+                  </TouchableOpacity>
+                );
+              }}
+            />
+          </View>
+        </View>
       </Modal>
 
       {/* Edit template */}
@@ -985,15 +1125,51 @@ export default function TemplateScreen() {
                 <View style={styles.createHeader}>
                   <View style={styles.createTitleBlock}>
                     <Text style={styles.createTitle}>Edit Template</Text>
-                    <Text style={styles.createSubtitle}>Update the learning template details.</Text>
+                    <Text style={styles.createSubtitle}>
+                      Update template details and which company it applies to.
+                    </Text>
                   </View>
-                  <TouchableOpacity onPress={() => setEditModal(null)} hitSlop={12}>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setEditPicker(null);
+                      setEditModal(null);
+                    }}
+                    hitSlop={12}
+                  >
                     <MaterialCommunityIcons name="close" size={24} color="#64748b" />
                   </TouchableOpacity>
                 </View>
                 {editModal ? (
                   <>
-                    <Text style={[styles.fieldLabel, styles.fieldLabelFirst]}>Template Name</Text>
+                    <Text style={[styles.fieldLabel, styles.fieldLabelFirst]}>Organization *</Text>
+                    <TouchableOpacity
+                      style={styles.selectField}
+                      onPress={() => setEditPicker('organization')}
+                      activeOpacity={0.85}
+                    >
+                      <Text style={styles.selectText} numberOfLines={1}>
+                        {labelFor(createOrgOptions, editModal.organizationId, 'Select organization')}
+                      </Text>
+                      <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
+                    </TouchableOpacity>
+
+                    <Text style={styles.fieldLabel}>Company *</Text>
+                    <TouchableOpacity
+                      style={styles.selectField}
+                      onPress={() => setEditPicker('company')}
+                      activeOpacity={0.85}
+                      disabled={!editModal.organizationId}
+                    >
+                      <Text
+                        style={[styles.selectText, !editModal.organizationId && styles.selectFieldPh]}
+                        numberOfLines={1}
+                      >
+                        {labelFor(editCompanyOptions, editModal.companyId, 'Select company')}
+                      </Text>
+                      <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
+                    </TouchableOpacity>
+
+                    <Text style={styles.fieldLabel}>Template Name</Text>
                     <TextInput
                       style={styles.inputCreate}
                       value={editModal.name}
@@ -1004,6 +1180,8 @@ export default function TemplateScreen() {
                       style={[styles.inputCreate, styles.textArea]}
                       value={editModal.description}
                       onChangeText={(t) => setEditModal({ ...editModal, description: t })}
+                      placeholder="Brief description of the learning template"
+                      placeholderTextColor="#94a3b8"
                       multiline
                       textAlignVertical="top"
                     />
@@ -1012,11 +1190,19 @@ export default function TemplateScreen() {
                       style={styles.inputCreate}
                       value={editModal.technology}
                       onChangeText={(t) => setEditModal({ ...editModal, technology: t })}
+                      placeholder="e.g., React, Python, Java"
+                      placeholderTextColor="#94a3b8"
                     />
                   </>
                 ) : null}
                 <View style={styles.createActions}>
-                  <TouchableOpacity style={styles.cancelOutline} onPress={() => setEditModal(null)}>
+                  <TouchableOpacity
+                    style={styles.cancelOutline}
+                    onPress={() => {
+                      setEditPicker(null);
+                      setEditModal(null);
+                    }}
+                  >
                     <Text style={styles.cancelOutlineText}>Cancel</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -1029,6 +1215,50 @@ export default function TemplateScreen() {
                 </View>
               </Pressable>
             </ScrollView>
+
+            {editModal && editPicker ? (
+              <View style={styles.createPickerLayer}>
+                <Pressable style={StyleSheet.absoluteFill} onPress={() => setEditPicker(null)} />
+                <View style={styles.createPickerBox}>
+                  <Text style={styles.createPickerTitle}>
+                    {editPicker === 'organization' ? 'Organization' : 'Company'}
+                  </Text>
+                  <FlatList
+                    data={editPicker === 'organization' ? createOrgOptions : editCompanyOptions}
+                    keyExtractor={(i) => i.id}
+                    keyboardShouldPersistTaps="handled"
+                    renderItem={({ item: opt }) => {
+                      const selectedId =
+                        editPicker === 'organization' ? editModal.organizationId : editModal.companyId;
+                      return (
+                        <TouchableOpacity
+                          style={styles.createPickerRow}
+                          onPress={() => {
+                            if (editPicker === 'organization') {
+                              setEditModal({
+                                ...editModal,
+                                organizationId: opt.id,
+                                companyId: '',
+                              });
+                            } else {
+                              setEditModal({ ...editModal, companyId: opt.id });
+                            }
+                            setEditPicker(null);
+                          }}
+                        >
+                          <Text style={styles.createPickerRowText}>{opt.label}</Text>
+                          {selectedId === opt.id ? (
+                            <MaterialCommunityIcons name="check" size={22} color="#2563eb" />
+                          ) : (
+                            <View style={{ width: 22 }} />
+                          )}
+                        </TouchableOpacity>
+                      );
+                    }}
+                  />
+                </View>
+              </View>
+            ) : null}
           </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -1041,7 +1271,6 @@ export default function TemplateScreen() {
         onRequestClose={() => {
           setTaskModal(null);
           setTaskPicker(null);
-          setTaskDueOpen(false);
         }}
       >
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.overlayDim}>
@@ -1049,10 +1278,8 @@ export default function TemplateScreen() {
             <Pressable
               style={StyleSheet.absoluteFill}
               onPress={() => {
-                if (taskPicker || taskDueOpen) {
-                  setTaskPicker(null);
-                  setTaskDueOpen(false);
-                } else setTaskModal(null);
+                if (taskPicker) setTaskPicker(null);
+                else setTaskModal(null);
               }}
             />
             <ScrollView
@@ -1072,7 +1299,6 @@ export default function TemplateScreen() {
                     onPress={() => {
                       setTaskModal(null);
                       setTaskPicker(null);
-                      setTaskDueOpen(false);
                     }}
                     hitSlop={12}
                   >
@@ -1102,59 +1328,12 @@ export default function TemplateScreen() {
                 <Text style={styles.fieldLabel}>Priority</Text>
                 <TouchableOpacity
                   style={styles.selectField}
-                  onPress={() => {
-                    setTaskDueOpen(false);
-                    setTaskPicker('priority');
-                  }}
+                  onPress={() => setTaskPicker('priority')}
+                  activeOpacity={0.85}
                 >
                   <Text style={styles.selectText}>{labelPriority(taskPriority)}</Text>
                   <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                 </TouchableOpacity>
-
-                <Text style={styles.fieldLabel}>Due date & time</Text>
-                <View style={styles.dateRow}>
-                  <TextInput
-                    style={[styles.inputCreate, styles.inputFlex]}
-                    value={taskDueStr}
-                    onChangeText={setTaskDueStr}
-                    placeholder="YYYY-MM-DDTHH:mm"
-                    placeholderTextColor="#94a3b8"
-                  />
-                  <TouchableOpacity
-                    onPress={() => {
-                      setTaskPicker(null);
-                      setTaskDueOpen(true);
-                    }}
-                    style={styles.calBtn}
-                  >
-                    <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
-                  </TouchableOpacity>
-                </View>
-
-                <Text style={styles.fieldLabelSmall}>
-                  Assign to users (optional) — leave unchecked for a general template task.
-                </Text>
-                <ScrollView style={styles.assignPickScroll} nestedScrollEnabled keyboardShouldPersistTaps="handled">
-                  {teamMembers.map((m) => {
-                    const c = !!taskAssignChecked[m.user_id];
-                    return (
-                      <TouchableOpacity
-                        key={m.user_id}
-                        style={styles.assignPickRow}
-                        onPress={() => setTaskAssignChecked((p) => ({ ...p, [m.user_id]: !c }))}
-                      >
-                        <MaterialCommunityIcons
-                          name={c ? 'checkbox-marked' : 'checkbox-blank-outline'}
-                          size={22}
-                          color={c ? '#7c3aed' : '#94a3b8'}
-                        />
-                        <Text style={styles.assignPickText} numberOfLines={1}>
-                          {m.full_name || m.email}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </ScrollView>
 
                 <View style={styles.createActions}>
                   <TouchableOpacity
@@ -1162,7 +1341,6 @@ export default function TemplateScreen() {
                     onPress={() => {
                       setTaskModal(null);
                       setTaskPicker(null);
-                      setTaskDueOpen(false);
                     }}
                   >
                     <Text style={styles.cancelOutlineText}>Cancel</Text>
@@ -1208,20 +1386,146 @@ export default function TemplateScreen() {
                 </View>
               </View>
             ) : null}
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
 
-            {taskDueOpen ? (
-              <View style={[styles.inlineLayer, { zIndex: 120, pointerEvents: 'box-none' }]}>
-                <Pressable style={StyleSheet.absoluteFill} onPress={() => setTaskDueOpen(false)} />
-                <View style={[styles.inlineBox, { maxWidth: 400 }]}>
-                  <Text style={styles.inlineTitle}>Due date & time</Text>
-                  <TemplateDueDateTimePanel
-                    initialMs={taskDueMs}
-                    allowClear
-                    onCommit={(isoLocal) => {
-                      if (isoLocal) setTaskDueStr(isoLocal);
-                      else setTaskDueStr('');
-                      setTaskDueOpen(false);
+      {/* Edit task */}
+      <Modal
+        visible={!!editTaskModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          setEditTaskModal(null);
+          setEditTaskPicker(null);
+        }}
+      >
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.overlayDim}>
+          <View style={styles.modalRoot}>
+            <Pressable
+              style={StyleSheet.absoluteFill}
+              onPress={() => {
+                if (editTaskPicker) setEditTaskPicker(null);
+                else setEditTaskModal(null);
+              }}
+            />
+            <ScrollView
+              style={styles.modalScroll}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={styles.createScroll}
+            >
+              <Pressable style={styles.createBox} onPress={(e) => e.stopPropagation?.()}>
+                <View style={styles.createHeader}>
+                  <View style={styles.createTitleBlock}>
+                    <Text style={styles.createTitle}>Edit Task</Text>
+                    <Text style={styles.createSubtitle}>
+                      Update the task details for &quot;{editTaskModal?.originalTitle}&quot;.
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setEditTaskModal(null);
+                      setEditTaskPicker(null);
                     }}
+                    hitSlop={12}
+                  >
+                    <MaterialCommunityIcons name="close" size={24} color="#64748b" />
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={[styles.fieldLabel, styles.fieldLabelFirst]}>Task Title</Text>
+                <TextInput
+                  style={styles.inputCreate}
+                  value={editTaskTitle}
+                  onChangeText={setEditTaskTitle}
+                  placeholder="Enter task title"
+                  placeholderTextColor="#94a3b8"
+                />
+                <Text style={styles.fieldLabel}>Description</Text>
+                <TextInput
+                  style={[styles.inputCreate, styles.textArea]}
+                  value={editTaskDescription}
+                  onChangeText={setEditTaskDescription}
+                  placeholder="Enter task description"
+                  placeholderTextColor="#94a3b8"
+                  multiline
+                  textAlignVertical="top"
+                />
+
+                <Text style={styles.fieldLabel}>Priority</Text>
+                <TouchableOpacity
+                  style={styles.selectField}
+                  onPress={() => setEditTaskPicker('priority')}
+                  activeOpacity={0.85}
+                >
+                  <Text style={styles.selectText}>{labelPriority(editTaskPriority)}</Text>
+                  <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
+                </TouchableOpacity>
+
+                <View style={styles.editTaskActions}>
+                  <TouchableOpacity
+                    style={[styles.deleteTaskModalBtn, (editTaskSaving || editTaskDeleting) && styles.disabled]}
+                    onPress={() =>
+                      editTaskModal &&
+                      deleteTemplateTaskRow(
+                        { id: editTaskModal.id, title: editTaskTitle, task_name: editTaskTitle },
+                        true
+                      )
+                    }
+                    disabled={editTaskSaving || editTaskDeleting}
+                  >
+                    <Text style={styles.deleteTaskModalText}>
+                      {editTaskDeleting ? 'Deleting…' : 'Delete Task'}
+                    </Text>
+                  </TouchableOpacity>
+                  <View style={styles.editTaskActionsRight}>
+                    <TouchableOpacity
+                      style={styles.cancelOutline}
+                      onPress={() => {
+                        setEditTaskModal(null);
+                        setEditTaskPicker(null);
+                      }}
+                    >
+                      <Text style={styles.cancelOutlineText}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.saveBlue, (editTaskSaving || editTaskDeleting) && styles.disabled]}
+                      onPress={() => void submitEditTask()}
+                      disabled={editTaskSaving || editTaskDeleting}
+                    >
+                      <Text style={styles.saveBlueText}>{editTaskSaving ? 'Saving…' : 'Update Task'}</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </Pressable>
+            </ScrollView>
+
+            {editTaskPicker ? (
+              <View style={[styles.inlineLayer, { pointerEvents: 'box-none' }]}>
+                <Pressable style={StyleSheet.absoluteFill} onPress={() => setEditTaskPicker(null)} />
+                <View style={styles.inlineBox}>
+                  <Text style={styles.inlineTitle}>Priority</Text>
+                  <FlatList
+                    data={PRIORITY_OPTIONS}
+                    keyExtractor={(p) => p.id}
+                    keyboardShouldPersistTaps="handled"
+                    style={{ maxHeight: 200 }}
+                    renderItem={({ item: p }) => (
+                      <TouchableOpacity
+                        style={styles.inlineRow}
+                        onPress={() => {
+                          setEditTaskPriority(p.id);
+                          setEditTaskPicker(null);
+                        }}
+                      >
+                        <Text style={styles.inlineRowText}>{p.label}</Text>
+                        {editTaskPriority === p.id ? (
+                          <MaterialCommunityIcons name="check" size={22} color="#2563eb" />
+                        ) : (
+                          <View style={{ width: 22 }} />
+                        )}
+                      </TouchableOpacity>
+                    )}
                   />
                 </View>
               </View>
@@ -1251,6 +1555,79 @@ const styles = StyleSheet.create({
   headerTitles: { flex: 1, minWidth: 200 },
   pageTitle: { fontSize: 28, fontWeight: '700', color: '#2563eb' },
   pageSubtitle: { fontSize: 15, color: '#64748b', marginTop: 8, lineHeight: 22 },
+  scopeFilterRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 16,
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  scopeFilterCol: { minWidth: 160, flexGrow: 1, flexBasis: '45%' },
+  scopeFilterLabel: { fontSize: 13, fontWeight: '600', color: '#475569', marginBottom: 8 },
+  scopeSelect: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    backgroundColor: '#fff',
+    minHeight: 48,
+  },
+  scopeSelectText: { flex: 1, fontSize: 15, color: '#0f172a', marginRight: 8 },
+  cardDescMuted: { fontSize: 14, color: '#94a3b8', marginTop: 6, fontStyle: 'italic' },
+  cardScopeBlock: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 16,
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+  },
+  cardScopeItem: { minWidth: 140, flexGrow: 1 },
+  cardScopeLabel: { fontSize: 11, fontWeight: '700', color: '#94a3b8', letterSpacing: 0.5, marginBottom: 4 },
+  cardScopeValueRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  cardScopeValue: { fontSize: 14, fontWeight: '600', color: '#0f172a', flex: 1 },
+  selectFieldPh: { color: '#94a3b8' },
+  createPickerLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 50,
+    justifyContent: 'center',
+    padding: 24,
+  },
+  createPickerBox: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    maxHeight: '60%',
+    paddingVertical: 8,
+    alignSelf: 'center',
+    width: '100%',
+    maxWidth: 400,
+  },
+  filterPickerBox: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    maxHeight: '70%',
+    paddingVertical: 8,
+    margin: 24,
+    alignSelf: 'center',
+    width: '90%',
+    maxWidth: 400,
+  },
+  createPickerTitle: { fontSize: 17, fontWeight: '700', color: '#0f172a', paddingHorizontal: 16, paddingBottom: 8 },
+  createPickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  createPickerRowText: { flex: 1, fontSize: 16, color: '#0f172a', marginRight: 8 },
   primaryBtn: {
     backgroundColor: '#6366f1',
     paddingVertical: 12,
@@ -1368,7 +1745,8 @@ const styles = StyleSheet.create({
 
   section: { marginTop: 18, paddingTop: 14, borderTopWidth: 1, borderTopColor: '#f1f5f9' },
   sectionHeadRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
-  sectionTitle: { fontSize: 15, fontWeight: '700', color: '#0f172a', marginBottom: 10 },
+  sectionTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  sectionTitle: { fontSize: 15, fontWeight: '700', color: '#0f172a' },
   sectionEmpty: { fontSize: 14, color: '#94a3b8' },
   userChips: { gap: 10 },
   userChip: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
@@ -1396,6 +1774,113 @@ const styles = StyleSheet.create({
   addTaskBtnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
   tasksEmpty: { alignItems: 'center', paddingVertical: 28 },
   tasksEmptyText: { marginTop: 10, fontSize: 14, color: '#94a3b8' },
+
+  tplTaskCard: {
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    marginBottom: 10,
+    overflow: 'hidden',
+  },
+  tplTaskCardOpen: { borderColor: '#cbd5e1' },
+  tplTaskCollapsed: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    gap: 10,
+  },
+  tplTaskCollapsedMain: { flex: 1, minWidth: 0 },
+  tplTaskCollapsedTitle: { fontSize: 15, fontWeight: '600', color: '#0f172a' },
+  tplTaskCreated: { fontSize: 13, color: '#64748b', marginTop: 4 },
+  tplTaskCollapsedMeta: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, maxWidth: '52%' },
+  tplMetaChip: { flexDirection: 'row', alignItems: 'center', gap: 4, maxWidth: 120 },
+  tplMetaChipText: { fontSize: 12, color: '#64748b', flexShrink: 1 },
+  tplPriorityPill: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, borderWidth: 1 },
+  tplPriorityPillText: { fontSize: 12, fontWeight: '700', textTransform: 'capitalize' },
+  tplTypePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    backgroundColor: '#f8fafc',
+  },
+  tplTypePillBlue: { backgroundColor: '#eff6ff', borderColor: '#bfdbfe' },
+  tplTypePillText: { fontSize: 11, fontWeight: '600', color: '#475569' },
+  tplTypePillTextBlue: { color: '#1d4ed8' },
+  tplTaskExpanded: {
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
+    paddingHorizontal: 14,
+    paddingBottom: 14,
+    paddingTop: 12,
+    backgroundColor: '#fafbfc',
+  },
+  tplTaskExpandedHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, marginBottom: 12 },
+  tplTaskExpandedTitle: { fontSize: 18, fontWeight: '700', color: '#0f172a' },
+  tplTaskExpandedMeta: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginTop: 8 },
+  tplEditBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    backgroundColor: '#fff',
+  },
+  tplEditBtnText: { fontSize: 14, fontWeight: '600', color: '#475569' },
+  tplNotesLabel: { fontSize: 14, fontWeight: '700', color: '#0f172a', marginBottom: 8 },
+  tplNotesBox: {
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    padding: 14,
+    minHeight: 56,
+    marginBottom: 12,
+  },
+  tplNotesBody: { fontSize: 14, color: '#334155', lineHeight: 20 },
+  tplNotesPlaceholder: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  tplNotesPlaceholderText: { fontSize: 14, color: '#94a3b8' },
+  tplDeleteTaskBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#fecaca',
+    backgroundColor: '#fef2f2',
+  },
+  tplDeleteTaskText: { fontSize: 15, fontWeight: '700', color: '#dc2626' },
+  editTaskActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 12,
+    marginTop: 24,
+  },
+  editTaskActionsRight: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  deleteTaskModalBtn: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 10,
+    backgroundColor: '#fef2f2',
+    borderWidth: 1,
+    borderColor: '#fecaca',
+  },
+  deleteTaskModalText: { fontSize: 15, fontWeight: '700', color: '#dc2626' },
+
   taskRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#f8fafc' },
   taskBody: { flex: 1 },
   taskTitle: { fontSize: 15, fontWeight: '600', color: '#0f172a' },

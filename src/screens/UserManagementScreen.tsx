@@ -889,7 +889,7 @@ async function loadScopedOrgCompanyForViewer(
     if (orgIdList.length === 0) {
       const seen = new Set(orgIdList);
       try {
-        const emp = await api.resolveEmployeeForUser(u);
+        const emp = await api.resolveEmployeeForUser(u, { deep: true });
         if (emp && typeof emp === 'object') {
           let oid = normalizeEntityId((emp as any).organization_id ?? (emp as any).organization);
           if (!oid) {
@@ -1055,7 +1055,7 @@ async function resolveOrganizationIdForOrganizationManagerUser(
     }
   }
   try {
-    const emp = await api.resolveEmployeeForUser(u);
+    const emp = await api.resolveEmployeeForUser(u, { deep: true });
     if (emp && typeof emp === 'object') {
       let oid = normalizeEntityId((emp as any).organization_id ?? (emp as any).organization);
       if (oid) return oid;

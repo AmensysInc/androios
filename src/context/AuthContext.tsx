@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { Platform } from 'react-native';
 import apiClient, { HttpError } from '../lib/api-client';
+import { clearApiSessionCaches } from '../api';
 import { getPrimaryRoleFromUser, mergeNestedAuthUserPayload, type UserRole } from '../types/auth';
 import {
   isBiometricLoginEnabled,
@@ -134,6 +135,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signOut = useCallback(async () => {
     await clearBiometricLogin();
     await clearFaceSessionFlags();
+    clearApiSessionCaches();
     await apiClient.logout();
     setUser(null);
     setRole(null);
