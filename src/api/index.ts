@@ -1,19 +1,56 @@
 import { Platform } from 'react-native';
 import apiClient, { HttpError } from '../lib/api-client';
+import {
+  buildCalendarRangeParams,
+  buildShiftRangeParams,
+  cleanEmployeeListParams,
+  cleanSchedulerParams,
+  DEFAULT_SCHEDULER_PAGE_SIZE,
+  formatSchedulerDateYmd,
+} from '../lib/schedulerParams';
+import {
+  clearSchedulerEmployeeCache,
+  getCachedSchedulerEmployeeForUser,
+  setCachedSchedulerEmployeeForUser,
+} from '../lib/employeeResolveCache';
+import { devLog, devWarn } from '../lib/logger';
+import {
+  cachedRequest,
+  invalidateRequestCache,
+  invalidateRequestCachePrefix,
+} from '../lib/requestCache';
+
+export { clearSchedulerEmployeeCache } from '../lib/employeeResolveCache';
 
 const DEFAULT_COMPANY_TYPE = 'General';
-
-/** Dev-only traces for shift POST debugging (Metro / Xcode / Logcat). */
-const SCHEDULER_SHIFT_DEBUG = typeof __DEV__ !== 'undefined' && __DEV__;
+const CURRENT_USER_CACHE_TTL_MS = 60_000;
+const CALENDAR_EVENTS_CACHE_TTL_MS = 45_000;
+const WORK_TASKS_CACHE_TTL_MS = 45_000;
 
 function logSchedulerShift(phase: string, data: Record<string, unknown>) {
-  if (!SCHEDULER_SHIFT_DEBUG) return;
+  if (typeof __DEV__ === 'undefined' || !__DEV__) return;
   try {
     const s = JSON.stringify(data);
-    console.log(`[scheduler/shift] ${phase}`, s.length > 2800 ? `${s.slice(0, 2800)}…` : s);
+    devLog(`[scheduler/shift] ${phase}`, s.length > 2800 ? `${s.slice(0, 2800)}…` : s);
   } catch {
-    console.log(`[scheduler/shift] ${phase}`, data);
+    devLog(`[scheduler/shift] ${phase}`, data);
   }
+}
+
+/** Clear in-memory API caches (call on sign-out). */
+export function clearApiSessionCaches(): void {
+  clearSchedulerEmployeeCache();
+  invalidateRequestCache();
+}
+
+/** Bust cached GET /calendar/events/ after task create/update/delete. */
+export function invalidateCalendarEventsCache(): void {
+  invalidateRequestCachePrefix('calendar:events:');
+}
+
+/** Bust cached GET /tasks/ after task create/update/delete. */
+export function invalidateWorkTasksCache(): void {
+  invalidateRequestCachePrefix('tasks:work:');
 }
 
 /** Strip braces / `urn:uuid:` so we can match Django/Postgres UUID strings. */
@@ -162,6 +199,8 @@ export function normalizePaginatedList<T extends Record<string, any>>(raw: any):
       raw.content ??
       raw.items ??
       raw.records ??
+      raw.tasks ??
+      raw.shift_tasks ??
       (Array.isArray(raw.data) ? raw.data : undefined);
     if (Array.isArray(list)) return list.filter(Boolean).map((x) => attachId(x));
     if (raw.employee && typeof raw.employee === 'object' && !Array.isArray(raw.employee)) {
@@ -182,6 +221,7 @@ export function normalizePaginatedList<T extends Record<string, any>>(raw: any):
         raw.data.room_list ??
         raw.data.room_set ??
         raw.data.motel_room_set ??
+        raw.data.tasks ??
         raw.data.payload ??
         raw.data.content;
       if (Array.isArray(inner)) return inner.filter(Boolean).map((x) => attachId(x));
@@ -289,7 +329,7 @@ export function filterCompaniesStrictlyForCompanyManager<T extends Record<string
 // —— Auth / users ——
 /** Same normalization as `apiClient.getCurrentUser` (roles on envelope + nested `user`). */
 export async function getCurrentUser() {
-  return apiClient.getCurrentUser();
+  return cachedRequest('auth:user', CURRENT_USER_CACHE_TTL_MS, () => apiClient.getCurrentUser());
 }
 export async function getUsers(params?: Record<string, any>) {
   const raw = await apiClient.get<any>('/auth/users/', params);
@@ -581,46 +621,104 @@ function normalizeCalendarEventsList(raw: any): any[] {
   return fromPaginated;
 }
 
-export async function getCalendarEvents(params?: Record<string, any>) {
-  const raw = await apiClient.get<any>('/calendar/events/', params);
-  let list = normalizeCalendarEventsList(raw);
-  if (list.length > 0 || !params || Object.keys(params).length === 0) return list;
+/** POST /api/tasks/ — manual work task (optional assignee). */
+export async function createWorkTask(input: {
+  title: string;
+  description?: string;
+  priority: string;
+  organizationId?: string;
+  companyId?: string;
+  assigneeUserId?: string;
+  dueDateIso?: string;
+}) {
+  const title = String(input.title ?? '').trim();
+  if (!title) throw new Error('Task title is required');
+  const body: Record<string, any> = {
+    title,
+    task_name: title,
+    task_type: 'manual',
+    priority: input.priority,
+  };
+  const desc = input.description?.trim();
+  if (desc) body.description = desc;
+  const oid = String(input.organizationId ?? '').trim();
+  const cid = String(input.companyId ?? '').trim();
+  if (oid) {
+    body.organization_id = oid;
+    body.organization = oid;
+  }
+  if (cid) {
+    body.company_id = cid;
+    body.company = cid;
+  }
+  if (input.dueDateIso) {
+    const d = new Date(input.dueDateIso);
+    if (!Number.isNaN(d.getTime())) body.due_date = d.toISOString().slice(0, 10);
+  }
+  const uid = String(input.assigneeUserId ?? '').trim();
+  if (uid) {
+    body.assigned_to_ids = [uid];
+    body.user_id = uid;
+    body.is_assigned = true;
+  }
+  const raw = await apiClient.post<any>('/tasks/', stripWriteFields(body));
+  invalidateWorkTasksCache();
+  return raw;
+}
 
-  // Same path, alternate query param names (DRF / custom filters vary by deployment).
-  const alt: Record<string, any> = { ...params };
-  let changed = false;
-  if (params.start_time__gte != null) {
-    delete alt.start_time__gte;
-    alt.start__gte = params.start_time__gte;
-    const d = String(params.start_time__gte).slice(0, 10);
-    if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
-      alt.date__gte = d;
-    }
-    changed = true;
-  }
-  if (params.start_time__lte != null) {
-    delete alt.start_time__lte;
-    alt.end__lte = params.start_time__lte;
-    const d = String(params.start_time__lte).slice(0, 10);
-    if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) {
-      alt.date__lte = d;
-    }
-    changed = true;
-  }
-  if (params.event_type != null && params.type == null) {
-    delete alt.event_type;
-    alt.type = params.event_type;
-    changed = true;
-  }
-  if (changed) {
+/** PATCH /api/tasks/{id}/ or POST …/complete/ for status updates. */
+export async function updateWorkTaskStatus(
+  taskId: string,
+  status: 'pending' | 'in_progress' | 'completed'
+) {
+  const id = String(taskId).trim();
+  if (!id) throw new Error('Task id is required');
+  const enc = encodeURIComponent(id);
+  if (status === 'completed') {
     try {
-      const raw2 = await apiClient.get<any>('/calendar/events/', alt);
-      list = normalizeCalendarEventsList(raw2);
-    } catch {
-      /* ignore */
+      const raw = await apiClient.post<any>(`/tasks/${enc}/complete/`, {});
+      invalidateWorkTasksCache();
+      return raw;
+    } catch (e) {
+      if (!(e instanceof HttpError && (e.status === 404 || e.status === 405))) throw e;
     }
   }
-  return list;
+  const raw = await apiClient.patch<any>(`/tasks/${enc}/`, {
+    status: status === 'completed' ? 'completed' : status === 'in_progress' ? 'in_progress' : 'pending',
+  });
+  invalidateWorkTasksCache();
+  return raw;
+}
+
+/** GET /api/tasks/ — Tasks page list (manual + assigned; matches web app). */
+export async function getWorkTasks(params?: Record<string, string>): Promise<any[]> {
+  const cleaned = params
+    ? Object.fromEntries(
+        Object.entries(params).filter(([, v]) => v != null && String(v).trim() !== '')
+      )
+    : {};
+  const cacheKey = `tasks:work:${JSON.stringify(cleaned)}`;
+  return cachedRequest(cacheKey, WORK_TASKS_CACHE_TTL_MS, async () => {
+    const raw = await apiClient.get<any>('/tasks/', Object.keys(cleaned).length ? cleaned : undefined);
+    const list = normalizePaginatedList(raw);
+    if (list.length > 0) return list;
+    if (Array.isArray(raw)) return raw.filter(Boolean).map((x) => attachId(x));
+    return list;
+  });
+}
+
+export async function getCalendarEvents(params?: Record<string, any>) {
+  const cleaned = cleanSchedulerParams(params as Record<string, unknown> | undefined);
+  const cacheKey = `calendar:events:${JSON.stringify(cleaned)}`;
+  return cachedRequest(cacheKey, CALENDAR_EVENTS_CACHE_TTL_MS, async () => {
+    try {
+      const raw = await apiClient.get<any>('/calendar/events/', cleaned);
+      return normalizeCalendarEventsList(raw);
+    } catch (e: unknown) {
+      devLog('[calendar/events] ERROR:', e instanceof HttpError ? e.body : e);
+      throw e;
+    }
+  });
 }
 export async function createCalendarEvent(data: any) {
   return apiClient.post<any>('/calendar/events/', data);
@@ -635,6 +733,8 @@ export async function createTaskEvent(input: {
   startIso: string;
   endIso: string;
   assigneeUserId: string;
+  organizationId?: string | null;
+  companyId?: string | null;
 }) {
   const { title, description, priority, isAllDay, startIso, endIso, assigneeUserId } = input;
   const uid = String(assigneeUserId);
@@ -645,6 +745,16 @@ export async function createTaskEvent(input: {
     end_time: endIso,
     priority,
   };
+  const oid = String(input.organizationId ?? '').trim();
+  const cid = String(input.companyId ?? '').trim();
+  if (oid) {
+    core.organization = oid;
+    core.organization_id = oid;
+  }
+  if (cid) {
+    core.company = cid;
+    core.company_id = cid;
+  }
   const desc = description?.trim();
   if (desc) core.description = desc;
 
@@ -683,7 +793,9 @@ export async function createTaskEvent(input: {
   let last: unknown;
   for (const body of bodies) {
     try {
-      return await apiClient.post<any>('/calendar/events/', body);
+      const created = await apiClient.post<any>('/calendar/events/', body);
+      invalidateCalendarEventsCache();
+      return created;
     } catch (e) {
       last = e;
       if (e instanceof HttpError && e.status === 400) continue;
@@ -1033,7 +1145,8 @@ export async function getDepartments(params?: Record<string, any>) {
 
 // —— Scheduler: employees ——
 export async function getEmployees(params?: Record<string, any>): Promise<SchedulerEmployee[]> {
-  const raw = await apiClient.get<any>('/scheduler/employees/', params);
+  const cleaned = cleanEmployeeListParams(params as Record<string, unknown> | undefined);
+  const raw = await apiClient.get<any>('/scheduler/employees/', cleaned);
   return normalizePaginatedList<SchedulerEmployee>(raw);
 }
 
@@ -1194,10 +1307,6 @@ export async function getEmployeesForCompany(companyId: string): Promise<Schedul
   if (!cid) return [];
 
   const attempts: Record<string, any>[] = [
-    { company: cid, page_size: 1000 },
-    { company_id: cid, page_size: 1000 },
-    { company: cid, limit: 1000 },
-    { company_id: cid, limit: 1000 },
     { company: cid },
     { company_id: cid },
   ];
@@ -1213,7 +1322,7 @@ export async function getEmployeesForCompany(companyId: string): Promise<Schedul
   }
   if (best.length > 0) return best;
 
-  const broadAttempts: Record<string, any>[] = [{ page_size: 2000 }, { limit: 2000 }, {}];
+  const broadAttempts: Record<string, any>[] = [{}];
   for (const params of broadAttempts) {
     try {
       const all = await getEmployees(params);
@@ -1326,9 +1435,9 @@ async function trySchedulerEmployeeMeEndpoints(): Promise<any | null> {
 
 async function tryFetchEmployeeFromAuthUserDetail(userId: string): Promise<any | null> {
   if (!userId) return null;
-  // Some backends don't expose `/auth/users/:id/` (404). Cache that to avoid repeated probes.
+  // Zenotimeflow: employees resolve via GET /auth/user/ + scheduler list — not GET /auth/users/:id/.
   (tryFetchEmployeeFromAuthUserDetail as any)._skip =
-    (tryFetchEmployeeFromAuthUserDetail as any)._skip ?? false;
+    (tryFetchEmployeeFromAuthUserDetail as any)._skip ?? true;
   if ((tryFetchEmployeeFromAuthUserDetail as any)._skip) return null;
   try {
     const detail = await apiClient.get<any>(`/auth/users/${encodeURIComponent(userId)}/`);
@@ -1343,11 +1452,11 @@ async function tryFetchEmployeeFromAuthUserDetail(userId: string): Promise<any |
 
 /** Some APIs expose only nested employee on `/auth/profile/` or user profile sub-resource. */
 async function tryFetchEmployeeFromProfileEndpoints(userId: string): Promise<any | null> {
-  // Cache unsupported profile GET endpoints (405/404) to avoid repeated login spam.
+  // GET /auth/profile/ is PATCH-only on Zenotimeflow — never probe with GET.
   (tryFetchEmployeeFromProfileEndpoints as any)._skipAuthProfile =
-    (tryFetchEmployeeFromProfileEndpoints as any)._skipAuthProfile ?? false;
+    (tryFetchEmployeeFromProfileEndpoints as any)._skipAuthProfile ?? true;
   (tryFetchEmployeeFromProfileEndpoints as any)._skipUserProfile =
-    (tryFetchEmployeeFromProfileEndpoints as any)._skipUserProfile ?? false;
+    (tryFetchEmployeeFromProfileEndpoints as any)._skipUserProfile ?? true;
   const paths: string[] = [];
   if (!(tryFetchEmployeeFromProfileEndpoints as any)._skipAuthProfile) paths.push('/auth/profile/');
   if (userId && !(tryFetchEmployeeFromProfileEndpoints as any)._skipUserProfile) {
@@ -1374,33 +1483,40 @@ async function tryFetchEmployeeFromProfileEndpoints(userId: string): Promise<any
   return null;
 }
 
-export async function resolveEmployeeForUser(
+async function resolveEmployeeForUserUncached(
   user?: {
     id?: string | null;
     email?: string | null;
     company_id?: string | null;
     assigned_company?: string | null;
     [k: string]: any;
-  } | null
+  } | null,
+  opts?: { deep?: boolean }
 ): Promise<any | null> {
   let resolvedUser: any = user;
-  if (user && typeof user === 'object') {
-    const uid = user.id != null ? String(user.id).trim() : '';
-    const uem =
-      user.email != null
-        ? String(user.email).trim().toLowerCase()
-        : user && typeof (user as any).profile === 'object' && (user as any).profile?.email != null
-          ? String((user as any).profile.email).trim().toLowerCase()
-          : '';
-    if (!uid && !uem) {
-      try {
-        const fresh = await getCurrentUser();
-        if (fresh && typeof fresh === 'object') {
-          resolvedUser = { ...user, ...fresh };
-        }
-      } catch {
-        /* ignore */
+  const fromNestedEarly = extractNestedEmployeeFromPayload(resolvedUser);
+  if (fromNestedEarly) return fromNestedEarly;
+
+  const needsAuthRefresh =
+    user &&
+    typeof user === 'object' &&
+    (!String(user.id ?? '').trim() ||
+      (!String(user.email ?? '').trim() &&
+        !(
+          typeof (user as any).profile === 'object' &&
+          (user as any).profile?.email != null
+        )));
+
+  if (needsAuthRefresh) {
+    try {
+      const fresh = await getCurrentUser();
+      if (fresh && typeof fresh === 'object') {
+        resolvedUser = { ...user, ...fresh };
+        const n = extractNestedEmployeeFromPayload(resolvedUser);
+        if (n) return n;
       }
+    } catch (e: unknown) {
+      devLog('[auth/user] resolve employee ERROR:', e instanceof HttpError ? e.body : e);
     }
   }
 
@@ -1422,38 +1538,15 @@ export async function resolveEmployeeForUser(
   const fromNested = extractNestedEmployeeFromPayload(resolvedUser);
   if (fromNested) return fromNested;
 
-  try {
-    const fresh = await getCurrentUser();
-    if (fresh && typeof fresh === 'object') {
-      const n = extractNestedEmployeeFromPayload(fresh);
-      if (n) return n;
-    }
-  } catch {
-    /* ignore */
-  }
-
   const meRow = await trySchedulerEmployeeMeEndpoints();
   if (meRow) return meRow;
 
-  if (userId) {
-    const fromDetail = await tryFetchEmployeeFromAuthUserDetail(userId);
-    if (fromDetail) return fromDetail;
-  }
-
-  const fromProfile = await tryFetchEmployeeFromProfileEndpoints(userId);
-  if (fromProfile) return fromProfile;
-
   const tryFetch = async (params?: Record<string, any>) => {
     try {
-      const rows = await getEmployees({ page_size: 1000, ...params });
+      const rows = await getEmployees(params);
       return Array.isArray(rows) ? rows : [];
     } catch {
-      try {
-        const rows = await getEmployees(params);
-        return Array.isArray(rows) ? rows : [];
-      } catch {
-        return [];
-      }
+      return [];
     }
   };
 
@@ -1571,50 +1664,15 @@ export async function resolveEmployeeForUser(
     }
   }
 
-  if (userId) {
-    // Cache unsupported filter keys (some backends 400 on unknown query params).
-    (resolveEmployeeForUser as any)._badEmployeeListKeys =
-      (resolveEmployeeForUser as any)._badEmployeeListKeys ?? new Set<string>();
-    const badKeys: Set<string> = (resolveEmployeeForUser as any)._badEmployeeListKeys;
-
-    const paramAttempts: Array<{ params: Record<string, any>; key: string }> = [
-      { params: { user_id: userId, page_size: 1000 }, key: 'user_id' },
-      { params: { user__id: userId, page_size: 1000 }, key: 'user__id' },
-      { params: { user: userId, page_size: 1000 }, key: 'user' },
-      { params: { auth_user: userId, page_size: 1000 }, key: 'auth_user' },
-      { params: { auth_user_id: userId, page_size: 1000 }, key: 'auth_user_id' },
-      { params: { owner: userId, page_size: 1000 }, key: 'owner' },
-    ].filter((x) => !badKeys.has(x.key));
-
-    for (const { params, key } of paramAttempts) {
-      let rows: any[] = [];
-      try {
-        rows = await tryFetch(params);
-      } catch {
-        rows = [];
-      }
-      const hit = pickMatch(rows);
-      if (hit) return hit;
-      // Detect 400 support issues by making a direct call once (tryFetch swallows status codes).
-      // If the backend 400s, mark this key as unsupported for future calls.
-      try {
-        await getEmployees({ [key]: userId, page_size: 1 });
-      } catch (e: any) {
-        const st = e instanceof HttpError ? e.status : e?.status;
-        if (st === 400) badKeys.add(key);
-      }
-    }
+  const companyHints = companyIdHintsFromAuthUser(resolvedUser);
+  for (const cid of companyHints) {
+    const companyRows = await getEmployeesForCompany(cid);
+    const hit = pickOrName(companyRows);
+    if (hit) return hit;
   }
 
   if (userEmail) {
-    const emailParams: Record<string, any>[] = [
-      { email: userEmail, page_size: 1000 },
-      { email__iexact: userEmail, page_size: 1000 },
-      { user__email: userEmail, page_size: 1000 },
-      { user__email__iexact: userEmail, page_size: 1000 },
-      { search: userEmail, page_size: 1000 },
-      { q: userEmail, page_size: 1000 },
-    ];
+    const emailParams: Record<string, any>[] = [{ email: userEmail }, { search: userEmail }];
     for (const p of emailParams) {
       const rows = await tryFetch(p);
       const hit = pickMatch(rows);
@@ -1628,34 +1686,12 @@ export async function resolveEmployeeForUser(
     (resolvedUser as any)?.user_profile?.organization_id;
   if (orgHint != null && String(orgHint).trim() !== '') {
     const oid = String(orgHint).trim();
-    const orgParams: Record<string, any>[] = [
-      { organization: oid, page_size: 1000 },
-      { organization_id: oid, page_size: 1000 },
-    ];
+    const orgParams: Record<string, any>[] = [{ organization: oid }];
     for (const p of orgParams) {
       const rows = await tryFetch(p);
       const hit = pickMatch(rows);
       if (hit) return hit;
     }
-  }
-
-  const companyHints = companyIdHintsFromAuthUser(resolvedUser);
-  for (const cid of companyHints) {
-    const companyRows = await getEmployeesForCompany(cid);
-    const hit = pickOrName(companyRows);
-    if (hit) return hit;
-  }
-
-  const broadAttempts: Record<string, any>[] = [
-    { page_size: 2000 },
-    { limit: 2000 },
-    { page_size: 500 },
-    {},
-  ];
-  for (const params of broadAttempts) {
-    const rows = await tryFetch(params);
-    const hit = pickOrName(rows);
-    if (hit) return hit;
   }
 
   const all = await tryFetch();
@@ -1669,65 +1705,20 @@ export async function resolveEmployeeForUser(
     }
   }
 
-  const tryFetchShifts = async (params?: Record<string, any>) => {
-    try {
-      const rows = await getShifts({ page_size: 200, ...params });
-      return Array.isArray(rows) ? rows : [];
-    } catch {
-      try {
-        const rows = await getShifts(params);
-        return Array.isArray(rows) ? rows : [];
-      } catch {
-        return [];
-      }
-    }
-  };
+  if (!opts?.deep) return null;
 
   try {
-    const since = new Date(Date.now() - 180 * 86400000).toISOString();
-    const shiftBatches = await Promise.all([
-      tryFetchShifts({ ordering: '-start_time' }),
-      tryFetchShifts({ start_time__gte: since, ordering: '-start_time' }),
-      tryFetchShifts({ ordering: '-id' }),
-    ]);
-    const shiftMerged = shiftBatches.flat();
-    const seenEmp = new Set<string>();
-    for (const s of shiftMerged) {
-      const eid = String(
-        s?.employee_id ??
-          (typeof s?.employee === 'object' && s?.employee != null
-            ? (s.employee as any).id ?? (s.employee as any).pk
-            : s?.employee) ??
-          ''
-      ).trim();
-      if (!eid || seenEmp.has(eid)) continue;
-      seenEmp.add(eid);
-      if (seenEmp.size > 48) break;
-      try {
-        const emp = await getEmployee(eid);
-        if (!emp || typeof emp !== 'object') continue;
-        const r = attachId(emp as any);
-        const hit = pickMatch([r]);
+    const sinceDate = formatSchedulerDateYmd(new Date(Date.now() - 90 * 86400000));
+    const shiftRows = await getShifts({
+      start_date: sinceDate,
+      end_date: formatSchedulerDateYmd(new Date()),
+    });
+    for (const s of shiftRows) {
+      const nested = extractNestedEmployeeFromPayload(s?.employee);
+      if (nested) {
+        const hit = pickMatch([nested]);
         if (hit) return hit;
-      } catch {
-        /* next */
       }
-    }
-  } catch {
-    /* ignore */
-  }
-
-  try {
-    const companies = await getCompanies({ page_size: 500 });
-    const list = Array.isArray(companies) ? companies : [];
-    const seenCo = new Set<string>();
-    for (const c of list) {
-      const cid = String((c as any).id ?? (c as any).pk ?? '').trim();
-      if (!cid || seenCo.has(cid)) continue;
-      seenCo.add(cid);
-      const companyRows = await getEmployeesForCompany(cid);
-      const hit = pickOrName(companyRows);
-      if (hit) return hit;
     }
   } catch {
     /* ignore */
@@ -1736,18 +1727,38 @@ export async function resolveEmployeeForUser(
   return null;
 }
 
+export async function resolveEmployeeForUser(
+  user?: {
+    id?: string | null;
+    email?: string | null;
+    company_id?: string | null;
+    assigned_company?: string | null;
+    [k: string]: any;
+  } | null,
+  opts?: { deep?: boolean }
+): Promise<any | null> {
+  const cached = getCachedSchedulerEmployeeForUser(user);
+  if (cached !== undefined) return cached;
+  const emp = await resolveEmployeeForUserUncached(user, opts);
+  setCachedSchedulerEmployeeForUser(user, emp);
+  return emp;
+}
+
 /**
  * Same resolution as {@link resolveEmployeeForUser} (company list + paginated scan).
  * Kept for User Management and explicit “link user ↔ employee” flows.
  */
-export async function findSchedulerEmployeeForAuthUser(user?: {
-  id?: string | null;
-  email?: string | null;
-  company_id?: string | null;
-  assigned_company?: string | null;
-  [k: string]: any;
-} | null): Promise<any | null> {
-  return resolveEmployeeForUser(user);
+export async function findSchedulerEmployeeForAuthUser(
+  user?: {
+    id?: string | null;
+    email?: string | null;
+    company_id?: string | null;
+    assigned_company?: string | null;
+    [k: string]: any;
+  } | null,
+  opts?: { deep?: boolean }
+): Promise<any | null> {
+  return resolveEmployeeForUser(user, opts);
 }
 
 /** Resolve `employee` / nested employee id on a shift row for filtering. */
@@ -1779,15 +1790,10 @@ function shiftEmployeeMatchesAny(shiftRow: any, wantedIds: string[]): boolean {
 }
 
 /**
- * Load shifts for one employee in [rangeStart, rangeEnd]. Tries several query shapes, then
- * company-wide fetch + client filter (matches getShiftsForCompanyInRange behavior).
+ * Load shifts for one employee in [rangeStart, rangeEnd] — single `/scheduler/shifts/` request.
  */
 export async function getShiftsForEmployeeInRange(params: {
   employeeId: string;
-  /**
-   * Optional: some backends store shift.employee as the auth user id (not scheduler employee id).
-   * When provided, we will query/filter by BOTH ids so employees can see assigned shifts reliably.
-   */
   employeeUserId?: string | null;
   rangeStart: Date;
   rangeEnd: Date;
@@ -1798,99 +1804,30 @@ export async function getShiftsForEmployeeInRange(params: {
   const wantedIds = Array.from(new Set([eid, uid].filter(Boolean)));
   if (wantedIds.length === 0) return [];
 
-  const employeeMatches = (s: any): boolean => shiftEmployeeMatchesAny(s, wantedIds);
-
-  const inRange = (s: any): boolean => shiftOverlapsRange(s, params.rangeStart, params.rangeEnd);
-
-  const tryQ = async (q: Record<string, any>) => {
-    try {
-      const rows = await getShifts({ page_size: 1000, ...q });
-      return Array.isArray(rows) ? rows : [];
-    } catch {
-      try {
-        const rows = await getShifts(q);
-        return Array.isArray(rows) ? rows : [];
-      } catch {
-        return [];
-      }
-    }
-  };
-
-  const rs = params.rangeStart.toISOString();
-  const re = params.rangeEnd.toISOString();
-  const rsDate = rs.slice(0, 10);
-  const reDate = re.slice(0, 10);
   const cidRaw = String(params.companyId || '').trim();
   const cid = cidRaw && !cidRaw.toLowerCase().includes('object') ? cidRaw : '';
 
-  const queries: Record<string, any>[] = [];
-  const idsForQuery = wantedIds;
-  if (cid) {
-    for (const id of idsForQuery) {
-      queries.push(
-        { company: cid, employee: id, start_time__gte: rs, start_time__lte: re },
-        { company_id: cid, employee_id: id, start_time__gte: rs, start_time__lte: re },
-        { company: cid, employee_id: id, start_time__gte: rs, start_time__lte: re },
-        { company: cid, employee: id, start_date: rs, end_date: re },
-        { company: cid, employee: id, start_date: rsDate, end_date: reDate },
-        { company: cid, employee: id }
-      );
-    }
-  }
-  for (const id of idsForQuery) {
-    queries.push(
-      { employee: id, start_time__gte: rs, start_time__lte: re },
-      { employee_id: id, start_time__gte: rs, start_time__lte: re },
-      { employee: id, start_date: rs, end_date: re },
-      { employee: id, start_date: rsDate, end_date: reDate },
-      { employee: id }
-    );
-  }
-
-  for (const q of queries) {
-    const rows = await tryQ(q);
-    const filtered = rows.filter((s) => employeeMatches(s) && inRange(s));
-    if (filtered.length > 0) return filtered;
-  }
-
-  if (cid) {
-    const broad = await getShiftsForCompanyInRange({
-      companyId: cid,
-      rangeStart: params.rangeStart,
-      rangeEnd: params.rangeEnd,
-    });
-    const filtered = broad.filter((s) => employeeMatches(s) && inRange(s));
-    if (filtered.length > 0) return filtered;
-  }
-
-  const timeOnly = await tryQ({ start_time__gte: rs, start_time__lte: re });
-  const ft = timeOnly.filter((s) => employeeMatches(s) && inRange(s));
-  if (ft.length > 0) return ft;
-
-  const merged: any[] = [];
-  for (const id of idsForQuery) {
-    const looseA = await tryQ({ employee: id, page_size: 2000 });
-    const looseB = await tryQ({ employee_id: id, page_size: 2000 });
-    merged.push(...looseA, ...looseB);
-  }
-  const seen = new Set<string>();
-  const looseFiltered = merged.filter((s) => {
-    const sid = String(s?.id ?? s?.pk ?? '').trim();
-    if (sid && seen.has(sid)) return false;
-    if (sid) seen.add(sid);
-    return employeeMatches(s) && inRange(s);
+  const queryParams = buildShiftRangeParams({
+    rangeStart: params.rangeStart,
+    rangeEnd: params.rangeEnd,
+    employeeId: eid,
+    companyId: cid || undefined,
   });
-  if (looseFiltered.length > 0) return looseFiltered;
 
-  if (typeof __DEV__ !== 'undefined' && __DEV__) {
-    console.warn('[shifts] none found for employee in range', {
-      wantedIds,
-      companyId: cid || null,
-      rangeStart: rsDate,
-      rangeEnd: reDate,
-    });
+  devLog('FINAL SHIFT PARAMS:', queryParams);
+
+  let rows: any[] = [];
+  try {
+    rows = await getShifts(queryParams);
+  } catch (e: unknown) {
+    devLog('[scheduler/shifts] employee range ERROR:', e instanceof HttpError ? e.body : e);
+    return [];
   }
-  return [];
+
+  const employeeMatches = (s: any) => shiftEmployeeMatchesAny(s, wantedIds);
+  return rows.filter(
+    (s) => employeeMatches(s) && shiftOverlapsRange(s, params.rangeStart, params.rangeEnd)
+  );
 }
 export async function getEmployee(id: string) {
   return apiClient.get<any>(`/scheduler/employees/${id}/`);
@@ -2059,19 +1996,55 @@ export async function deleteEmployee(id: string) {
   return apiClient.delete(`/scheduler/employees/${id}/`);
 }
 
-// —— Scheduler: shifts ——
-export async function getShifts(params?: Record<string, any>) {
-  const raw = await apiClient.get<any>('/scheduler/shifts/', params);
+// —— Scheduler: shift tasks ——
+export async function getShiftTasks(shiftId: string): Promise<any[]> {
+  const sid = String(shiftId).trim();
+  if (!sid) return [];
+  const raw = await apiClient.get<any>('/scheduler/shift-tasks/', { shift: sid });
   return normalizePaginatedList(raw);
 }
 
-let lastShiftRangeQueryIndex: number | null = null;
-let lastShiftBroadCompanyKey: 'company' | 'company_id' | null = null;
+export async function createShiftTask(shiftId: string, title: string): Promise<any> {
+  const sid = String(shiftId).trim();
+  const t = String(title).trim();
+  if (!sid || !t) throw new Error('Shift and task title are required');
+  return apiClient.post<any>('/scheduler/shift-tasks/', { shift: sid, title: t });
+}
+
+export async function deleteShiftTask(taskId: string): Promise<void> {
+  const id = String(taskId).trim();
+  if (!id) throw new Error('Task id is required');
+  await apiClient.delete(`/scheduler/shift-tasks/${encodeURIComponent(id)}/`);
+}
+
+/** Copy master checklist template tasks onto a shift (POST …/apply-checklist-template/). */
+export async function applyChecklistTemplateToShift(
+  shiftId: string,
+  templateId: string
+): Promise<{ created?: number; titles?: string[]; message?: string }> {
+  const sid = String(shiftId).trim();
+  const tid = String(templateId).trim();
+  if (!sid || !tid) throw new Error('Shift and template id are required');
+  return apiClient.post<any>(`/scheduler/shifts/${encodeURIComponent(sid)}/apply-checklist-template/`, {
+    template_id: tid,
+    templateId: tid,
+  });
+}
+
+// —— Scheduler: shifts ——
+export async function getShifts(params?: Record<string, any>) {
+  const cleanParams = cleanSchedulerParams(params as Record<string, unknown> | undefined);
+  try {
+    const raw = await apiClient.get<any>('/scheduler/shifts/', cleanParams);
+    return normalizePaginatedList(raw);
+  } catch (e: unknown) {
+    devLog('[scheduler/shifts] ERROR:', e instanceof HttpError ? e.body : e, cleanParams);
+    throw e;
+  }
+}
 
 /**
- * Load shifts for a company in [rangeStart, rangeEnd]. Tries common Django filter param names,
- * then falls back to fetching by company and filtering client-side (fixes empty grids when
- * `start_date`/`end_date` are not supported).
+ * Load shifts for a company in [rangeStart, rangeEnd] — single `/scheduler/shifts/` request.
  */
 export async function getShiftsForCompanyInRange(params: {
   companyId: string;
@@ -2081,34 +2054,20 @@ export async function getShiftsForCompanyInRange(params: {
   const cid = String(params.companyId || '').trim();
   if (!cid) return [];
 
-  const rs = params.rangeStart.toISOString();
-  const re = params.rangeEnd.toISOString();
-  const rsDate = rs.slice(0, 10);
-  const reDate = re.slice(0, 10);
+  const queryParams = buildShiftRangeParams({
+    rangeStart: params.rangeStart,
+    rangeEnd: params.rangeEnd,
+    companyId: cid,
+  });
 
-  const tryQ = async (q: Record<string, any>) => {
-    try {
-      const rows = await getShifts({ page_size: 1000, ...q });
-      return Array.isArray(rows) ? rows : [];
-    } catch {
-      try {
-        const rows = await getShifts(q);
-        return Array.isArray(rows) ? rows : [];
-      } catch {
-        return [];
-      }
-    }
-  };
+  devLog('FINAL SHIFT PARAMS:', queryParams);
 
-  const queryTries: Record<string, any>[] = [
-    { company: cid, start_date: rs, end_date: re },
-    { company: cid, start_date: rsDate, end_date: reDate },
-    { company_id: cid, start_date: rs, end_date: re },
-    { company: cid, start_time__gte: rs, start_time__lte: re },
-    { company: cid, date__gte: rsDate, date__lte: reDate },
-    { company: cid, from_date: rsDate, to_date: reDate },
-    { company: cid, week_start: rsDate, week_end: reDate },
-  ];
+  let rows: any[] = [];
+  try {
+    rows = await getShifts(queryParams);
+  } catch {
+    return [];
+  }
 
   const normId = (v: any): string => {
     if (v == null || v === '') return '';
@@ -2116,51 +2075,11 @@ export async function getShiftsForCompanyInRange(params: {
     return String(v).trim().toLowerCase();
   };
   const cidNorm = normId(cid);
-  const companyMatches = (s: any): boolean => {
+  return rows.filter((s: any) => {
     const c = s?.company_id ?? s?.company;
-    // When loading a specific company schedule, never accept shifts with unknown company,
-    // otherwise the UI can show other-company shifts under the selected company.
     if (c == null || c === '') return false;
-    return normId(c) === cidNorm;
-  };
-  const normalizeRows = (rows: any[]): any[] =>
-    rows.filter((s: any) => companyMatches(s) && shiftOverlapsRange(s, params.rangeStart, params.rangeEnd));
-
-  const order: number[] = [];
-  if (lastShiftRangeQueryIndex != null && lastShiftRangeQueryIndex >= 0 && lastShiftRangeQueryIndex < queryTries.length) {
-    order.push(lastShiftRangeQueryIndex);
-  }
-  for (let i = 0; i < queryTries.length; i++) {
-    if (!order.includes(i)) order.push(i);
-  }
-
-  for (const idx of order) {
-    const q = queryTries[idx];
-    const rows = await tryQ(q);
-    if (rows.length > 0) {
-      const filtered = normalizeRows(rows);
-      if (filtered.length > 0) {
-        lastShiftRangeQueryIndex = idx;
-        return filtered;
-      }
-    }
-  }
-
-  const broadOrder: Array<'company' | 'company_id'> = [];
-  if (lastShiftBroadCompanyKey) broadOrder.push(lastShiftBroadCompanyKey);
-  if (!broadOrder.includes('company')) broadOrder.push('company');
-  if (!broadOrder.includes('company_id')) broadOrder.push('company_id');
-
-  let broad: any[] = [];
-  for (const key of broadOrder) {
-    broad = await tryQ({ [key]: cid });
-    if (broad.length > 0) {
-      lastShiftBroadCompanyKey = key;
-      break;
-    }
-  }
-  if (broad.length === 0) return [];
-  return normalizeRows(broad);
+    return normId(c) === cidNorm && shiftOverlapsRange(s, params.rangeStart, params.rangeEnd);
+  });
 }
 
 /**
@@ -2467,10 +2386,8 @@ export async function publishShiftsWeekWithFallbacks(params: {
   };
 
   const attempts: Record<string, any>[] = [
-    clean({ company: cid, company_id: cid, start_date: rs, end_date: re }),
     clean({ company: cid, company_id: cid, start_date: rsDate, end_date: reDate }),
     clean({ company: cid, company_id: cid, week_start: rsDate, week_end: reDate }),
-    clean({ company: cid, company_id: cid, start_time__gte: rs, start_time__lte: re }),
     clean({ company: cid, company_id: cid, shift_ids: ids }),
     clean({ company: cid, company_id: cid, shifts: ids }),
   ];
@@ -4455,13 +4372,24 @@ export async function createTemplate(data: Record<string, any>) {
   if (!name) throw new Error('Template name is required');
   const desc = data.description != null ? String(data.description).trim() : '';
   const cat = data.category != null ? String(data.category).trim() : data.technology != null ? String(data.technology).trim() : '';
+  const oid = String(data.organizationId ?? data.organization_id ?? data.organization ?? '').trim();
+  const cid = String(data.companyId ?? data.company_id ?? data.company ?? '').trim();
+  const scopeFields: Record<string, string> = {};
+  if (oid) {
+    scopeFields.organization = oid;
+    scopeFields.organization_id = oid;
+  }
+  if (cid) {
+    scopeFields.company = cid;
+    scopeFields.company_id = cid;
+  }
 
   const variants = [
-    stripWriteFields({ name, description: desc || undefined, category: cat || undefined }),
-    stripWriteFields({ title: name, description: desc || undefined, category: cat || undefined }),
-    stripWriteFields({ name, description: desc || undefined, technology: cat || undefined }),
-    stripWriteFields({ name, description: desc || undefined }),
-    stripWriteFields({ title: name, description: desc || undefined }),
+    stripWriteFields({ name, description: desc || undefined, category: cat || undefined, ...scopeFields }),
+    stripWriteFields({ title: name, description: desc || undefined, category: cat || undefined, ...scopeFields }),
+    stripWriteFields({ name, description: desc || undefined, technology: cat || undefined, ...scopeFields }),
+    stripWriteFields({ name, description: desc || undefined, ...scopeFields }),
+    stripWriteFields({ title: name, description: desc || undefined, ...scopeFields }),
   ];
   let last: unknown;
   for (const body of variants) {
@@ -4486,10 +4414,27 @@ export async function updateTemplate(id: string, data: Record<string, any>) {
       : data.technology != null
         ? String(data.technology).trim()
         : undefined;
+  const oid = String(data.organizationId ?? data.organization_id ?? data.organization ?? '').trim();
+  const cid = String(data.companyId ?? data.company_id ?? data.company ?? '').trim();
+  const scopeFields: Record<string, string> = {};
+  if (oid) {
+    scopeFields.organization = oid;
+    scopeFields.organization_id = oid;
+  }
+  if (cid) {
+    scopeFields.company = cid;
+    scopeFields.company_id = cid;
+  }
 
   const patches = [
-    stripWriteFields({ name: name || undefined, title: name || undefined, description: desc, category: cat }),
-    stripWriteFields({ name: name || undefined, description: desc, technology: cat }),
+    stripWriteFields({
+      name: name || undefined,
+      title: name || undefined,
+      description: desc,
+      category: cat,
+      ...scopeFields,
+    }),
+    stripWriteFields({ name: name || undefined, description: desc, technology: cat, ...scopeFields }),
     stripWriteFields({ ...data }),
   ];
   const paths = [`/templates/${id}/`, `/templates/${enc}/`];
@@ -4539,60 +4484,205 @@ export async function assignTemplate(templateId: string, userId: string) {
   throw last;
 }
 
-/** Template checklist tasks (best-effort paths for different backends). */
-export async function getTemplateTasks(templateId: string): Promise<any[]> {
-  const enc = encodeURIComponent(templateId);
-  const runs = [
-    () => apiClient.get<any>(`/templates/${templateId}/tasks/`),
-    () => apiClient.get<any>(`/templates/${enc}/tasks/`),
-    () => apiClient.get<any>('/templates/tasks/', { template: templateId }),
-    () => apiClient.get<any>('/templates/tasks/', { template_id: templateId }),
-  ];
-  for (const run of runs) {
-    try {
-      const raw = await run();
-      return normalizePaginatedList(raw);
-    } catch {
-      /* try next */
+const CHECKLIST_TEMPLATE_TASKS_PATH = '/templates/checklist-template-tasks/';
+const CHECKLIST_TASK_PRIORITY_RE = /^__priority:(low|medium|high)\s*\n?/i;
+
+/** Pack priority into description (backend has no priority column). */
+export function packChecklistTaskDescription(description: string, priority: string): string {
+  const pr = ['low', 'medium', 'high'].includes(String(priority).toLowerCase())
+    ? String(priority).toLowerCase()
+    : 'medium';
+  const text = String(description ?? '')
+    .replace(CHECKLIST_TASK_PRIORITY_RE, '')
+    .trim();
+  return text ? `__priority:${pr}\n${text}` : `__priority:${pr}`;
+}
+
+export function unpackChecklistTaskDescription(raw: string | null | undefined): {
+  priority: string;
+  text: string;
+} {
+  const desc = String(raw ?? '');
+  const m = desc.match(CHECKLIST_TASK_PRIORITY_RE);
+  if (!m) return { priority: 'medium', text: desc.trim() };
+  return {
+    priority: String(m[1]).toLowerCase(),
+    text: desc.replace(CHECKLIST_TASK_PRIORITY_RE, '').trim(),
+  };
+}
+
+/** Normalize checklist-template-tasks rows for TemplateScreen (title, due). */
+export function normalizeChecklistTemplateTaskRow(row: any): any {
+  if (!row || typeof row !== 'object') return row;
+  const title = String(row.task_name ?? row.title ?? row.name ?? '').trim();
+  const { priority, text } = unpackChecklistTaskDescription(row.description);
+  const dueRaw = row.due_date ?? row.due_at ?? row.deadline ?? row.scheduled_date ?? row.start_time;
+  let scheduledDate: string | undefined;
+  if (dueRaw) {
+    const d = new Date(dueRaw);
+    if (!Number.isNaN(d.getTime())) {
+      scheduledDate = d.toISOString().slice(0, 10);
+    } else if (typeof dueRaw === 'string' && /^\d{4}-\d{2}-\d{2}/.test(dueRaw)) {
+      scheduledDate = dueRaw.slice(0, 10);
     }
   }
+  const co = row.company;
+  const companyName =
+    row.company_name ??
+    (co && typeof co === 'object' ? String((co as any).name ?? '') : '') ??
+    '';
+  return {
+    ...row,
+    title,
+    task_name: row.task_name ?? title,
+    description: text,
+    priority: String(row.priority ?? priority).toLowerCase(),
+    due_date: dueRaw,
+    scheduled_date: row.scheduled_date ?? scheduledDate,
+    task_type: row.task_type ?? 'template',
+    company_name: companyName,
+  };
+}
+
+function templateIdFromChecklistTaskRow(row: any): string {
+  const t = row?.template_id ?? row?.template;
+  if (t != null && typeof t === 'object') return String((t as any).id ?? '').trim();
+  return t != null ? String(t).trim() : '';
+}
+
+/**
+ * GET /templates/checklist-template-tasks/ — optional ?template_id= for one template.
+ * Falls back to template detail `tasks` (calendar rows) when checklist table is empty.
+ */
+export async function getChecklistTemplateTasks(opts?: { templateId?: string }): Promise<any[]> {
+  const tid = String(opts?.templateId ?? '').trim();
+  const params: Record<string, string> = {};
+  if (tid) params.template_id = tid;
+
+  try {
+    const raw = await apiClient.get<any>(
+      CHECKLIST_TEMPLATE_TASKS_PATH,
+      Object.keys(params).length ? params : undefined
+    );
+    const list = normalizePaginatedList(raw).map(normalizeChecklistTemplateTaskRow);
+    if (list.length > 0 || tid) return list;
+  } catch (e) {
+    if (!(e instanceof HttpError && (e.status === 404 || e.status === 400))) {
+      devWarn('[checklist-template-tasks] list failed', e);
+    }
+  }
+
+  if (!tid) return [];
+
+  try {
+    const detail = await apiClient.get<any>(`/templates/${encodeURIComponent(tid)}/`);
+    const embedded = detail?.tasks;
+    if (Array.isArray(embedded) && embedded.length > 0) {
+      return embedded.map(normalizeChecklistTemplateTaskRow);
+    }
+  } catch {
+    /* detail optional */
+  }
+
+  try {
+    const ev = await getCalendarEvents({ template_id: tid, event_type: 'task' });
+    const master = (Array.isArray(ev) ? ev : []).filter((e) => e && e.is_assigned !== true);
+    if (master.length > 0) return master.map(normalizeChecklistTemplateTaskRow);
+  } catch {
+    /* calendar fallback */
+  }
+
   return [];
 }
 
+/** @deprecated Use getChecklistTemplateTasks — kept for callers. */
+export async function getTemplateTasks(templateId: string): Promise<any[]> {
+  return getChecklistTemplateTasks({ templateId });
+}
+
+/** One list request, grouped by template id (avoids N× GET …/tasks/ 404s). */
+export async function getChecklistTemplateTasksGrouped(): Promise<Record<string, any[]>> {
+  const grouped: Record<string, any[]> = {};
+  const rows = await getChecklistTemplateTasks();
+  for (const row of rows) {
+    const tid = templateIdFromChecklistTaskRow(row);
+    if (!tid) continue;
+    if (!grouped[tid]) grouped[tid] = [];
+    grouped[tid].push(row);
+  }
+  return grouped;
+}
+
 export async function createTemplateTask(templateId: string, data: Record<string, any>) {
-  const enc = encodeURIComponent(templateId);
-  const title = String(data.title ?? data.name ?? '').trim();
+  const tid = String(templateId).trim();
+  if (!tid) throw new Error('Template id is required');
+  const title = String(data.title ?? data.name ?? data.task_name ?? '').trim();
   if (!title) throw new Error('Task title is required');
 
   const due = data.due_date || data.due_at || data.deadline;
-  const cores = [
-    stripWriteFields({ title, description: data.description, priority: data.priority, due_date: due }),
-    stripWriteFields({ name: title, description: data.description, priority: data.priority, due_date: due }),
-    stripWriteFields({ title, description: data.description, priority: data.priority, due_at: due }),
-    stripWriteFields({ title, description: data.description, priority: data.priority, deadline: due }),
-  ];
-
-  const posts: Array<() => Promise<any>> = [];
-  for (const c of cores) {
-    posts.push(() => apiClient.post<any>(`/templates/${templateId}/tasks/`, { ...c, template_id: templateId }));
-    posts.push(() => apiClient.post<any>(`/templates/${templateId}/tasks/`, c));
-    posts.push(() => apiClient.post<any>(`/templates/${enc}/tasks/`, c));
-    posts.push(() => apiClient.post<any>('/templates/tasks/', { ...c, template: templateId }));
-    posts.push(() => apiClient.post<any>('/templates/tasks/', { ...c, template_id: templateId }));
+  let scheduled_date: string | undefined;
+  if (due) {
+    const d = new Date(due);
+    if (!Number.isNaN(d.getTime())) scheduled_date = d.toISOString().slice(0, 10);
+    else if (typeof due === 'string' && /^\d{4}-\d{2}-\d{2}/.test(due)) scheduled_date = due.slice(0, 10);
   }
 
+  const pr = data.priority != null ? String(data.priority) : 'medium';
+  const descRaw = data.description != null ? String(data.description).trim() : '';
+  const desc = packChecklistTaskDescription(descRaw, pr);
+  const bodies = [
+    stripWriteFields({
+      template: tid,
+      task_name: title,
+      description: desc || undefined,
+      scheduled_date,
+    }),
+    stripWriteFields({
+      template_id: tid,
+      task_name: title,
+      description: desc || undefined,
+      scheduled_date,
+    }),
+    stripWriteFields({ template: tid, title, task_name: title, description: desc || undefined, scheduled_date }),
+  ];
+
   let last: unknown;
-  for (const run of posts) {
+  for (const body of bodies) {
     try {
-      return await run();
+      const created = await apiClient.post<any>(CHECKLIST_TEMPLATE_TASKS_PATH, body);
+      return normalizeChecklistTemplateTaskRow(created);
     } catch (e) {
       last = e;
-      if (e instanceof HttpError && (e.status === 400 || e.status === 404)) continue;
+      if (e instanceof HttpError && e.status === 400) continue;
       throw e;
     }
   }
   throw last;
 }
+
+export async function updateChecklistTemplateTask(taskId: string, data: Record<string, any>) {
+  const id = String(taskId).trim();
+  if (!id) throw new Error('Task id is required');
+  const title = String(data.title ?? data.task_name ?? data.name ?? '').trim();
+  if (!title) throw new Error('Task title is required');
+  const pr = data.priority != null ? String(data.priority) : 'medium';
+  const descRaw = data.description != null ? String(data.description).trim() : '';
+  const body = stripWriteFields({
+    task_name: title,
+    title,
+    description: packChecklistTaskDescription(descRaw, pr),
+    scheduled_date: data.scheduled_date,
+  });
+  const raw = await apiClient.patch<any>(`${CHECKLIST_TEMPLATE_TASKS_PATH}${encodeURIComponent(id)}/`, body);
+  return normalizeChecklistTemplateTaskRow(raw);
+}
+
+export async function deleteChecklistTemplateTask(taskId: string) {
+  const id = String(taskId).trim();
+  if (!id) throw new Error('Task id is required');
+  await apiClient.delete(`${CHECKLIST_TEMPLATE_TASKS_PATH}${encodeURIComponent(id)}/`);
+}
+
 export async function unassignTemplate(templateId: string, userId: string) {
   return apiClient.delete('/templates/assignments/', { template_id: templateId, user_id: userId });
 }
@@ -4730,92 +4820,182 @@ export async function startMotelCleaning(roomId: string): Promise<{ id?: string;
     throw new Error('This room has no valid id from the server. Pull to refresh the list, then try again.');
   }
   if (typeof __DEV__ !== 'undefined' && __DEV__) {
-    console.log('[motel/start-cleaning] Sending room_id:', id);
+    devLog('[motel/start-cleaning] Sending room_id:', id);
   }
   try {
     return await apiClient.post<any>('/motel/start-cleaning/', { room_id: id });
   } catch (e: unknown) {
     if (typeof __DEV__ !== 'undefined' && __DEV__) {
       const body = e instanceof HttpError ? e.body : undefined;
-      console.log('[motel/start-cleaning] ERROR:', body ?? (e instanceof Error ? e.message : e));
+      devLog('[motel/start-cleaning] ERROR:', body ?? (e instanceof Error ? e.message : e));
     }
     throw e;
   }
 }
 
+/** Backend proof slots: door, bathroom, bed, tables, whole_room (see motel_cleaning_helpers.FILE_KEY_TO_SLOT). */
+export const MOTEL_CLEANING_PROOF_FIELD_KEYS = [
+  'door',
+  'bathroom',
+  'bed',
+  'tables',
+  'whole_room',
+] as const;
+
+export type MotelCleaningProofFieldKey = (typeof MOTEL_CLEANING_PROOF_FIELD_KEYS)[number];
+
 export type MotelCleaningImageAsset = {
   uri: string;
+  /** Multipart field name — must be door | bathroom | bed | tables | whole_room */
+  fieldKey: MotelCleaningProofFieldKey | string;
   fileName?: string | null;
   mimeType?: string | null;
 };
 
-/** Optional client-side cleaning timer metadata appended to multipart upload (backend may ignore unknown keys). */
-export type MotelCleaningUploadTimeMeta = {
-  start_time: string;
-  end_time: string;
-  total_time_seconds: number;
+/** Optional extras (notes only; timer is computed server-side on complete). */
+export type MotelCleaningUploadExtras = {
+  notes?: string;
+  roomId?: string;
+  companyId?: string;
 };
 
+function normalizeProofFieldKey(raw: string): MotelCleaningProofFieldKey | null {
+  const k = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/-+/g, '_');
+  if (k === 'whole' || k === 'wholeroom' || k === 'room') return 'whole_room';
+  if ((MOTEL_CLEANING_PROOF_FIELD_KEYS as readonly string[]).includes(k)) {
+    return k as MotelCleaningProofFieldKey;
+  }
+  return null;
+}
+
+function appendMotelCleaningSessionFields(
+  formData: FormData,
+  sessionId: string,
+  extras?: MotelCleaningUploadExtras
+): string {
+  const sid = parseMotelRoomUuidString(sessionId);
+  if (!sid) throw new Error('Session id is required');
+  formData.append('session_id', sid);
+  formData.append('sessionId', sid);
+  const roomId = extras?.roomId ? parseMotelRoomUuidString(extras.roomId) : '';
+  if (roomId) {
+    formData.append('room_id', roomId);
+    formData.append('roomId', roomId);
+  }
+  const companyId = extras?.companyId ? parseMotelRoomUuidString(extras.companyId) : '';
+  if (companyId) {
+    formData.append('company_id', companyId);
+    formData.append('companyId', companyId);
+  }
+  const notes = extras?.notes != null ? String(extras.notes).trim() : '';
+  if (notes) formData.append('notes', notes);
+  return sid;
+}
+
+async function appendMotelCleaningImagePart(
+  formData: FormData,
+  fieldKey: MotelCleaningProofFieldKey,
+  asset: MotelCleaningImageAsset
+): Promise<boolean> {
+  const uri = String(asset?.uri ?? '').trim();
+  if (!uri) return false;
+  const name = asset.fileName || `${fieldKey}.jpg`;
+  const mime = asset.mimeType || 'image/jpeg';
+  if (Platform.OS === 'web') {
+    const res = await fetch(uri);
+    const blob = await res.blob();
+    const body =
+      blob.type && blob.type !== 'application/octet-stream' ? blob : new Blob([blob], { type: mime });
+    formData.append(fieldKey, body as any, name);
+  } else {
+    formData.append(fieldKey, { uri, name, type: mime } as any);
+  }
+  return true;
+}
+
+async function buildMotelCleaningProofFormData(
+  sessionId: string,
+  assets: MotelCleaningImageAsset[],
+  extras?: MotelCleaningUploadExtras
+): Promise<FormData> {
+  if (!assets?.length) throw new Error('At least one image is required');
+  const formData = new FormData();
+  appendMotelCleaningSessionFields(formData, sessionId, extras);
+
+  let appended = 0;
+  for (const img of assets) {
+    const fieldKey = normalizeProofFieldKey(img.fieldKey);
+    if (!fieldKey) continue;
+    if (await appendMotelCleaningImagePart(formData, fieldKey, { ...img, fieldKey })) {
+      appended += 1;
+    }
+  }
+  if (appended === 0) throw new Error('No valid proof images (door, bathroom, bed, tables, whole_room)');
+  return formData;
+}
+
 /**
- * Multipart POST — Django expects `session_id` / `sessionId` plus file part(s) named `images`.
- * On web, `{ uri, name, type }` is not a real file upload; we send Blob so `request.FILES` is populated.
+ * Multipart POST — Django `collect_proof_files` expects typed fields:
+ * door, bathroom, bed, tables, whole_room (not a shared `images` array).
  */
 export async function uploadMotelCleaningImages(
   sessionId: string,
   assets: MotelCleaningImageAsset[],
-  timeMeta?: MotelCleaningUploadTimeMeta
+  extras?: MotelCleaningUploadExtras
 ): Promise<Record<string, unknown>> {
-  const sid = parseMotelRoomUuidString(sessionId);
-  if (!sid) throw new Error('Session id is required to upload cleaning images');
-  if (!assets?.length) throw new Error('At least one image is required');
-
-  const formData = new FormData();
-  formData.append('session_id', sid);
-  if (timeMeta) {
-    formData.append('start_time', timeMeta.start_time);
-    formData.append('end_time', timeMeta.end_time);
-    formData.append('total_time_seconds', String(timeMeta.total_time_seconds));
-  }
-
-  let appended = 0;
-  for (let i = 0; i < assets.length; i++) {
-    const img = assets[i];
-    const uri = String(img?.uri ?? '').trim();
-    if (!uri) continue;
-    const name = img.fileName || `cleaning_${i}.jpg`;
-    const mime = img.mimeType || 'image/jpeg';
-    if (Platform.OS === 'web') {
-      const res = await fetch(uri);
-      const blob = await res.blob();
-      const body =
-        blob.type && blob.type !== 'application/octet-stream' ? blob : new Blob([blob], { type: mime });
-      formData.append('images', body as any, name);
-    } else {
-      formData.append('images', { uri, name, type: mime } as any);
-    }
-    appended += 1;
-  }
-  if (appended === 0) throw new Error('No valid image URIs to upload');
-
+  const formData = await buildMotelCleaningProofFormData(sessionId, assets, extras);
   return apiClient.postFormData<Record<string, unknown>>('/motel/upload-cleaning-images/', formData);
 }
 
-export async function completeMotelCleaning(sessionId: string): Promise<Record<string, unknown>> {
+/**
+ * Finish cleaning in one request: uploads proof photos + finalizes session (pending approval).
+ * Prefer this over upload + empty complete when all five photos are ready.
+ */
+export async function completeMotelCleaningWithPhotos(
+  sessionId: string,
+  assets: MotelCleaningImageAsset[],
+  extras?: MotelCleaningUploadExtras
+): Promise<Record<string, unknown>> {
+  const formData = await buildMotelCleaningProofFormData(sessionId, assets, extras);
+  if (typeof __DEV__ !== 'undefined' && __DEV__) {
+    devLog('[motel/complete-cleaning-session] multipart proof keys:', MOTEL_CLEANING_PROOF_FIELD_KEYS.join(', '));
+  }
+  try {
+    return await apiClient.postFormData<Record<string, unknown>>('/motel/complete-cleaning-session/', formData);
+  } catch (e: unknown) {
+    if (typeof __DEV__ !== 'undefined' && __DEV__) {
+      const body = e instanceof HttpError ? e.body : undefined;
+      devLog('[motel/complete-cleaning-session] ERROR:', body ?? (e instanceof Error ? e.message : e));
+    }
+    throw e;
+  }
+}
+
+/** JSON-only complete when proof images were already uploaded via `uploadMotelCleaningImages`. */
+export async function completeMotelCleaning(
+  sessionId: string,
+  extras?: MotelCleaningUploadExtras
+): Promise<Record<string, unknown>> {
   const id = parseMotelRoomUuidString(sessionId);
   if (!id) throw new Error('Session is required');
   if (typeof __DEV__ !== 'undefined' && __DEV__) {
-    console.log('[motel/complete-cleaning-session] Sending session_id / id:', id);
+    devLog('[motel/complete-cleaning-session] Sending session_id / id:', id);
   }
   try {
     /** `complete-cleaning/` is RoomCleaningTask (requires taskId); session timer flow uses `complete-cleaning-session/`. */
     return await apiClient.post<Record<string, unknown>>('/motel/complete-cleaning-session/', {
       session_id: id,
       id,
+      sessionId: id,
+      ...(extras?.roomId ? { room_id: parseMotelRoomUuidString(extras.roomId), roomId: parseMotelRoomUuidString(extras.roomId) } : {}),
     });
   } catch (e: unknown) {
     if (typeof __DEV__ !== 'undefined' && __DEV__) {
       const body = e instanceof HttpError ? e.body : undefined;
-      console.log('[motel/complete-cleaning-session] ERROR:', body ?? (e instanceof Error ? e.message : e));
+      devLog('[motel/complete-cleaning-session] ERROR:', body ?? (e instanceof Error ? e.message : e));
     }
     throw e;
   }

@@ -2,6 +2,7 @@ import type { User } from '../context/AuthContext';
 import type { UserRole } from '../types/auth';
 import { mergeNestedAuthUserPayload } from '../types/auth';
 import { inferOrganizationKind } from './departmentOptions';
+import { devLog } from './logger';
 
 /**
  * Shallow org-type hint from session user (for motel-only hotel admin access).
@@ -254,6 +255,7 @@ export function employeeMotelSidebarSync(user: User | null): boolean {
 /**
  * Dev-only: logs structure the backend actually sends (Step 1 / force test).
  */
+/** Dev-only — no full user JSON dumps (slow on RN). */
 export function logHotelAccessDebug(
   user: User | null,
   role: UserRole | null,
@@ -261,17 +263,11 @@ export function logHotelAccessDebug(
 ): void {
   if (typeof __DEV__ === 'undefined' || !__DEV__) return;
   const u = userAsRecord(user);
-  try {
-    console.log('[Hotel] FULL USER OBJECT:', JSON.stringify(user, null, 2));
-  } catch {
-    console.log('[Hotel] FULL USER OBJECT:', user);
-  }
-  console.log('[Hotel] ROLE (context):', role);
-  console.log('[Hotel] ROLE (user.role):', u?.role);
-  console.log('[Hotel] ORG TYPE (top):', u?.organization_type);
-  console.log('[Hotel] ORG OBJECT:', u?.organization);
-  console.log('[Hotel] simple org string:', getSimpleOrgTypeString(user));
-  console.log('[Hotel] all org hints:', getOrgTypeForMotelCheck(user));
-  console.log('[Hotel] sync motel org (payload):', flags.syncMotelOrg);
-  console.log('[Hotel] isMotelEmployee (sync):', flags.isMotelEmployee);
+  devLog('[Hotel] access', {
+    role,
+    userRole: u?.role,
+    orgType: u?.organization_type,
+    syncMotelOrg: flags.syncMotelOrg,
+    isMotelEmployee: flags.isMotelEmployee,
+  });
 }

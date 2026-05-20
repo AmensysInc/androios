@@ -29,6 +29,7 @@ import {
   buildDepartmentFilterOptions,
   employeeMatchesDepartmentFilter,
 } from '../../lib/departmentEmployeeMatch';
+import ShiftTasksModal from '../../components/scheduler/ShiftTasksModal';
 
 type Organization = { id: string; name: string; [k: string]: any };
 type Company = { id: string; name: string; organization_id?: string; company_manager_id?: string; [k: string]: any };
@@ -873,8 +874,20 @@ export default function ScheduleScreen() {
   const [timePickerField, setTimePickerField] = useState<'start' | 'end' | null>(null);
   const [timePickerHour, setTimePickerHour] = useState(6);
   const [timePickerMinute, setTimePickerMinute] = useState(0);
+  const [shiftTasksTarget, setShiftTasksTarget] = useState<{ shift: any; employee: Employee } | null>(
+    null
+  );
 
   const needsOrg = role === 'super_admin' || role === 'organization_manager';
+
+  const openShiftTasksModal = useCallback((emp: Employee, shiftRow: any) => {
+    const sid = shiftRow?.id ?? shiftRow?.pk;
+    if (!sid) {
+      Alert.alert('Save shift first', 'Save this shift before adding tasks.');
+      return;
+    }
+    setShiftTasksTarget({ shift: shiftRow, employee: emp });
+  }, []);
 
   useEffect(() => {
     if (!shiftModalOpen) setTimePickerField(null);
@@ -2060,20 +2073,38 @@ export default function ScheduleScreen() {
                                       ? et.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
                                       : '';
                                     return (
-                                      <TouchableOpacity
-                                        key={`${emp.id}-${idx}-${i}`}
-                                        style={styles.shiftCellCard}
-                                        activeOpacity={scheduleEditMode ? 0.88 : 1}
-                                        onPress={() => scheduleEditMode && openEditShift(emp, s)}
-                                      >
-                                        <Text style={styles.shiftCellTime}>
-                                          {t2 ? `${t1} - ${t2}` : t1}
-                                        </Text>
-                                        <TouchableOpacity style={styles.shiftAddTaskRow}>
-                                          <MaterialCommunityIcons name="format-list-checks" size={12} color="#64748b" />
-                                          <Text style={styles.shiftAddTaskText}>Add Task</Text>
-                                        </TouchableOpacity>
-                                      </TouchableOpacity>
+                                      <View key={`${emp.id}-${idx}-${i}`} style={styles.shiftCellCard}>
+                                        <Pressable
+                                          style={({ pressed }) => [
+                                            styles.shiftCellCardPress,
+                                            scheduleEditMode && pressed && styles.shiftCellCardPressed,
+                                          ]}
+                                          onPress={() => scheduleEditMode && openEditShift(emp, s)}
+                                        >
+                                          <Text style={styles.shiftCellTime}>
+                                            {t2 ? `${t1} - ${t2}` : t1}
+                                          </Text>
+                                        </Pressable>
+                                        {scheduleEditMode ? (
+                                          <Pressable
+                                            style={(state) => [
+                                              styles.shiftAddTaskRow,
+                                              (state.pressed ||
+                                                (Platform.OS === 'web' &&
+                                                  (state as { hovered?: boolean }).hovered)) &&
+                                                styles.shiftAddTaskRowHover,
+                                            ]}
+                                            onPress={() => openShiftTasksModal(emp, s)}
+                                          >
+                                            <MaterialCommunityIcons
+                                              name="format-list-checks"
+                                              size={12}
+                                              color="#1d4ed8"
+                                            />
+                                            <Text style={styles.shiftAddTaskText}>Add Task</Text>
+                                          </Pressable>
+                                        ) : null}
+                                      </View>
                                     );
                                   })}
                                 </View>
@@ -2185,6 +2216,19 @@ export default function ScheduleScreen() {
         options={scheduleDepartmentOptions}
         onSelect={(id) => setSelectedDeptFilter(id)}
         onClose={() => setDeptModal(false)}
+      />
+
+      <ShiftTasksModal
+        visible={!!shiftTasksTarget}
+        shift={shiftTasksTarget?.shift ?? null}
+        employee={shiftTasksTarget?.employee ?? null}
+        companyId={
+          String(selectedCompanyId ?? shiftTasksTarget?.employee?.company_id ?? '').trim()
+        }
+        onClose={() => setShiftTasksTarget(null)}
+        onTasksChanged={() => {
+          void load();
+        }}
       />
 
       <Modal visible={shiftModalOpen} transparent animationType="fade" onRequestClose={() => !shiftSaving && setShiftModalOpen(false)}>
@@ -2857,10 +2901,27 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     alignItems: 'center',
     gap: 4,
+    width: '100%',
   },
+  shiftCellCardPress: { width: '100%', alignItems: 'center' },
+  shiftCellCardPressed: { opacity: 0.88 },
   shiftCellTime: { fontSize: 11, color: '#334155', textAlign: 'center' },
-  shiftAddTaskRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  shiftAddTaskText: { fontSize: 11, color: '#64748b' },
+  shiftAddTaskRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+    marginTop: 2,
+  },
+  shiftAddTaskRowHover: {
+    backgroundColor: '#dbeafe',
+    borderWidth: 1,
+    borderColor: '#93c5fd',
+  },
+  shiftAddTaskText: { fontSize: 11, color: '#1d4ed8', fontWeight: '600' },
   addShiftCellBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 4 },
   addShiftCellText: { fontSize: 12, color: '#0f172a', fontWeight: '500' },
 

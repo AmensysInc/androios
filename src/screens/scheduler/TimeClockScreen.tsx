@@ -18,6 +18,7 @@ import {
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
 import * as api from '../../api';
+import { buildTaskCalendarRangeParams } from '../../lib/schedulerParams';
 import {
   employeeDepartmentDisplay,
   departmentPrimaryId as departmentKey,
@@ -33,6 +34,7 @@ import {
   removePendingLocalSwapRequest,
   isLocalPendingId,
 } from '../../lib/schedulerPendingRequestsLocal';
+import { taskIsCompleted } from '../../lib/tasksWorkflow';
 
 const GREEN = '#22c55e';
 const ORANGE = '#f59e0b';
@@ -724,12 +726,12 @@ export default function TimeClockScreen() {
 
       try {
         const tr = periodRange('month');
-        const tp: Record<string, any> = {
-          event_type: 'task',
-          start_time__gte: tr.start.toISOString(),
-          end_time__lte: tr.end.toISOString(),
-        };
-        if (!canSeeAllTasks && user?.id) tp.user = user.id;
+        const tp = buildTaskCalendarRangeParams({
+          rangeStart: tr.start,
+          rangeEnd: tr.end,
+          userId: !canSeeAllTasks ? user?.id : undefined,
+          assigneeField: 'user',
+        });
         let tasksRaw = await api.getCalendarEvents(tp).catch(() => []);
         if (!Array.isArray(tasksRaw)) tasksRaw = [];
         if (companyForData) {
@@ -889,10 +891,10 @@ export default function TimeClockScreen() {
   const taskStats = useMemo(() => {
     const now = Date.now();
     const total = tasksScoped.length;
-    const completed = tasksScoped.filter((t) => t.completed).length;
-    const pending = tasksScoped.filter((t) => !t.completed).length;
+    const completed = tasksScoped.filter((t) => taskIsCompleted(t)).length;
+    const pending = tasksScoped.filter((t) => !taskIsCompleted(t)).length;
     const overdue = tasksScoped.filter((t) => {
-      if (t.completed) return false;
+      if (taskIsCompleted(t)) return false;
       const end = parseMs(t.end_time ?? t.due_date ?? t.start_time);
       return end != null && end < now;
     }).length;
