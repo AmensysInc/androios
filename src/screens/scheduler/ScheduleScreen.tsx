@@ -2455,9 +2455,7 @@ export default function ScheduleScreen() {
           <View style={[styles.timePickerCenter, { pointerEvents: 'box-none' }]}>
             <View style={[styles.timePickerSheet, { pointerEvents: 'auto' }]}>
               <Text style={styles.timePickerSheetTitle}>
-                {timePickerField === 'start' ? t('scheduler.startTimePicker') : t('scheduler.endTimePicker')}
-+
-              </Text>
+                {timePickerField === 'start' ? t('scheduler.startTimePicker') : t('scheduler.endTimePicker')}             </Text>
               <View style={styles.timePickerColumns}>
                 <ScrollView style={styles.timePickerColumn} showsVerticalScrollIndicator keyboardShouldPersistTaps="handled">
                   {TIME_PICKER_HOURS.map((h) => (
