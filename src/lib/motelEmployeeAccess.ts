@@ -48,6 +48,20 @@ export function recordLooksMotelRow(row: Record<string, any> | null | undefined)
   return inferOrganizationKind(blob, name, type || undefined) === 'motel';
 }
 
+/** Whether a scheduler company is motel/hotel — matches web `companyQualifiesForMotelHotel`. */
+export function companyQualifiesForMotelHotel(company: Record<string, any> | null | undefined): boolean {
+  if (!company || typeof company !== 'object') return false;
+  if (recordLooksMotelRow(company)) return true;
+  const nested = company.organization;
+  if (nested && typeof nested === 'object' && !Array.isArray(nested) && recordLooksMotelRow(nested as Record<string, any>)) {
+    return true;
+  }
+  const orgType =
+    typeof company.organization_type === 'string' ? company.organization_type.trim() : '';
+  if (orgType && recordLooksMotelRow({ type: orgType, name: '' })) return true;
+  return false;
+}
+
 function userAsRecord(user: User | null): Record<string, unknown> | null {
   return user ? (user as unknown as Record<string, unknown>) : null;
 }

@@ -17,6 +17,7 @@ import {
   KeyboardAvoidingView,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../context/AuthContext';
 import { getPrimaryRoleFromUser, getRoleDisplayLabel, type UserRole } from '../types/auth';
 import * as api from '../api';
@@ -1298,21 +1299,6 @@ const DEFAULT_COLS: Record<ColumnKey, boolean> = {
   addedBy: true,
 };
 
-const COL_LABELS: Record<ColumnKey, string> = {
-  username: 'Username',
-  email: 'Email',
-  fullName: 'Full name',
-  phone: 'Phone',
-  title: 'Title',
-  orgCompany: 'Organization / Company',
-  team: 'Team',
-  department: 'Department',
-  pin: 'Employee PIN',
-  dateAdded: 'Date added',
-  lastLogin: 'Last login',
-  addedBy: 'Added by',
-};
-
 type PickerOption = { id: string; label: string };
 
 function OptionPickerModal({
@@ -1328,6 +1314,7 @@ function OptionPickerModal({
   onSelect: (id: string) => void;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <Pressable style={styles.pickerOverlay} onPress={onClose}>
@@ -1348,19 +1335,12 @@ function OptionPickerModal({
             ))}
           </ScrollView>
           <TouchableOpacity style={styles.pickerCancelBtn} onPress={onClose}>
-            <Text style={styles.pickerCancelBtnText}>Cancel</Text>
+            <Text style={styles.pickerCancelBtnText}>{t('common.cancel')}</Text>
           </TouchableOpacity>
         </Pressable>
       </Pressable>
     </Modal>
   );
-}
-
-function createFormRoleLabel(role: string): string {
-  if (role === 'super_admin') return 'Super Admin';
-  if (role === 'organization_manager') return 'Organization Manager';
-  if (role === 'company_manager') return 'Company Manager';
-  return 'Employee';
 }
 
 function assignRoleLabel(role: 'employee' | 'company_manager' | 'organization_manager' | 'super_admin'): string {
@@ -1370,14 +1350,8 @@ function assignRoleLabel(role: 'employee' | 'company_manager' | 'organization_ma
   return 'Employee';
 }
 
-const FULL_ROLE_PICKER_OPTIONS: { id: string; label: string }[] = [
-  { id: 'employee', label: 'Employee' },
-  { id: 'company_manager', label: 'Company Manager' },
-  { id: 'organization_manager', label: 'Organization Manager' },
-  { id: 'super_admin', label: 'Super Admin' },
-];
-
 export default function UserManagementScreen() {
+  const { t } = useTranslation();
   const { user, role: sessionRole } = useAuth();
   /**
    * Prefer auth `sessionRole` when it is an elevated role; otherwise derive from `user` so Organization
@@ -1481,25 +1455,86 @@ export default function UserManagementScreen() {
   /** Incremented on each open so stale async hydration does not overwrite state after close/reopen. */
   const createModalHydrateGenRef = useRef(0);
 
+  const uiRoleLabel = useCallback(
+    (role: string) => {
+      if (role === 'super_admin') return t('roles.superAdmin');
+      if (role === 'organization_manager') return t('roles.organizationManager');
+      if (role === 'company_manager') return t('roles.companyManager');
+      return t('roles.employee');
+    },
+    [t]
+  );
+
+  const fullRolePickerOptions = useMemo(
+    (): { id: string; label: string }[] => [
+      { id: 'employee', label: t('roles.employee') },
+      { id: 'company_manager', label: t('roles.companyManager') },
+      { id: 'organization_manager', label: t('roles.organizationManager') },
+      { id: 'super_admin', label: t('roles.superAdmin') },
+    ],
+    [t]
+  );
+
+  const colLabels = useMemo(
+    (): Record<ColumnKey, string> => ({
+      username: t('userManagement.username'),
+      email: t('userManagement.email'),
+      fullName: t('userManagement.fullName'),
+      phone: t('userManagement.phone'),
+      title: t('userManagement.titleColumn'),
+      orgCompany: t('userManagement.orgCompany'),
+      team: t('userManagement.team'),
+      department: t('userManagement.department'),
+      pin: t('userManagement.employeePin'),
+      dateAdded: t('userManagement.dateAdded'),
+      lastLogin: t('userManagement.lastLogin'),
+      addedBy: t('userManagement.addedBy'),
+    }),
+    [t]
+  );
+
+  const displayLastLogin = useCallback(
+    (value: string) => (value === 'Never logged in' ? t('userManagement.neverLoggedIn') : value),
+    [t]
+  );
+
+  const displayTitleCell = useCallback(
+    (value: string) => {
+      switch (value) {
+        case 'Super Admin':
+          return t('roles.superAdmin');
+        case 'Organization Manager':
+          return t('roles.organizationManager');
+        case 'Company Manager':
+          return t('roles.companyManager');
+        case 'Employee':
+          return t('roles.employee');
+        default:
+          return value;
+      }
+    },
+    [t]
+  );
+
   const createEditRolePickerOptions = useMemo(() => {
     if (viewerRoleForUi === 'company_manager') {
-      return FULL_ROLE_PICKER_OPTIONS.filter((o) => o.id === 'employee');
+      return fullRolePickerOptions.filter((o) => o.id === 'employee');
     }
     if (viewerRoleForUi === 'organization_manager') {
-      return FULL_ROLE_PICKER_OPTIONS.filter((o) => o.id !== 'super_admin' && o.id !== 'organization_manager');
+      return fullRolePickerOptions.filter((o) => o.id !== 'super_admin' && o.id !== 'organization_manager');
     }
-    return FULL_ROLE_PICKER_OPTIONS;
-  }, [viewerRoleForUi]);
+    return fullRolePickerOptions;
+  }, [viewerRoleForUi, fullRolePickerOptions]);
 
   const assignRolePickerOptions = useMemo(() => {
     if (viewerRoleForUi === 'company_manager') {
-      return FULL_ROLE_PICKER_OPTIONS.filter((o) => o.id === 'employee');
+      return fullRolePickerOptions.filter((o) => o.id === 'employee');
     }
     if (viewerRoleForUi === 'organization_manager') {
-      return FULL_ROLE_PICKER_OPTIONS.filter((o) => o.id !== 'super_admin');
+      return fullRolePickerOptions.filter((o) => o.id !== 'super_admin');
     }
-    return FULL_ROLE_PICKER_OPTIONS;
-  }, [viewerRoleForUi]);
+    return fullRolePickerOptions;
+  }, [viewerRoleForUi, fullRolePickerOptions]);
 
   /** Show / load org–company–department fields consistently (avoid hiding rows when role string drifts). */
   const showCreateDepartmentSection =
@@ -1654,10 +1689,6 @@ export default function UserManagementScreen() {
         );
       const viewerRole = getPrimaryRoleFromUser(userData);
       const scopedList = filterRowsForViewerScope(list, userData, viewerRole, companyRows, organizationRows);
-      if (__DEV__) {
-        console.log('Current User (User Management):', userData);
-        console.log('Users List (scoped):', scopedList);
-      }
       setRows(scopedList);
     } catch (e) {
       console.warn(e);
@@ -2237,12 +2268,6 @@ export default function UserManagementScreen() {
         createOrgList,
         createCompanyList
       );
-      if (__DEV__) {
-        console.log('[UserMgmt][userForm] MODE: create');
-        console.log('[UserMgmt][userForm] viewerRole:', viewerRoleForUi);
-        console.log('[UserMgmt][userForm] org:', form.organization_id, 'company:', form.company_id, 'dept:', form.department_id);
-        console.log('[UserMgmt][userForm] companies catalog:', createCompanyList.length, 'dept options:', list.length);
-      }
       if (!cancelled) setDeptCreateOptions(list);
     })();
     return () => {
@@ -2288,12 +2313,6 @@ export default function UserManagementScreen() {
         editOrgList,
         editCompanyList
       );
-      if (__DEV__) {
-        console.log('[UserMgmt][userForm] MODE: edit');
-        console.log('[UserMgmt][userForm] viewerRole:', viewerRoleForUi);
-        console.log('[UserMgmt][userForm] org:', editForm.organization_id, 'company:', editForm.company_id, 'dept:', editForm.department_id);
-        console.log('[UserMgmt][userForm] companies catalog:', editCompanyList.length, 'dept options:', list.length);
-      }
       if (!cancelled) setDeptEditOptions(list);
     })();
     return () => {
@@ -2618,11 +2637,11 @@ export default function UserManagementScreen() {
     const me = resolveUserPayloadForRole((await api.getCurrentUser()) as any);
     const vr = getPrimaryRoleFromUser(me);
     if (vr === 'company_manager' && assignRole !== 'employee') {
-      Alert.alert('Error', 'You can only assign the employee role.');
+      Alert.alert(t('common.error'), t('userManagement.employeeRoleOnlyError'));
       return;
     }
     if (vr === 'organization_manager' && assignRole === 'super_admin') {
-      Alert.alert('Error', 'This role is not available for your account.');
+      Alert.alert(t('common.error'), t('userManagement.roleNotAvailable'));
       return;
     }
     const backendRole =
@@ -2668,12 +2687,15 @@ export default function UserManagementScreen() {
         setAssignModalVisible(false);
         setAssignSelectedUserIds(new Set());
         await load();
-        Alert.alert('Success', 'Users assigned to organization/company.');
+        Alert.alert(t('common.success'), t('userManagement.usersAssignedSuccess'));
       } else if (errors.length < assignSelectedUserIds.size) {
         await load();
-        Alert.alert('Partial success', `Some assignments failed:\n${errors.slice(0, 5).join('\n')}`);
+        Alert.alert(
+          t('userManagement.partialSuccess'),
+          t('userManagement.someAssignmentsFailed', { errors: errors.slice(0, 5).join('\n') })
+        );
       } else {
-        Alert.alert('Error', errors.slice(0, 3).join('\n') || 'Assignment failed');
+        Alert.alert(t('common.error'), errors.slice(0, 3).join('\n') || t('userManagement.assignmentFailed'));
       }
     } finally {
       setSaving(false);
@@ -2848,13 +2870,13 @@ export default function UserManagementScreen() {
   const handleMessage = (r: RowUser) => {
     const email = r.email && r.email !== '—' ? r.email : '';
     if (!email) {
-      Alert.alert('Message', 'No email for this user.');
+      Alert.alert(t('common.error'), t('userManagement.noEmail'));
       return;
     }
     const url = `mailto:${encodeURIComponent(email)}`;
     Linking.canOpenURL(url).then((ok) => {
       if (ok) Linking.openURL(url);
-      else Alert.alert('Message', `Email: ${email}`);
+      else Alert.alert(t('common.contact'), t('userManagement.emailLabel', { email }));
     });
   };
 
@@ -2869,45 +2891,45 @@ export default function UserManagementScreen() {
           return next;
         });
         await load();
-        Alert.alert('Success', 'User removed');
+        Alert.alert(t('common.success'), t('userManagement.userRemoved'));
       } catch (e: any) {
-        Alert.alert('Error', e?.message || 'Failed to delete user');
+        Alert.alert(t('common.error'), e?.message || t('userManagement.deleteUserFailed'));
       } finally {
         setSaving(false);
       }
     };
     if (Platform.OS === 'web' && typeof (globalThis as any).confirm === 'function') {
-      if ((globalThis as any).confirm(`Delete user "${r.username}"?`)) void run();
+      if ((globalThis as any).confirm(t('userManagement.deleteUserConfirmWeb', { username: r.username }))) void run();
       return;
     }
-    Alert.alert('Delete user', `Remove "${r.username}"?`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => void run() },
+    Alert.alert(t('userManagement.deleteUserTitle'), t('userManagement.deleteUserConfirm', { username: r.username }), [
+      { text: t('common.cancel'), style: 'cancel' },
+      { text: t('common.delete'), style: 'destructive', onPress: () => void run() },
     ]);
   };
 
   const handleCreate = async () => {
     if (!form.email.trim()) {
-      Alert.alert('Error', 'Email is required');
+      Alert.alert(t('common.error'), t('userManagement.emailRequired'));
       return;
     }
     if (!form.password || form.password.length < 6) {
-      Alert.alert('Error', 'Password must be at least 6 characters');
+      Alert.alert(t('common.error'), t('userManagement.passwordMinLength'));
       return;
     }
 
     const resolvedMe = resolveUserPayloadForRole((await api.getCurrentUser()) as any);
     const viewerRole = getPrimaryRoleFromUser(resolvedMe);
     if (viewerRole === 'company_manager' && form.role !== 'employee') {
-      Alert.alert('Error', 'You can only create employee accounts.');
+      Alert.alert(t('common.error'), t('userManagement.employeeOnlyCreate'));
       return;
     }
     if (viewerRole === 'organization_manager' && form.role === 'super_admin') {
-      Alert.alert('Error', 'This role is not available for your account.');
+      Alert.alert(t('common.error'), t('userManagement.roleNotAvailable'));
       return;
     }
     if (viewerRole === 'organization_manager' && form.role === 'organization_manager') {
-      Alert.alert('Error', 'This role is not available for your account.');
+      Alert.alert(t('common.error'), t('userManagement.roleNotAvailable'));
       return;
     }
 
@@ -2927,15 +2949,15 @@ export default function UserManagementScreen() {
     }
 
     if (form.role === 'organization_manager' && !orgId) {
-      Alert.alert('Error', 'Organization is required for Organization Manager');
+      Alert.alert(t('common.error'), t('userManagement.orgRequiredOrgManager'));
       return;
     }
     if (form.role === 'company_manager' && (!orgId || !companyId)) {
-      Alert.alert('Error', 'Organization and company are required for Company Manager');
+      Alert.alert(t('common.error'), t('userManagement.orgCompanyRequiredCompanyManager'));
       return;
     }
     if (form.role === 'employee' && String(companyId || '').trim() && !form.department_id) {
-      Alert.alert('Please select a department');
+      Alert.alert(t('common.validation'), t('userManagement.selectDepartment'));
       return;
     }
     setSaving(true);
@@ -3227,12 +3249,15 @@ export default function UserManagementScreen() {
         department_id: '',
       });
       await load();
-      Alert.alert('Success', 'User created');
+      Alert.alert(t('common.success'), t('userManagement.userCreated'));
     } catch (e: any) {
       const body = e?.body ?? e?.response?.data ?? e?.errors;
       const detail =
         body && typeof body === 'object' ? JSON.stringify(body).slice(0, 600) : (e?.message ? '' : '');
-      Alert.alert('Error', e?.message ? `${e.message}${detail ? `\n${detail}` : ''}` : detail || 'Failed to create user');
+      Alert.alert(
+        t('common.error'),
+        e?.message ? `${e.message}${detail ? `\n${detail}` : ''}` : detail || t('userManagement.createUserFailed')
+      );
     } finally {
       setSaving(false);
     }
@@ -3241,22 +3266,22 @@ export default function UserManagementScreen() {
   const handleEdit = async () => {
     if (!editModal) return;
     if (!editForm.email.trim()) {
-      Alert.alert('Error', 'Email is required');
+      Alert.alert(t('common.error'), t('userManagement.emailRequired'));
       return;
     }
     if (!editForm.username.trim()) {
-      Alert.alert('Error', 'Username is required');
+      Alert.alert(t('common.error'), t('userManagement.usernameRequired'));
       return;
     }
 
     const resolvedMe = resolveUserPayloadForRole((await api.getCurrentUser()) as any);
     const viewerRole = getPrimaryRoleFromUser(resolvedMe);
     if (viewerRole === 'company_manager' && editForm.role !== 'employee') {
-      Alert.alert('Error', 'You can only assign the employee role.');
+      Alert.alert(t('common.error'), t('userManagement.employeeRoleOnlyError'));
       return;
     }
     if (viewerRole === 'organization_manager' && editForm.role === 'super_admin') {
-      Alert.alert('Error', 'This role is not available for your account.');
+      Alert.alert(t('common.error'), t('userManagement.roleNotAvailable'));
       return;
     }
 
@@ -3276,19 +3301,19 @@ export default function UserManagementScreen() {
     }
 
     if (editForm.role === 'organization_manager' && !orgId) {
-      Alert.alert('Error', 'Organization is required for Organization Manager');
+      Alert.alert(t('common.error'), t('userManagement.orgRequiredOrgManager'));
       return;
     }
     if (editForm.role === 'company_manager' && (!orgId || !compId)) {
-      Alert.alert('Error', 'Organization and company are required for Company Manager');
+      Alert.alert(t('common.error'), t('userManagement.orgCompanyRequiredCompanyManager'));
       return;
     }
     if (editForm.role === 'employee' && (!orgId || !compId)) {
-      Alert.alert('Error', 'Organization and company are required for employees');
+      Alert.alert(t('common.error'), t('userManagement.orgCompanyRequiredEmployee'));
       return;
     }
     if (editForm.role === 'employee' && String(compId || '').trim() && !editForm.department_id) {
-      Alert.alert('Please select a department');
+      Alert.alert(t('common.validation'), t('userManagement.selectDepartment'));
       return;
     }
     setSaving(true);
@@ -3528,11 +3553,14 @@ export default function UserManagementScreen() {
       }
       setEditModal(null);
       await load();
-      Alert.alert('Success', 'User updated');
+      Alert.alert(t('common.success'), t('userManagement.userUpdated'));
     } catch (e: any) {
       const body = e?.body ?? e?.response?.data ?? e?.errors;
       const detail = body && typeof body === 'object' ? JSON.stringify(body).slice(0, 600) : '';
-      Alert.alert('Error', e?.message ? `${e.message}${detail ? `\n${detail}` : ''}` : detail || 'Failed to update');
+      Alert.alert(
+        t('common.error'),
+        e?.message ? `${e.message}${detail ? `\n${detail}` : ''}` : detail || t('userManagement.updateUserFailed')
+      );
     } finally {
       setSaving(false);
     }
@@ -3560,18 +3588,18 @@ export default function UserManagementScreen() {
         </View>
       );
     };
-    push('username', COL.username, 'Username');
-    push('email', COL.email, 'Email');
-    push('fullName', COL.fullName, 'Full name');
-    push('phone', COL.phone, 'Phone');
-    push('title', COL.title, 'Title');
-    push('orgCompany', COL.orgCompany, 'Organization / Company');
-    push('team', COL.team, 'Team');
-    push('department', COL.department, 'Department');
-    push('pin', COL.pin, 'Employee PIN');
-    push('dateAdded', COL.dateAdded, 'Date added');
-    push('lastLogin', COL.lastLogin, 'Last login');
-    push('addedBy', COL.addedBy, 'Added by');
+    push('username', COL.username, colLabels.username);
+    push('email', COL.email, colLabels.email);
+    push('fullName', COL.fullName, colLabels.fullName);
+    push('phone', COL.phone, colLabels.phone);
+    push('title', COL.title, colLabels.title);
+    push('orgCompany', COL.orgCompany, colLabels.orgCompany);
+    push('team', COL.team, colLabels.team);
+    push('department', COL.department, colLabels.department);
+    push('pin', COL.pin, colLabels.pin);
+    push('dateAdded', COL.dateAdded, colLabels.dateAdded);
+    push('lastLogin', COL.lastLogin, colLabels.lastLogin);
+    push('addedBy', COL.addedBy, colLabels.addedBy);
     cells.push(
       <View style={[styles.cell, styles.cellHead, { width: COL.gear, alignItems: 'center' }]} key="h-gear">
         <TouchableOpacity onPress={() => setColumnsOpen(true)} hitSlop={10}>
@@ -3581,7 +3609,7 @@ export default function UserManagementScreen() {
     );
     cells.push(
       <View style={[styles.cell, styles.cellHead, { width: COL.actions }]} key="h-act">
-        <Text style={styles.thText}>Actions</Text>
+        <Text style={styles.thText}>{t('userManagement.actions')}</Text>
       </View>
     );
     return cells;
@@ -3613,7 +3641,7 @@ export default function UserManagementScreen() {
     pushVal('email', COL.email, <Text style={styles.tdText}>{r.email}</Text>);
     pushVal('fullName', COL.fullName, <Text style={[styles.tdText, styles.tdName]}>{r.full_name}</Text>);
     pushVal('phone', COL.phone, <Text style={styles.tdText}>{r.phone}</Text>);
-    pushVal('title', COL.title, <Text style={styles.tdText}>{r.title}</Text>);
+    pushVal('title', COL.title, <Text style={styles.tdText}>{displayTitleCell(r.title)}</Text>);
     pushVal('orgCompany', COL.orgCompany, <Text style={styles.tdText}>{r.organizationCompany}</Text>);
     pushVal('team', COL.team, <Text style={styles.tdText}>{r.team}</Text>);
     pushVal('department', COL.department, <Text style={styles.tdText}>{r.department}</Text>);
@@ -3623,7 +3651,7 @@ export default function UserManagementScreen() {
       'lastLogin',
       COL.lastLogin,
       <Text style={[styles.tdText, styles.tdMutedSmall]} numberOfLines={2}>
-        {r.lastLogin}
+        {displayLastLogin(r.lastLogin)}
       </Text>
     );
     pushVal(
@@ -3636,13 +3664,13 @@ export default function UserManagementScreen() {
     cellsOut.push(<View style={[styles.cell, { width: COL.gear }]} key="g" />);
     cellsOut.push(
       <View style={[styles.cell, styles.actionsCell, { width: COL.actions }]} key="act">
-        <TouchableOpacity style={styles.iconBtn} onPress={() => openEdit(r)} accessibilityLabel="Edit">
+        <TouchableOpacity style={styles.iconBtn} onPress={() => openEdit(r)} accessibilityLabel={t('common.edit')}>
           <MaterialCommunityIcons name="square-edit-outline" size={20} color="#0f172a" />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.iconBtn} onPress={() => handleMessage(r)} accessibilityLabel="Message">
+        <TouchableOpacity style={styles.iconBtn} onPress={() => handleMessage(r)} accessibilityLabel={t('common.contact')}>
           <MaterialCommunityIcons name="email-outline" size={20} color="#0f172a" />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.iconBtnDanger} onPress={() => handleDelete(r)} accessibilityLabel="Delete">
+        <TouchableOpacity style={styles.iconBtnDanger} onPress={() => handleDelete(r)} accessibilityLabel={t('common.delete')}>
           <MaterialCommunityIcons name="trash-can-outline" size={18} color="#fff" />
         </TouchableOpacity>
       </View>
@@ -3661,19 +3689,19 @@ export default function UserManagementScreen() {
   if (!authorized) {
     return (
       <View style={styles.centered}>
-        <Text style={styles.unauthorized}>You don't have access to User Management.</Text>
+        <Text style={styles.unauthorized}>{t('userManagement.unauthorized')}</Text>
       </View>
     );
   }
 
-  const usersTabLabel = `Users (${userRows.length}/${rows.length})`;
-  const adminsTabLabel = `Admins (${adminRowsForTab.length}/${rows.length})`;
+  const usersTabLabel = t('userManagement.usersTab', { shown: userRows.length, total: rows.length });
+  const adminsTabLabel = t('userManagement.adminsTab', { shown: adminRowsForTab.length, total: rows.length });
 
   return (
     <View style={styles.container}>
       <View style={styles.pageHeader}>
-        <Text style={styles.pageTitle}>User Management</Text>
-        <Text style={styles.pageSubtitle}>Manage users and their roles in the system.</Text>
+        <Text style={styles.pageTitle}>{t('userManagement.title')}</Text>
+        <Text style={styles.pageSubtitle}>{t('userManagement.subtitle')}</Text>
 
         <View style={styles.tabs}>
           <TouchableOpacity
@@ -3697,7 +3725,7 @@ export default function UserManagementScreen() {
             <MaterialCommunityIcons name="magnify" size={20} color="#94a3b8" style={styles.searchIcon} />
         <TextInput
           style={styles.search}
-              placeholder="Search employees..."
+              placeholder={t('userManagement.searchPlaceholder')}
           value={search}
           onChangeText={setSearch}
           placeholderTextColor="#94a3b8"
@@ -3715,7 +3743,7 @@ export default function UserManagementScreen() {
               }}
               activeOpacity={0.9}
             >
-              <Text style={styles.addBtnText}>+ Add users</Text>
+              <Text style={styles.addBtnText}>{t('userManagement.addUsers')}</Text>
               {viewerRoleForUi !== 'organization_manager' && viewerRoleForUi !== 'company_manager' ? (
                 <MaterialCommunityIcons name="chevron-down" size={22} color="#fff" />
               ) : null}
@@ -3732,7 +3760,7 @@ export default function UserManagementScreen() {
             keyExtractor={(item) => item.id}
             renderItem={renderRow}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
-            ListEmptyComponent={<Text style={styles.empty}>No users match your search.</Text>}
+            ListEmptyComponent={<Text style={styles.empty}>{t('userManagement.noUsersMatch')}</Text>}
             contentContainerStyle={filtered.length === 0 ? styles.listEmpty : styles.listContent}
           />
         </View>
@@ -3744,13 +3772,13 @@ export default function UserManagementScreen() {
           <Pressable style={styles.createUserBox} onPress={(e) => e.stopPropagation()}>
             <View style={styles.createUserHeader}>
               <View style={styles.createUserTitleBlock}>
-                <Text style={styles.createUserTitle}>Add New User</Text>
+                <Text style={styles.createUserTitle}>{t('userManagement.addNewUser')}</Text>
                 <Text style={styles.createUserSubtitle}>
                   {viewerRoleForUi === 'company_manager'
-                    ? 'Create a new user for your company and assign a department.'
+                    ? t('userManagement.createSubtitleCompanyManager')
                     : viewerRoleForUi === 'organization_manager'
-                      ? 'Create a new user — select a company and department, and assign a role.'
-                      : 'Create a new user account and assign a role.'}
+                      ? t('userManagement.createSubtitleOrgManager')
+                      : t('userManagement.createSubtitleDefault')}
                 </Text>
               </View>
               <TouchableOpacity onPress={() => !saving && setCreateModal(false)} hitSlop={12} style={styles.createCloseBtn}>
@@ -3764,74 +3792,74 @@ export default function UserManagementScreen() {
               showsVerticalScrollIndicator
             >
               
-              <Text style={styles.fieldLabel}>Username</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.username')}</Text>
               <TextInput
                 style={styles.inputOutlined}
-                placeholder="Login username"
+                placeholder={t('userManagement.usernamePlaceholder')}
                 value={form.username}
                 onChangeText={(t) => setForm((f) => ({ ...f, username: t }))}
                 placeholderTextColor="#94a3b8"
                 autoCapitalize="none"
               />
-              <Text style={styles.fieldLabel}>Email</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.email')}</Text>
               <TextInput
                 style={styles.inputOutlined}
-                placeholder="user@example.com"
+                placeholder={t('userManagement.emailPlaceholder')}
                 value={form.email}
                 onChangeText={(t) => setForm((f) => ({ ...f, email: t }))}
                 placeholderTextColor="#94a3b8"
                 keyboardType="email-address"
                 autoCapitalize="none"
               />
-              <Text style={styles.fieldLabel}>Full Name</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.fullName')}</Text>
               <TextInput
                 style={styles.inputOutlined}
-                placeholder="John Doe"
+                placeholder={t('userManagement.fullNamePlaceholder')}
                 value={form.full_name}
                 onChangeText={(t) => setForm((f) => ({ ...f, full_name: t }))}
                 placeholderTextColor="#94a3b8"
               />
-              <Text style={styles.fieldLabel}>Phone</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.phone')}</Text>
               <TextInput
                 style={styles.inputOutlined}
-                placeholder="(555) 123-4567"
+                placeholder={t('userManagement.phonePlaceholder')}
                 value={form.phone}
                 onChangeText={handleCreatePhoneChange}
                 placeholderTextColor="#94a3b8"
                 keyboardType="phone-pad"
                 maxLength={14}
               />
-              <Text style={styles.fieldLabel}>Password</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.password')}</Text>
               <TextInput
                 style={styles.inputOutlined}
-                placeholder="Temporary password"
+                placeholder={t('userManagement.passwordPlaceholder')}
                 value={form.password}
                 onChangeText={(t) => setForm((f) => ({ ...f, password: t }))}
                 secureTextEntry
                 placeholderTextColor="#94a3b8"
               />
-              <Text style={styles.fieldLabel}>Employee PIN</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.employeePin')}</Text>
               <TextInput
                 style={styles.inputOutlined}
-                placeholder="4-digit PIN"
+                placeholder={t('userManagement.pinPlaceholder')}
                 value={form.employee_pin}
                 onChangeText={(t) => setForm((f) => ({ ...f, employee_pin: t }))}
                 placeholderTextColor="#94a3b8"
                 keyboardType="number-pad"
               />
-              <Text style={styles.fieldLabel}>Hourly Rate</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.hourlyRate')}</Text>
               <TextInput
                 style={styles.inputOutlined}
-                placeholder="e.g. 15.00"
+                placeholder={t('userManagement.hourlyRatePlaceholder')}
                 value={form.hourly_rate}
                 onChangeText={(t) => setForm((f) => ({ ...f, hourly_rate: t }))}
                 placeholderTextColor="#94a3b8"
                 keyboardType="decimal-pad"
               />
-              <Text style={styles.fieldLabel}>Role</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.role')}</Text>
               {viewerRoleForUi === 'company_manager' ? (
                 <View style={[styles.selectField, styles.selectFieldDisabled]} pointerEvents="none">
-                  <Text style={styles.selectFieldText}>Employee</Text>
+                  <Text style={styles.selectFieldText}>{t('userManagement.employeeRoleOnly')}</Text>
                 </View>
               ) : (
                 <TouchableOpacity
@@ -3839,25 +3867,25 @@ export default function UserManagementScreen() {
                   onPress={() => setCreateRolePicker(true)}
                   disabled={saving}
                 >
-                  <Text style={styles.selectFieldText}>{createFormRoleLabel(form.role)}</Text>
+                  <Text style={styles.selectFieldText}>{uiRoleLabel(form.role)}</Text>
                   <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                 </TouchableOpacity>
               )}
               {viewerRoleForUi === 'company_manager' ? (
                 <>
-                  <Text style={styles.fieldLabel}>Company</Text>
+                  <Text style={styles.fieldLabel}>{t('userManagement.company')}</Text>
                   <View style={[styles.selectField, styles.selectFieldDisabled]} pointerEvents="none">
                     <Text style={[styles.selectFieldText, !form.company_id && styles.selectPlaceholder]}>
                       {optById(createCompanyList, form.company_id)?.name ||
                         (createCompanyList.length === 1 ? createCompanyList[0].name : '') ||
                         (form.company_id ? String(form.company_id) : '') ||
-                        'Resolving your company…'}
+                        t('userManagement.resolvingCompany')}
                     </Text>
                   </View>
                 </>
               ) : viewerRoleForUi === 'organization_manager' ? (
                 <>
-                  <Text style={styles.fieldLabel}>Company</Text>
+                  <Text style={styles.fieldLabel}>{t('userManagement.company')}</Text>
                   <TouchableOpacity
                     style={[
                       styles.selectField,
@@ -3868,17 +3896,17 @@ export default function UserManagementScreen() {
                   >
                     <Text style={[styles.selectFieldText, !form.company_id && styles.selectPlaceholder]}>
                       {createCompanyList.length === 0
-                        ? 'Loading companies…'
+                        ? t('userManagement.loadingCompanies')
                         : form.company_id
-                          ? optById(createCompanyList, form.company_id)?.name || 'Select company'
-                          : 'Select company'}
+                          ? optById(createCompanyList, form.company_id)?.name || t('userManagement.selectCompany')
+                          : t('userManagement.selectCompany')}
                     </Text>
                     <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                   </TouchableOpacity>
                 </>
               ) : (
                 <>
-                  <Text style={styles.fieldLabel}>Organization</Text>
+                  <Text style={styles.fieldLabel}>{t('userManagement.organization')}</Text>
                   <TouchableOpacity
                     style={[styles.selectField, createOrgPickerLocked && styles.selectFieldDisabled]}
                     onPress={() => !createOrgPickerLocked && setCreateOrgPicker(true)}
@@ -3886,12 +3914,12 @@ export default function UserManagementScreen() {
                   >
                     <Text style={[styles.selectFieldText, !form.organization_id && styles.selectPlaceholder]}>
                       {form.organization_id
-                        ? optById(createOrgList, form.organization_id)?.name || 'Select organization'
-                        : 'Select organization'}
+                        ? optById(createOrgList, form.organization_id)?.name || t('userManagement.selectOrganization')
+                        : t('userManagement.selectOrganization')}
                     </Text>
                     <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                   </TouchableOpacity>
-                  <Text style={styles.fieldLabel}>Company</Text>
+                  <Text style={styles.fieldLabel}>{t('userManagement.company')}</Text>
                   <TouchableOpacity
                     style={[
                       styles.selectField,
@@ -3902,10 +3930,10 @@ export default function UserManagementScreen() {
                   >
                     <Text style={[styles.selectFieldText, !form.company_id && styles.selectPlaceholder]}>
                       {!form.organization_id
-                        ? 'Select organization first'
+                        ? t('userManagement.selectOrganizationFirst')
                         : form.company_id
-                          ? optById(createCompanyList, form.company_id)?.name || 'Select company'
-                          : 'Select company'}
+                          ? optById(createCompanyList, form.company_id)?.name || t('userManagement.selectCompany')
+                          : t('userManagement.selectCompany')}
                     </Text>
                     <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                   </TouchableOpacity>
@@ -3913,7 +3941,7 @@ export default function UserManagementScreen() {
               )}
               {showCreateDepartmentSection ? (
                 <>
-                  <Text style={styles.fieldLabel}>Department</Text>
+                  <Text style={styles.fieldLabel}>{t('userManagement.department')}</Text>
                   <TouchableOpacity
                     style={[
                       styles.selectField,
@@ -3924,12 +3952,12 @@ export default function UserManagementScreen() {
                   >
                     <Text style={[styles.selectFieldText, !form.department_id && styles.selectPlaceholder]}>
                       {!form.company_id
-                        ? 'Select company first'
+                        ? t('userManagement.selectCompanyFirstDept')
                         : form.role !== 'employee'
-                          ? 'Set role to Employee to choose a department'
+                          ? t('userManagement.setRoleEmployeeForDept')
                           : form.department_id
-                            ? optById(deptCreateOptions, form.department_id)?.name || 'Department'
-                            : 'Select department'}
+                            ? optById(deptCreateOptions, form.department_id)?.name || t('userManagement.department')
+                            : t('userManagement.selectDepartmentPicker')}
                     </Text>
                     <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                   </TouchableOpacity>
@@ -3937,10 +3965,10 @@ export default function UserManagementScreen() {
               ) : null}
               <View style={styles.createUserActions}>
                 <TouchableOpacity style={styles.cancelOutlineBtn} onPress={() => setCreateModal(false)} disabled={saving}>
-                  <Text style={styles.cancelOutlineBtnText}>Cancel</Text>
+                  <Text style={styles.cancelOutlineBtnText}>{t('common.cancel')}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={[styles.saveBlueBtn, saving && styles.disabledOpacity]} onPress={handleCreate} disabled={saving}>
-                  <Text style={styles.saveBlueBtnText}>{saving ? 'Creating…' : 'Create User'}</Text>
+                  <Text style={styles.saveBlueBtnText}>{saving ? t('userManagement.creatingUser') : t('userManagement.createUserBtn')}</Text>
                 </TouchableOpacity>
               </View>
             </ScrollView>
@@ -3954,8 +3982,8 @@ export default function UserManagementScreen() {
           <Pressable style={styles.createUserBox} onPress={(e) => e.stopPropagation()}>
             <View style={styles.createUserHeader}>
               <View style={styles.createUserTitleBlock}>
-                <Text style={styles.createUserTitle}>Edit User</Text>
-                <Text style={styles.createUserSubtitle}>Update user information.</Text>
+                <Text style={styles.createUserTitle}>{t('userManagement.editUser')}</Text>
+                <Text style={styles.createUserSubtitle}>{t('userManagement.editSubtitle')}</Text>
               </View>
               <TouchableOpacity style={styles.createCloseBtn} onPress={() => !saving && setEditModal(null)} hitSlop={8}>
                 <MaterialCommunityIcons name="close" size={22} color="#64748b" />
@@ -3969,61 +3997,61 @@ export default function UserManagementScreen() {
               showsVerticalScrollIndicator={false}
             >
               
-              <Text style={styles.fieldLabel}>Username</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.username')}</Text>
               <TextInput
                 style={styles.inputOutlined}
                 value={editForm.username}
                 onChangeText={(t) => setEditForm((f) => ({ ...f, username: t }))}
-                placeholder="Username"
+                placeholder={t('userManagement.usernameEditPlaceholder')}
                 placeholderTextColor="#94a3b8"
                 autoCapitalize="none"
               />
 
-              <Text style={styles.fieldLabel}>Email</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.email')}</Text>
               <TextInput
                 style={styles.inputOutlined}
                 value={editForm.email}
                 onChangeText={(t) => setEditForm((f) => ({ ...f, email: t }))}
-                placeholder="Email"
+                placeholder={t('userManagement.emailEditPlaceholder')}
                 placeholderTextColor="#94a3b8"
                 keyboardType="email-address"
                 autoCapitalize="none"
               />
 
-              <Text style={styles.fieldLabel}>Full Name</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.fullName')}</Text>
               <TextInput
                 style={styles.inputOutlined}
                 value={editForm.full_name}
                 onChangeText={(t) => setEditForm((f) => ({ ...f, full_name: t }))}
-                placeholder="Full name"
+                placeholder={t('userManagement.fullNameEditPlaceholder')}
                 placeholderTextColor="#94a3b8"
               />
 
-              <Text style={styles.fieldLabel}>Title / Job title</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.titleJobTitle')}</Text>
               <TextInput
                 style={styles.inputOutlined}
                 value={editForm.job_title}
                 onChangeText={(t) => setEditForm((f) => ({ ...f, job_title: t }))}
-                placeholder="e.g. Front desk, Supervisor"
+                placeholder={t('userManagement.titlePlaceholder')}
                 placeholderTextColor="#94a3b8"
               />
 
-              <Text style={styles.fieldLabel}>Phone</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.phone')}</Text>
               <TextInput
                 style={styles.inputOutlined}
                 value={editForm.phone}
                 onChangeText={handleEditPhoneChange}
-                placeholder="(555) 123-4567"
+                placeholder={t('userManagement.phonePlaceholder')}
                 placeholderTextColor="#94a3b8"
                 keyboardType="phone-pad"
                 maxLength={14}
                 autoCapitalize="none"
               />
 
-              <Text style={styles.fieldLabel}>Role</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.role')}</Text>
               {viewerRoleForUi === 'company_manager' ? (
                 <View style={[styles.selectField, styles.selectFieldDisabled]} pointerEvents="none">
-                  <Text style={styles.selectFieldText}>{createFormRoleLabel(editForm.role)}</Text>
+                  <Text style={styles.selectFieldText}>{uiRoleLabel(editForm.role)}</Text>
                 </View>
               ) : (
                 <TouchableOpacity
@@ -4031,14 +4059,14 @@ export default function UserManagementScreen() {
                   onPress={() => setEditRolePicker(true)}
                   disabled={saving}
                 >
-                  <Text style={styles.selectFieldText}>{createFormRoleLabel(editForm.role)}</Text>
+                  <Text style={styles.selectFieldText}>{uiRoleLabel(editForm.role)}</Text>
                   <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                 </TouchableOpacity>
               )}
 
               {viewerRoleForUi === 'company_manager' ? (
                 <>
-                  <Text style={styles.fieldLabel}>Company</Text>
+                  <Text style={styles.fieldLabel}>{t('userManagement.company')}</Text>
                   <View style={[styles.selectField, styles.selectFieldDisabled]} pointerEvents="none">
                     <Text style={[styles.selectFieldText, !editForm.company_id && styles.selectPlaceholder]}>
                       {optById(editCompanyList, editForm.company_id)?.name ||
@@ -4050,7 +4078,7 @@ export default function UserManagementScreen() {
                 </>
               ) : viewerRoleForUi === 'organization_manager' ? (
                 <>
-                  <Text style={styles.fieldLabel}>Company</Text>
+                  <Text style={styles.fieldLabel}>{t('userManagement.company')}</Text>
                   <TouchableOpacity
                     style={[
                       styles.selectField,
@@ -4063,15 +4091,15 @@ export default function UserManagementScreen() {
                       {editCompanyList.length === 0
                         ? ''
                         : editForm.company_id
-                          ? optById(editCompanyList, editForm.company_id)?.name || 'Select company'
-                          : 'Select company'}
+                          ? optById(editCompanyList, editForm.company_id)?.name || t('userManagement.selectCompany')
+                          : t('userManagement.selectCompany')}
                     </Text>
                     <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                   </TouchableOpacity>
                 </>
               ) : (
                 <>
-                  <Text style={styles.fieldLabel}>Organization</Text>
+                  <Text style={styles.fieldLabel}>{t('userManagement.organization')}</Text>
                   <TouchableOpacity
                     style={[styles.selectField, editOrgPickerLocked && styles.selectFieldDisabled]}
                     onPress={() => !editOrgPickerLocked && setEditOrgPicker(true)}
@@ -4079,13 +4107,13 @@ export default function UserManagementScreen() {
                   >
                     <Text style={[styles.selectFieldText, !editForm.organization_id && styles.selectPlaceholder]}>
                       {editForm.organization_id
-                        ? optById(editOrgList, editForm.organization_id)?.name || 'Select organization'
-                        : 'Select organization'}
+                        ? optById(editOrgList, editForm.organization_id)?.name || t('userManagement.selectOrganization')
+                        : t('userManagement.selectOrganization')}
                     </Text>
                     <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                   </TouchableOpacity>
 
-                  <Text style={styles.fieldLabel}>Company</Text>
+                  <Text style={styles.fieldLabel}>{t('userManagement.company')}</Text>
                   <TouchableOpacity
                     style={[
                       styles.selectField,
@@ -4096,10 +4124,10 @@ export default function UserManagementScreen() {
                   >
                     <Text style={[styles.selectFieldText, !editForm.company_id && styles.selectPlaceholder]}>
                       {!editForm.organization_id
-                        ? 'Select organization first'
+                        ? t('userManagement.selectOrganizationFirst')
                         : editForm.company_id
-                          ? optById(editCompanyList, editForm.company_id)?.name || 'Select company'
-                          : 'Select company'}
+                          ? optById(editCompanyList, editForm.company_id)?.name || t('userManagement.selectCompany')
+                          : t('userManagement.selectCompany')}
                     </Text>
                     <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                   </TouchableOpacity>
@@ -4108,7 +4136,7 @@ export default function UserManagementScreen() {
 
               {showEditDepartmentSection ? (
                 <>
-                  <Text style={styles.fieldLabel}>Department</Text>
+                  <Text style={styles.fieldLabel}>{t('userManagement.department')}</Text>
                   <TouchableOpacity
                     style={[
                       styles.selectField,
@@ -4119,44 +4147,44 @@ export default function UserManagementScreen() {
                   >
                     <Text style={[styles.selectFieldText, !editForm.department_id && styles.selectPlaceholder]}>
                       {!editForm.company_id
-                        ? 'Select company first'
+                        ? t('userManagement.selectCompanyFirstDept')
                         : editForm.role !== 'employee'
-                          ? 'Only employees use departments — switch role to Employee'
+                          ? t('userManagement.onlyEmployeesUseDept')
                           : editForm.department_id
-                            ? optById(deptEditOptions, editForm.department_id)?.name || 'Department'
-                            : 'Select department'}
+                            ? optById(deptEditOptions, editForm.department_id)?.name || t('userManagement.department')
+                            : t('userManagement.selectDepartmentPicker')}
                     </Text>
                     <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                   </TouchableOpacity>
                 </>
               ) : null}
 
-              <Text style={styles.fieldLabel}>Employee PIN</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.employeePin')}</Text>
               <TextInput
                 style={styles.inputOutlined}
                 value={editForm.employee_pin}
                 onChangeText={(t) => setEditForm((f) => ({ ...f, employee_pin: t }))}
-                placeholder="4-digit PIN"
+                placeholder={t('userManagement.pinPlaceholder')}
                 placeholderTextColor="#94a3b8"
                 keyboardType="number-pad"
               />
 
-              <Text style={styles.fieldLabel}>Hourly Rate</Text>
+              <Text style={styles.fieldLabel}>{t('userManagement.hourlyRate')}</Text>
               <TextInput
                 style={styles.inputOutlined}
                 value={editForm.hourly_rate}
                 onChangeText={(t) => setEditForm((f) => ({ ...f, hourly_rate: t }))}
-                placeholder="e.g. 15.00"
+                placeholder={t('userManagement.hourlyRatePlaceholder')}
                 placeholderTextColor="#94a3b8"
                 keyboardType="decimal-pad"
               />
 
               <View style={styles.createUserActions}>
                 <TouchableOpacity style={styles.cancelOutlineBtn} onPress={() => setEditModal(null)} disabled={saving}>
-                  <Text style={styles.cancelOutlineBtnText}>Cancel</Text>
+                  <Text style={styles.cancelOutlineBtnText}>{t('common.cancel')}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={[styles.saveBlueBtn, saving && styles.disabledOpacity]} onPress={handleEdit} disabled={saving}>
-                  <Text style={styles.saveBlueBtnText}>{saving ? 'Saving…' : 'Save Changes'}</Text>
+                  <Text style={styles.saveBlueBtnText}>{saving ? t('common.saving') : t('userManagement.saveChangesBtn')}</Text>
                 </TouchableOpacity>
             </View>
             </ScrollView>
@@ -4166,14 +4194,14 @@ export default function UserManagementScreen() {
 
       <OptionPickerModal
         visible={createDeptPicker}
-        title="Select department"
+        title={t('userManagement.selectDepartmentPicker')}
         options={deptCreateOptions.map((d) => ({ id: d.id, label: d.name }))}
         onSelect={(id) => setForm((f) => ({ ...f, department_id: String(id) }))}
         onClose={() => setCreateDeptPicker(false)}
       />
       <OptionPickerModal
         visible={editDeptPicker}
-        title="Select department"
+        title={t('userManagement.selectDepartmentPicker')}
         options={deptEditOptions.map((d) => ({ id: d.id, label: d.name }))}
         onSelect={(id) => setEditForm((f) => ({ ...f, department_id: String(id) }))}
         onClose={() => setEditDeptPicker(false)}
@@ -4184,11 +4212,11 @@ export default function UserManagementScreen() {
           <View style={[styles.addMenuOuter, { pointerEvents: 'box-none' }]}>
             <Pressable style={styles.addMenu} onPress={(e) => e.stopPropagation()}>
               <TouchableOpacity style={styles.addMenuItem} onPress={() => void openCreateUserModal()}>
-                <Text style={styles.addMenuItemText}>Add single user</Text>
+                <Text style={styles.addMenuItemText}>{t('userManagement.addSingleUser')}</Text>
               </TouchableOpacity>
               <View style={styles.addMenuDivider} />
               <TouchableOpacity style={styles.addMenuItem} onPress={() => void openAssignModal()}>
-                <Text style={styles.addMenuItemText}>Assign to organization</Text>
+                <Text style={styles.addMenuItemText}>{t('userManagement.assignToOrganization')}</Text>
               </TouchableOpacity>
             </Pressable>
             </View>
@@ -4201,10 +4229,8 @@ export default function UserManagementScreen() {
           <Pressable style={styles.assignOrgBox} onPress={(e) => e.stopPropagation()}>
             <View style={styles.assignOrgHeader}>
               <View style={styles.assignOrgTitleBlock}>
-                <Text style={styles.assignOrgTitle}>Assign User to Organization</Text>
-                <Text style={styles.assignOrgSubtitle}>
-                  Select users and assign them to an organization/company with a specific role.
-                </Text>
+                <Text style={styles.assignOrgTitle}>{t('userManagement.assignOrgTitle')}</Text>
+                <Text style={styles.assignOrgSubtitle}>{t('userManagement.assignOrgSubtitle')}</Text>
           </View>
               <TouchableOpacity onPress={() => !saving && setAssignModalVisible(false)} hitSlop={12}>
                 <MaterialCommunityIcons name="close" size={24} color="#64748b" />
@@ -4214,7 +4240,7 @@ export default function UserManagementScreen() {
             <ScrollView style={styles.assignScroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
             <View style={styles.assignUsersToolbar}>
               <Text style={styles.assignUsersLabel}>
-                Available Users ({assignSelectedUserIds.size} selected)
+                {t('userManagement.availableUsersSelected', { count: assignSelectedUserIds.size })}
               </Text>
               <View style={styles.assignUsersToolbarBtns}>
                 <TouchableOpacity
@@ -4222,21 +4248,19 @@ export default function UserManagementScreen() {
                   onPress={selectAllAssign}
                   disabled={assignAvailableUsers.length === 0}
                 >
-                  <Text style={styles.textLinkBtnText}>Select All</Text>
+                  <Text style={styles.textLinkBtnText}>{t('userManagement.selectAll')}</Text>
               </TouchableOpacity>
                 <TouchableOpacity style={styles.textLinkBtn} onPress={clearAllAssign}>
-                  <Text style={styles.textLinkBtnText}>Clear All</Text>
+                  <Text style={styles.textLinkBtnText}>{t('userManagement.clearAll')}</Text>
               </TouchableOpacity>
             </View>
             </View>
 
             <ScrollView style={styles.assignUserListBox} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
               {assignRole === 'employee' && !assignCompanyId ? (
-                <Text style={styles.assignEmptyText}>Select an organization and company to see available users.</Text>
+                <Text style={styles.assignEmptyText}>{t('userManagement.assignEmptyHint')}</Text>
               ) : assignAvailableUsers.length === 0 ? (
-                <Text style={styles.assignEmptyText}>
-                  No available users to assign. All users are either already assigned or don't have the required permissions.
-                </Text>
+                <Text style={styles.assignEmptyText}>{t('userManagement.noAvailableUsers')}</Text>
               ) : (
                 assignAvailableUsers.map((r) => (
                   <TouchableOpacity
@@ -4264,7 +4288,8 @@ export default function UserManagementScreen() {
             </ScrollView>
 
             <Text style={styles.fieldLabel}>
-              Organization{assignRole === 'super_admin' ? ' (optional)' : ''}
+              {t('userManagement.organization')}
+              {assignRole === 'super_admin' ? t('userManagement.organizationOptionalSuffix') : ''}
             </Text>
             <TouchableOpacity
               style={[styles.selectField, assignOrgPickerLocked && styles.selectFieldDisabled]}
@@ -4272,15 +4297,15 @@ export default function UserManagementScreen() {
               disabled={saving || assignOrgPickerLocked}
             >
               <Text style={[styles.selectFieldText, !assignOrgId && styles.selectPlaceholder]}>
-                {assignOrgId ? orgList.find((o) => o.id === assignOrgId)?.name : 'Select an organization'}
+                {assignOrgId ? orgList.find((o) => o.id === assignOrgId)?.name : t('userManagement.selectAnOrganization')}
               </Text>
               <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
             </TouchableOpacity>
 
             <Text style={styles.fieldLabel}>
-              Company
+              {t('userManagement.company')}
               {assignRole === 'super_admin' || assignRole === 'organization_manager'
-                ? ' (optional)'
+                ? t('userManagement.organizationOptionalSuffix')
                 : ''}
             </Text>
             <TouchableOpacity
@@ -4299,23 +4324,23 @@ export default function UserManagementScreen() {
             >
               <Text style={[styles.selectFieldText, !assignCompanyId && styles.selectPlaceholder]}>
                 {assignRole !== 'super_admin' && !assignOrgId
-                  ? 'Select organization first'
+                  ? t('userManagement.selectOrganizationFirst')
                   : assignCompanyId
                     ? companyList.find((c) => c.id === assignCompanyId)?.name
                     : assignRole === 'super_admin' || assignRole === 'organization_manager'
-                      ? 'Optional — select to scope to a company'
-                      : 'Select a company'}
+                      ? t('userManagement.optionalScopeCompany')
+                      : t('userManagement.selectACompany')}
               </Text>
               <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
             </TouchableOpacity>
 
-            <Text style={styles.fieldLabel}>Role</Text>
+            <Text style={styles.fieldLabel}>{t('userManagement.role')}</Text>
             <TouchableOpacity
               style={styles.selectField}
               onPress={() => setAssignRolePicker(true)}
               disabled={saving || (viewerRoleForUi === 'company_manager' && assignRolePickerOptions.length <= 1)}
             >
-              <Text style={styles.selectFieldText}>{assignRoleLabel(assignRole)}</Text>
+              <Text style={styles.selectFieldText}>{uiRoleLabel(assignRole)}</Text>
               <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
             </TouchableOpacity>
 
@@ -4325,7 +4350,7 @@ export default function UserManagementScreen() {
               disabled={saving || !assignFormReady}
             >
               <Text style={styles.assignSubmitBtnText}>
-                Assign {assignSelectedUserIds.size} User{assignSelectedUserIds.size === 1 ? '' : 's'} to Organization
+                {t('userManagement.assignUsersButton', { count: assignSelectedUserIds.size })}
               </Text>
             </TouchableOpacity>
             </ScrollView>
@@ -4335,7 +4360,7 @@ export default function UserManagementScreen() {
 
       <OptionPickerModal
         visible={createRolePicker}
-        title="Role"
+        title={t('userManagement.role')}
         options={createEditRolePickerOptions}
         onSelect={(id) =>
           setForm((f) => ({
@@ -4348,21 +4373,21 @@ export default function UserManagementScreen() {
       />
       <OptionPickerModal
         visible={createOrgPicker}
-        title="Organization"
+        title={t('userManagement.organization')}
         options={createOrgList.map((o) => ({ id: o.id, label: o.name }))}
         onSelect={(id) => setForm((f) => ({ ...f, organization_id: String(id), company_id: '' }))}
         onClose={() => setCreateOrgPicker(false)}
       />
       <OptionPickerModal
         visible={createCompanyPicker}
-        title="Company"
+        title={t('userManagement.company')}
         options={createCompanyList.map((c) => ({ id: c.id, label: c.name }))}
         onSelect={(id) => setForm((f) => ({ ...f, company_id: String(id) }))}
         onClose={() => setCreateCompanyPicker(false)}
       />
       <OptionPickerModal
         visible={editRolePicker}
-        title="Role"
+        title={t('userManagement.role')}
         options={createEditRolePickerOptions}
         onSelect={(id) =>
           setEditForm((f) => ({
@@ -4375,35 +4400,35 @@ export default function UserManagementScreen() {
       />
       <OptionPickerModal
         visible={editOrgPicker}
-        title="Organization"
+        title={t('userManagement.organization')}
         options={editOrgList.map((o) => ({ id: o.id, label: o.name }))}
         onSelect={(id) => setEditForm((f) => ({ ...f, organization_id: String(id), company_id: '' }))}
         onClose={() => setEditOrgPicker(false)}
       />
       <OptionPickerModal
         visible={editCompanyPicker}
-        title="Company"
+        title={t('userManagement.company')}
         options={editCompanyList.map((c) => ({ id: c.id, label: c.name }))}
         onSelect={(id) => setEditForm((f) => ({ ...f, company_id: String(id) }))}
         onClose={() => setEditCompanyPicker(false)}
       />
       <OptionPickerModal
         visible={assignOrgPicker}
-        title="Organization"
+        title={t('userManagement.organization')}
         options={orgList.map((o) => ({ id: o.id, label: o.name }))}
         onSelect={(id) => setAssignOrgId(id)}
         onClose={() => setAssignOrgPicker(false)}
       />
       <OptionPickerModal
         visible={assignCompanyPicker}
-        title="Company"
+        title={t('userManagement.company')}
         options={companyList.map((c) => ({ id: c.id, label: c.name }))}
         onSelect={(id) => setAssignCompanyId(id)}
         onClose={() => setAssignCompanyPicker(false)}
       />
       <OptionPickerModal
         visible={assignRolePicker}
-        title="Role"
+        title={t('userManagement.role')}
         options={assignRolePickerOptions}
         onSelect={(id) =>
           setAssignRole(id as 'employee' | 'company_manager' | 'organization_manager' | 'super_admin')
@@ -4414,8 +4439,8 @@ export default function UserManagementScreen() {
       <Modal visible={columnsOpen} transparent animationType="fade" onRequestClose={() => setColumnsOpen(false)}>
         <Pressable style={styles.modalOverlay} onPress={() => setColumnsOpen(false)}>
           <Pressable style={styles.columnModal} onPress={(e) => e.stopPropagation()}>
-            <Text style={styles.columnModalTitle}>Visible columns</Text>
-            {(Object.keys(COL_LABELS) as ColumnKey[]).map((key) => (
+            <Text style={styles.columnModalTitle}>{t('userManagement.visibleColumns')}</Text>
+            {(Object.keys(colLabels) as ColumnKey[]).map((key) => (
               <TouchableOpacity
                 key={key}
                 style={styles.columnRow}
@@ -4424,11 +4449,11 @@ export default function UserManagementScreen() {
                 <View style={[styles.checkboxOuter, styles.checkboxOuterSm]}>
                   <View style={[styles.checkboxInner, styles.checkboxInnerSm, visibleCols[key] && styles.checkboxOn]} />
                 </View>
-                <Text style={styles.columnRowLabel}>{COL_LABELS[key]}</Text>
+                <Text style={styles.columnRowLabel}>{colLabels[key]}</Text>
               </TouchableOpacity>
             ))}
             <TouchableOpacity style={styles.columnDone} onPress={() => setColumnsOpen(false)}>
-              <Text style={styles.columnDoneText}>Done</Text>
+              <Text style={styles.columnDoneText}>{t('common.done')}</Text>
             </TouchableOpacity>
           </Pressable>
         </Pressable>

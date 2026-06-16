@@ -8,13 +8,19 @@ import {
   Pressable,
   ActivityIndicator,
 } from 'react-native';
+import { useTranslation } from 'react-i18next';
 import type { MotelRoomRow } from '../../api';
 import {
   canEmployeeStartCleaning,
-  getEmployeeRoomStatusLabel,
   motelRoomFloorLabel,
   motelRoomNumber,
 } from '../../lib/motelRoomDisplay';
+import {
+  legacyStatusLabelForCompare,
+  localizedEmployeeRoomStatus,
+  localizedFloorLabel,
+  localizedStatusFromEnglish,
+} from '../../lib/housekeepingI18n';
 
 type Props = {
   visible: boolean;
@@ -37,16 +43,19 @@ export default function RoomActionModal({
   onStartCleaning,
   onContinueCleaning,
 }: Props) {
+  const { t } = useTranslation();
   if (!room) return null;
 
-  const statusLabel = getEmployeeRoomStatusLabel(room);
-  const floorLine = `${motelRoomFloorLabel(room)} - ${statusLabel}`;
+  const statusLabel = localizedEmployeeRoomStatus(t, room);
+  const floorRaw = motelRoomFloorLabel(room);
+  const floorLine = `${localizedFloorLabel(t, floorRaw)} - ${statusLabel}`;
   const canStart = canEmployeeStartCleaning(room, activeSessionRoomId);
   const showStart = canStart && !cleaningActiveForRoom;
   const showContinue = cleaningActiveForRoom;
+  const legacyLabel = legacyStatusLabelForCompare(room);
   const isReClean =
-    statusLabel === 'Approved' ||
-    statusLabel === 'Completed' ||
+    legacyLabel === 'Approved' ||
+    legacyLabel === 'Completed' ||
     (room as { approved?: boolean }).approved === true ||
     String((room as { cleaning_status?: string }).cleaning_status ?? '').toLowerCase() === 'approved';
 
@@ -54,27 +63,30 @@ export default function RoomActionModal({
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <Pressable style={styles.backdrop} onPress={onClose}>
         <Pressable style={styles.card} onPress={(e) => e.stopPropagation()}>
-          <TouchableOpacity style={styles.closeIcon} onPress={onClose} hitSlop={12} accessibilityLabel="Close">
+          <TouchableOpacity
+            style={styles.closeIcon}
+            onPress={onClose}
+            hitSlop={12}
+            accessibilityLabel={t('housekeeping.close')}
+          >
             <Text style={styles.closeIconText}>×</Text>
           </TouchableOpacity>
 
-          <Text style={styles.title}>Room {motelRoomNumber(room)}</Text>
+          <Text style={styles.title}>{t('housekeeping.roomTitle', { number: motelRoomNumber(room) })}</Text>
           <Text style={styles.subtitle}>{floorLine}</Text>
 
           <Text style={styles.statusLine}>
-            Status: <Text style={styles.statusBold}>{statusLabel}</Text>
+            {t('housekeeping.statusLabel')}: <Text style={styles.statusBold}>{statusLabel}</Text>
           </Text>
 
           {showContinue ? (
             <TouchableOpacity style={styles.btnPrimary} onPress={onContinueCleaning} activeOpacity={0.9}>
-              <Text style={styles.btnPrimaryText}>Continue cleaning</Text>
+              <Text style={styles.btnPrimaryText}>{t('housekeeping.workflow.continueCleaning')}</Text>
             </TouchableOpacity>
           ) : showStart ? (
             <>
               {isReClean ? (
-                <Text style={styles.reCleanHint}>
-                  This room was previously cleaned. You can start a new session when ready.
-                </Text>
+                <Text style={styles.reCleanHint}>{t('housekeeping.inspection.reCleanHint')}</Text>
               ) : null}
               <TouchableOpacity
                 style={[styles.btnPrimary, startBusy && styles.btnDisabled]}
@@ -85,20 +97,20 @@ export default function RoomActionModal({
                 {startBusy ? (
                   <ActivityIndicator color="#fff" />
                 ) : (
-                  <Text style={styles.btnPrimaryText}>Start cleaning</Text>
+                  <Text style={styles.btnPrimaryText}>{t('housekeeping.workflow.startCleaning')}</Text>
                 )}
               </TouchableOpacity>
             </>
           ) : (
             <Text style={styles.blockedHint}>
-              {statusLabel === 'Pending Approval'
-                ? 'This room is waiting for admin approval.'
-                : 'Cleaning cannot be started for this room right now.'}
+              {localizedStatusFromEnglish(t, legacyLabel) === t('housekeeping.inspection.pendingInspection')
+                ? t('housekeeping.inspection.waitingAdminApproval')
+                : t('housekeeping.inspection.cannotStartNow')}
             </Text>
           )}
 
           <TouchableOpacity style={styles.closeLink} onPress={onClose} activeOpacity={0.7}>
-            <Text style={styles.closeLinkText}>Close</Text>
+            <Text style={styles.closeLinkText}>{t('housekeeping.close')}</Text>
           </TouchableOpacity>
         </Pressable>
       </Pressable>

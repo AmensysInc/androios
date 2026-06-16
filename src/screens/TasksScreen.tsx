@@ -17,6 +17,7 @@ import {
   KeyboardAvoidingView,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
 import { HttpError } from '../lib/api-client';
@@ -35,11 +36,17 @@ import {
   taskIsCompleted,
   taskIsInProgress,
   isTaskVisibleToUser,
-  taskStatusLabel,
-  taskTypeLabel,
   taskUserId,
-  taskWorkflowStatus,
 } from '../lib/tasksWorkflow';
+import {
+  priorityOptions as buildPriorityOptions,
+  statusFilterOptions,
+  dateFilterOptions,
+  priorityLabel,
+  localizedTaskType,
+  localizedTaskStatusForItem,
+  assignmentStatusLabel,
+} from '../lib/taskI18n';
 import { useTasksScopeFilters } from '../hooks/useTasksScopeFilters';
 import { companyIdHintsFromAuthUser, invalidateCalendarEventsCache, invalidateWorkTasksCache } from '../api';
 import { devWarn } from '../lib/logger';
@@ -232,12 +239,13 @@ function taskNotesText(t: any): string {
   return typeof n === 'string' ? n.trim() : '';
 }
 
-function taskCreatedLine(t: any): string {
-  const raw = t?.created_at ?? t?.created ?? t?.date_created;
+function taskCreatedLine(task: any, tr: (key: string) => string): string {
+  const raw = task?.created_at ?? task?.created ?? task?.date_created;
   if (!raw) return '';
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) return '';
-  return `Created ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`;
+  const formatted = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  return `${tr('checklistTemplates.created')} ${formatted}`;
 }
 
 function displayLocalFromStr(s: string): string {
@@ -266,6 +274,7 @@ function TaskDueDateTimePanel({
   initialMs: number;
   onCommit: (isoLocal: string) => void;
 }) {
+  const { t } = useTranslation();
   const [cursor, setCursor] = useState(() => new Date());
   const [dayDraft, setDayDraft] = useState(() => new Date());
   const [hour, setHour] = useState(9);
@@ -338,7 +347,7 @@ function TaskDueDateTimePanel({
           </View>
         </View>
         <View style={dueStyles.timeSide}>
-          <Text style={dueStyles.timeLabel}>Time</Text>
+          <Text style={dueStyles.timeLabel}>{t('tasks.timeLabel')}</Text>
           <View style={dueStyles.wheels}>
             <ScrollView style={dueStyles.wheel} nestedScrollEnabled showsVerticalScrollIndicator={false}>
               {Array.from({ length: 24 }, (_, h) => (
@@ -367,10 +376,10 @@ function TaskDueDateTimePanel({
             setMinute(t.getMinutes());
           }}
         >
-          <Text style={dueStyles.link}>Now</Text>
+          <Text style={dueStyles.link}>{t('tasks.now')}</Text>
         </TouchableOpacity>
         <TouchableOpacity style={dueStyles.doneBtn} onPress={commit}>
-          <Text style={dueStyles.doneTxt}>Done</Text>
+          <Text style={dueStyles.doneTxt}>{t('common.done')}</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -441,6 +450,7 @@ function formatTaskApiError(e: unknown): string {
 }
 
 export default function TasksScreen() {
+  const { t } = useTranslation();
   const { user, role } = useAuth();
   const [tasks, setTasks] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -495,7 +505,7 @@ export default function TasksScreen() {
   const [filterDate, setFilterDate] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
 
-  const [memberOptions, setMemberOptions] = useState<PickerOption[]>([{ id: 'all', label: 'All Members' }]);
+  const [memberOptions, setMemberOptions] = useState<PickerOption[]>([]);
   /** Resolve calendar assignee id/email to display name (from getUsers). */
   const [memberDisplayById, setMemberDisplayById] = useState<Record<string, string>>({});
   const [memberDisplayByEmail, setMemberDisplayByEmail] = useState<Record<string, string>>({});
@@ -507,44 +517,13 @@ export default function TasksScreen() {
 
   const canViewAllMembers = ['super_admin', 'organization_manager', 'company_manager'].includes(role || '');
 
-  const priorityOptions: PickerOption[] = useMemo(
-    () => [
-      { id: 'all', label: 'All Priorities' },
-      { id: 'high', label: 'High' },
-      { id: 'medium', label: 'Medium' },
-      { id: 'low', label: 'Low' },
-    ],
-    []
-  );
+  const priorityFilterOptions: PickerOption[] = useMemo(() => buildPriorityOptions(t, true), [t]);
 
-  const createPriorityOptions: PickerOption[] = useMemo(
-    () => [
-      { id: 'low', label: 'Low' },
-      { id: 'medium', label: 'Medium' },
-      { id: 'high', label: 'High' },
-    ],
-    []
-  );
+  const createPriorityOptions: PickerOption[] = useMemo(() => buildPriorityOptions(t, false), [t]);
 
-  const dateOptions: PickerOption[] = useMemo(
-    () => [
-      { id: 'today', label: 'Today' },
-      { id: 'week', label: 'This week' },
-      { id: 'month', label: 'This month' },
-      { id: 'all', label: 'All dates' },
-    ],
-    []
-  );
+  const dateOptions: PickerOption[] = useMemo(() => dateFilterOptions(t), [t]);
 
-  const statusOptions: PickerOption[] = useMemo(
-    () => [
-      { id: 'pending', label: 'Pending' },
-      { id: 'in_progress', label: 'In Progress' },
-      { id: 'completed', label: 'Completed' },
-      { id: 'all', label: 'All statuses' },
-    ],
-    []
-  );
+  const statusOptions: PickerOption[] = useMemo(() => statusFilterOptions(t), [t]);
 
   const {
     showOrgFilter,
@@ -574,29 +553,34 @@ export default function TasksScreen() {
   }, [memberOptions]);
 
   const assignCreateOptions: PickerOption[] = useMemo(() => {
-    const base: PickerOption[] = [{ id: 'self', label: 'Assign to myself' }];
+    const base: PickerOption[] = [{ id: 'self', label: t('tasks.assignment.assignToMyself') }];
     if (!canViewAllMembers) return base;
     const rest = memberOptions.filter((o) => o.id !== 'all');
-    return [{ id: 'none', label: 'Unassigned' }, ...base, ...rest];
-  }, [canViewAllMembers, memberOptions]);
+    return [{ id: 'none', label: t('tasks.assignment.unassigned') }, ...base, ...rest];
+  }, [canViewAllMembers, memberOptions, t]);
 
   const assignMemberPickOptions: PickerOption[] = useMemo(() => {
     if (!canViewAllMembers) {
-      return user?.id ? [{ id: String(user.id), label: 'Me' }] : [];
+      const selfLabel =
+        (user as { full_name?: string })?.full_name ||
+        user?.email ||
+        (user?.id ? String(user.id) : '');
+      return user?.id ? [{ id: String(user.id), label: selfLabel }] : [];
     }
     return memberOptions.filter((o) => o.id !== 'all');
-  }, [canViewAllMembers, memberOptions, user?.id]);
+  }, [canViewAllMembers, memberOptions, user?.id, user?.email, user]);
 
   const subtaskAssignOptions: PickerOption[] = useMemo(() => {
-    const base: PickerOption[] = [{ id: 'same_parent', label: 'Same as parent task' }];
+    const base: PickerOption[] = [{ id: 'same_parent', label: t('tasks.assignment.sameAsParent') }];
     if (!canViewAllMembers) return base;
     const rest = memberOptions.filter((o) => o.id !== 'all');
     return [...base, ...rest];
-  }, [canViewAllMembers, memberOptions]);
+  }, [canViewAllMembers, memberOptions, t]);
 
   const loadMembers = useCallback(async () => {
+    const allMembersLabel = t('tasks.filters.allMembers');
     if (!canViewAllMembers) {
-      setMemberOptions([{ id: 'all', label: 'All Members' }]);
+      setMemberOptions([{ id: 'all', label: allMembersLabel }]);
       setMemberDisplayById({});
       setMemberDisplayByEmail({});
       setMemberIdByEmail({});
@@ -619,7 +603,7 @@ export default function TasksScreen() {
         const raw = await api.getUsers();
         list = Array.isArray(raw) ? raw : [];
       }
-      const opts: PickerOption[] = [{ id: 'all', label: 'All Members' }];
+      const opts: PickerOption[] = [{ id: 'all', label: allMembersLabel }];
       const byId: Record<string, string> = {};
       const byEmail: Record<string, string> = {};
       const idByEmail: Record<string, string> = {};
@@ -646,12 +630,12 @@ export default function TasksScreen() {
       setMemberDisplayByEmail(byEmail);
       setMemberIdByEmail(idByEmail);
     } catch {
-      setMemberOptions([{ id: 'all', label: 'All Members' }]);
+      setMemberOptions([{ id: 'all', label: allMembersLabel }]);
       setMemberDisplayById({});
       setMemberDisplayByEmail({});
       setMemberIdByEmail({});
     }
-  }, [canViewAllMembers, filterCompanyId]);
+  }, [canViewAllMembers, filterCompanyId, t]);
 
   useEffect(() => {
     if (!scopeReady) return;
@@ -847,20 +831,26 @@ export default function TasksScreen() {
   const createTask = async () => {
     const title = newTitle.trim();
     if (!title) {
-      Alert.alert('Validation', 'Title is required');
+      Alert.alert(t('common.validation'), t('tasks.validation.titleRequired'));
       return;
     }
     if (!startStr.trim()) {
-      Alert.alert('Validation', allDay ? 'Select a date' : 'Select a start date and time');
+      Alert.alert(
+        t('common.validation'),
+        allDay ? t('tasks.validation.selectDate') : t('tasks.validation.selectStartDateTime')
+      );
       return;
     }
     let start = parseUserDateTime(startStr);
     if (!start) {
-      Alert.alert('Validation', allDay ? 'Select a valid date' : 'Enter a valid start date/time');
+      Alert.alert(
+        t('common.validation'),
+        allDay ? t('tasks.validation.selectValidDate') : t('tasks.validation.selectValidStartDateTime')
+      );
       return;
     }
     if (!allDay && !endStr.trim()) {
-      Alert.alert('Validation', 'Select an end date and time');
+      Alert.alert(t('common.validation'), t('tasks.validation.selectEndDateTime'));
       return;
     }
     let end = parseUserDateTime(endStr);
@@ -873,11 +863,11 @@ export default function TasksScreen() {
       end = e;
     } else {
       if (!end) {
-        Alert.alert('Validation', 'Enter valid start and end date/time');
+        Alert.alert(t('common.validation'), t('tasks.validation.validDateTimeRange'));
         return;
       }
       if (end.getTime() < start.getTime()) {
-        Alert.alert('Validation', 'End time must be after start time');
+        Alert.alert(t('common.validation'), t('tasks.validation.endAfterStart'));
         return;
       }
     }
@@ -892,7 +882,7 @@ export default function TasksScreen() {
           : createAssignKey;
 
     if (createAssignKey !== 'none' && !assigneeId) {
-      Alert.alert('Validation', 'Select a user to assign, or choose Unassigned');
+      Alert.alert(t('common.validation'), t('tasks.validation.selectAssignee'));
       return;
     }
 
@@ -900,11 +890,11 @@ export default function TasksScreen() {
     const coForCreate = String(createCompanyId ?? '').trim();
     if (showCreateOrgCompany) {
       if (!orgForCreate || orgForCreate === 'all') {
-        Alert.alert('Validation', 'Select an organization');
+        Alert.alert(t('common.validation'), t('tasks.validation.selectOrganization'));
         return;
       }
       if (!coForCreate || coForCreate === 'all') {
-        Alert.alert('Validation', 'Select a company');
+        Alert.alert(t('common.validation'), t('tasks.validation.selectCompany'));
         return;
       }
     }
@@ -929,7 +919,7 @@ export default function TasksScreen() {
       }
       bustTaskCacheAndReload();
     } catch (e: unknown) {
-      Alert.alert('Error', formatTaskApiError(e));
+      Alert.alert(t('common.error'), formatTaskApiError(e) || t('tasks.requestFailed'));
     } finally {
       setSaving(false);
     }
@@ -938,7 +928,7 @@ export default function TasksScreen() {
   const toggleComplete = async (task: any) => {
     const id = eventId(task);
     if (!id) {
-      Alert.alert('Error', 'Cannot update this task (missing id).');
+      Alert.alert(t('common.error'), t('tasks.validation.missingTaskId'));
       return;
     }
     const next = !taskIsCompleted(task);
@@ -1007,7 +997,7 @@ export default function TasksScreen() {
       bustTaskCacheAndReload();
     } catch (e: unknown) {
       bustTaskCacheAndReload();
-      Alert.alert('Error', formatTaskApiError(e));
+      Alert.alert(t('common.error'), formatTaskApiError(e) || t('tasks.requestFailed'));
     }
   };
 
@@ -1035,12 +1025,15 @@ export default function TasksScreen() {
     const id = eventId(editTask);
     const title = editTitle.trim();
     if (!id || !title) {
-      Alert.alert('Validation', 'Title is required');
+      Alert.alert(t('common.validation'), t('tasks.validation.titleRequired'));
       return;
     }
     let start = parseUserDateTime(editStartStr);
     if (!start) {
-      Alert.alert('Validation', editAllDay ? 'Select a valid date' : 'Enter a valid start date/time');
+      Alert.alert(
+        t('common.validation'),
+        editAllDay ? t('tasks.validation.selectValidDate') : t('tasks.validation.selectValidStartDateTime')
+      );
       return;
     }
     let end = parseUserDateTime(editEndStr);
@@ -1053,11 +1046,11 @@ export default function TasksScreen() {
       end = e;
     } else {
       if (!end) {
-        Alert.alert('Validation', 'Enter valid start and end date/time');
+        Alert.alert(t('common.validation'), t('tasks.validation.validDateTimeRange'));
         return;
       }
       if (end.getTime() < start.getTime()) {
-        Alert.alert('Validation', 'End time must be after start time');
+        Alert.alert(t('common.validation'), t('tasks.validation.endAfterStart'));
         return;
       }
     }
@@ -1075,7 +1068,7 @@ export default function TasksScreen() {
       setEditPicker(null);
       bustTaskCacheAndReload();
     } catch (e: unknown) {
-      Alert.alert('Error', formatTaskApiError(e));
+      Alert.alert(t('common.error'), formatTaskApiError(e) || t('tasks.requestFailed'));
     } finally {
       setEditSaving(false);
     }
@@ -1106,7 +1099,7 @@ export default function TasksScreen() {
 
   const submitAssign = async () => {
     if (!assignTask || !assignToId) {
-      Alert.alert('Assign', 'Select a user');
+      Alert.alert(t('tasks.assignTitle'), t('tasks.validation.selectUser'));
       return;
     }
     const id = eventId(assignTask);
@@ -1117,7 +1110,7 @@ export default function TasksScreen() {
       setAssignTask(null);
       bustTaskCacheAndReload();
     } catch (e: unknown) {
-      Alert.alert('Error', formatTaskApiError(e));
+      Alert.alert(t('common.error'), formatTaskApiError(e) || t('tasks.requestFailed'));
     } finally {
       setAssignSaving(false);
     }
@@ -1142,12 +1135,15 @@ export default function TasksScreen() {
     const parentId = eventId(subtaskParent);
     const title = subTitle.trim();
     if (!parentId || !title) {
-      Alert.alert('Validation', 'Title is required');
+      Alert.alert(t('common.validation'), t('tasks.validation.titleRequired'));
       return;
     }
     let start = parseUserDateTime(subStartStr);
     if (!start) {
-      Alert.alert('Validation', subAllDay ? 'Select a valid date' : 'Enter a valid start date/time');
+      Alert.alert(
+        t('common.validation'),
+        subAllDay ? t('tasks.validation.selectValidDate') : t('tasks.validation.selectValidStartDateTime')
+      );
       return;
     }
     let end = parseUserDateTime(subEndStr);
@@ -1160,18 +1156,18 @@ export default function TasksScreen() {
       end = e;
     } else {
       if (!end) {
-        Alert.alert('Validation', 'Enter valid start and end date/time');
+        Alert.alert(t('common.validation'), t('tasks.validation.validDateTimeRange'));
         return;
       }
       if (end.getTime() < start.getTime()) {
-        Alert.alert('Validation', 'End time must be after start time');
+        Alert.alert(t('common.validation'), t('tasks.validation.endAfterStart'));
         return;
       }
     }
     const targetUser =
       subAssignKey === 'same_parent' ? taskUserId(subtaskParent) : subAssignKey;
     if (!targetUser) {
-      Alert.alert('Validation', 'Select assignee');
+      Alert.alert(t('common.validation'), t('tasks.validation.selectAssigneeRequired'));
       return;
     }
     setSubSaving(true);
@@ -1189,7 +1185,7 @@ export default function TasksScreen() {
       setSubPicker(null);
       bustTaskCacheAndReload();
     } catch (e: unknown) {
-      Alert.alert('Error', formatTaskApiError(e));
+      Alert.alert(t('common.error'), formatTaskApiError(e) || t('tasks.requestFailed'));
     } finally {
       setSubSaving(false);
     }
@@ -1204,31 +1200,31 @@ export default function TasksScreen() {
   const deleteTask = (task: any) => {
     const id = eventId(task);
     if (!id) {
-      Alert.alert('Error', 'This task cannot be deleted (missing id).');
+      Alert.alert(t('common.error'), t('tasks.validation.missingDeleteId'));
       return;
     }
 
-    const title = task.title || 'this task';
+    const title = task.title || t('tasks.taskFallback');
     const run = async () => {
       try {
         await api.deleteCalendarEvent(id);
         bustTaskCacheAndReload();
       } catch (e: any) {
-        Alert.alert('Error', e?.message || 'Failed to delete');
+        Alert.alert(t('common.error'), e?.message || t('tasks.validation.deleteFailed'));
       }
     };
 
     if (Platform.OS === 'web' && typeof globalThis !== 'undefined') {
       const w = globalThis as unknown as { confirm?: (m: string) => boolean };
       if (typeof w.confirm === 'function') {
-        if (w.confirm(`Delete "${title}"?`)) void run();
+        if (w.confirm(t('tasks.deleteConfirm', { title }))) void run();
         return;
       }
     }
 
-    Alert.alert('Delete', `Delete "${title}"?`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => void run() },
+    Alert.alert(t('tasks.deleteTitle'), t('tasks.deleteConfirm', { title }), [
+      { text: t('common.cancel'), style: 'cancel' },
+      { text: t('common.delete'), style: 'destructive', onPress: () => void run() },
     ]);
   };
 
@@ -1238,15 +1234,15 @@ export default function TasksScreen() {
   const pickerConfig = useMemo(() => {
     switch (picker) {
       case 'member':
-        return { title: 'Member', options: memberOptions, selectedId: filterMember };
+        return { title: t('tasks.member'), options: memberOptions, selectedId: filterMember };
       case 'date':
-        return { title: 'Date', options: dateOptions, selectedId: filterDate };
+        return { title: t('tasks.date'), options: dateOptions, selectedId: filterDate };
       case 'status':
-        return { title: 'Status', options: statusOptions, selectedId: filterStatus };
+        return { title: t('tasks.status'), options: statusOptions, selectedId: filterStatus };
       case 'organization':
-        return { title: 'Organization', options: organizationOptions, selectedId: filterOrgId };
+        return { title: t('tasks.organization'), options: organizationOptions, selectedId: filterOrgId };
       case 'company':
-        return { title: 'Company', options: companyOptions, selectedId: filterCompanyId };
+        return { title: t('tasks.company'), options: companyOptions, selectedId: filterCompanyId };
       default:
         return { title: '', options: [] as PickerOption[], selectedId: undefined };
     }
@@ -1262,6 +1258,7 @@ export default function TasksScreen() {
     filterStatus,
     filterOrgId,
     filterCompanyId,
+    t,
   ]);
 
   if (loading) {
@@ -1328,21 +1325,19 @@ export default function TasksScreen() {
                   <View style={styles.titleIconSquare}>
                     <MaterialCommunityIcons name="target" size={22} color="#fff" />
                   </View>
-                  <Text style={styles.pageTitle}>Tasks</Text>
+                  <Text style={styles.pageTitle}>{t('tasks.title')}</Text>
                 </View>
                 <Text style={styles.pageSubtitle}>
-                  {canViewAllMembers
-                    ? 'Manual and shift-assigned checklist tasks for your organization'
-                    : 'Tasks assigned to you from shifts and direct assignments'}
+                  {canViewAllMembers ? t('tasks.subtitleAdmin') : t('tasks.subtitleEmployee')}
                 </Text>
               </View>
               <View style={styles.actionsRow}>
                 <TouchableOpacity style={styles.refreshBtn} onPress={onRefresh} activeOpacity={0.85}>
                   <MaterialCommunityIcons name="refresh" size={20} color="#475569" />
-                  <Text style={styles.refreshBtnText}>Refresh</Text>
+                  <Text style={styles.refreshBtnText}>{t('tasks.refresh')}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.newTaskBtn} onPress={openNewTask} activeOpacity={0.9}>
-                  <Text style={styles.newTaskBtnText}>+ New Task</Text>
+                  <Text style={styles.newTaskBtnText}>+ {t('tasks.newTask')}</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -1350,34 +1345,34 @@ export default function TasksScreen() {
             <View style={styles.filtersCard}>
               <View style={styles.filtersLabelRow}>
                 <MaterialCommunityIcons name="filter-variant" size={18} color="#64748b" />
-                <Text style={styles.filtersLabel}>Filters:</Text>
+                <Text style={styles.filtersLabel}>{t('tasks.filters.label')}</Text>
               </View>
               <View style={styles.filterWrap}>
                 {showOrgFilter ? (
                   <View style={styles.filterField}>
-                    <Text style={styles.filterFieldLabel}>Organization</Text>
-                    {filterChip('organization', labelFor(organizationOptions, filterOrgId, 'All organizations'))}
+                    <Text style={styles.filterFieldLabel}>{t('tasks.organization')}</Text>
+                    {filterChip('organization', labelFor(organizationOptions, filterOrgId, t('common.allOrganizations')))}
                   </View>
                 ) : null}
                 {showCompanyFilter ? (
                   <View style={styles.filterField}>
-                    <Text style={styles.filterFieldLabel}>Company</Text>
-                    {filterChip('company', labelFor(companyOptions, filterCompanyId, 'All companies'))}
+                    <Text style={styles.filterFieldLabel}>{t('tasks.company')}</Text>
+                    {filterChip('company', labelFor(companyOptions, filterCompanyId, t('common.allCompanies')))}
                   </View>
                 ) : null}
                 {canViewAllMembers ? (
                   <View style={styles.filterField}>
-                    <Text style={styles.filterFieldLabel}>Member</Text>
-                    {filterChip('member', labelFor(memberOptions, filterMember, 'All Members'))}
+                    <Text style={styles.filterFieldLabel}>{t('tasks.member')}</Text>
+                    {filterChip('member', labelFor(memberOptions, filterMember, t('tasks.filters.allMembers')))}
                   </View>
                 ) : null}
                 <View style={styles.filterField}>
-                  <Text style={styles.filterFieldLabel}>Date</Text>
-                  {filterChip('date', labelFor(dateOptions, filterDate, 'Today'))}
+                  <Text style={styles.filterFieldLabel}>{t('tasks.date')}</Text>
+                  {filterChip('date', labelFor(dateOptions, filterDate, t('tasks.filters.today')))}
                 </View>
                 <View style={styles.filterField}>
-                  <Text style={styles.filterFieldLabel}>Status</Text>
-                  {filterChip('status', labelFor(statusOptions, filterStatus, 'All statuses'))}
+                  <Text style={styles.filterFieldLabel}>{t('tasks.status')}</Text>
+                  {filterChip('status', labelFor(statusOptions, filterStatus, t('tasks.filters.allStatuses')))}
                 </View>
               </View>
             </View>
@@ -1389,10 +1384,10 @@ export default function TasksScreen() {
               <View style={styles.emptyIconCircle}>
                 <MaterialCommunityIcons name="format-list-checks" size={40} color="#2563eb" />
               </View>
-              <Text style={styles.emptyTitle}>No tasks found</Text>
-              <Text style={styles.emptySubtitle}>Get started by creating your first task.</Text>
+              <Text style={styles.emptyTitle}>{t('tasks.emptyTitle')}</Text>
+              <Text style={styles.emptySubtitle}>{t('tasks.emptySubtitle')}</Text>
               <TouchableOpacity style={styles.createTaskBtn} onPress={openNewTask} activeOpacity={0.9}>
-                <Text style={styles.createTaskBtnText}>+ Create Task</Text>
+                <Text style={styles.createTaskBtnText}>+ {t('tasks.createTask')}</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -1426,7 +1421,7 @@ export default function TasksScreen() {
           const assigneeLabel = currentAssigneeName(item);
           const orgName = organizationNameFromTask(item);
           const coName = companyNameFromTask(item);
-          const created = taskCreatedLine(item);
+          const created = taskCreatedLine(item, t);
           const dueLine = taskDueDisplay(item);
           const checklistSource = taskChecklistSourceName(item);
           return (
@@ -1439,26 +1434,34 @@ export default function TasksScreen() {
                 </TouchableOpacity>
                 <View style={styles.cardMain}>
                   <Text style={[styles.taskTitle, itemDone && styles.taskTitleDone]} numberOfLines={2}>
-                    {item.title || item.task_name || 'Task'}
+                    {item.title || item.task_name || t('tasks.taskFallback')}
                   </Text>
                   {created ? <Text style={styles.taskCreated}>{created}</Text> : null}
                   <View style={styles.taskDetailBlock}>
                     {orgName ? <Text style={styles.taskDetailLine}>{orgName}</Text> : null}
                     {coName ? <Text style={styles.taskDetailLine}>{coName}</Text> : null}
                     {assigneeLabel && assigneeLabel !== '—' ? (
-                      <Text style={styles.taskDetailLine}>Assigned: {assigneeLabel}</Text>
+                      <Text style={styles.taskDetailLine}>
+                        {t('tasks.assignedLabel', { name: assigneeLabel })}
+                      </Text>
                     ) : canViewAllMembers ? (
-                      <Text style={styles.taskDetailLineMuted}>Unassigned</Text>
+                      <Text style={styles.taskDetailLineMuted}>{assignmentStatusLabel(t, false)}</Text>
                     ) : null}
-                    {dueLine ? <Text style={styles.taskDetailLine}>Due: {dueLine}</Text> : null}
+                    {dueLine ? (
+                      <Text style={styles.taskDetailLine}>
+                        {t('tasks.due')}: {dueLine}
+                      </Text>
+                    ) : null}
                     {checklistSource ? (
-                      <Text style={styles.taskDetailLine}>Checklist: {checklistSource}</Text>
+                      <Text style={styles.taskDetailLine}>
+                        {t('tasks.checklist')}: {checklistSource}
+                      </Text>
                     ) : null}
                   </View>
                 </View>
                 <View style={styles.cardBadgesCol}>
                   <View style={[styles.typePill, typePillStyle]}>
-                    <Text style={styles.typePillText}>{taskTypeLabel(item)}</Text>
+                    <Text style={styles.typePillText}>{localizedTaskType(t, item)}</Text>
                   </View>
                   <View style={[styles.statusPill, statusPillStyle]}>
                     <MaterialCommunityIcons
@@ -1475,11 +1478,11 @@ export default function TasksScreen() {
                             : styles.statusPillTextPending
                       }
                     >
-                      {taskWorkflowStatus(item) === 'pending' ? 'pending' : taskStatusLabel(item)}
+                      {localizedTaskStatusForItem(t, item)}
                     </Text>
                   </View>
                   <View style={[styles.priorityPill, { backgroundColor: pb.bg, borderColor: pb.border }]}>
-                    <Text style={[styles.priorityPillText, { color: pb.text }]}>{pr}</Text>
+                    <Text style={[styles.priorityPillText, { color: pb.text }]}>{priorityLabel(t, pr)}</Text>
                   </View>
                 </View>
                 <TouchableOpacity onPress={() => tid && toggleExpanded(tid)} hitSlop={8} style={styles.chevronHit}>
@@ -1491,10 +1494,10 @@ export default function TasksScreen() {
                 <View style={styles.cardExpanded}>
                   <View style={styles.expandedHead}>
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.expandedTitle}>{item.title || 'Task'}</Text>
+                      <Text style={styles.expandedTitle}>{item.title || t('tasks.taskFallback')}</Text>
                       <View style={styles.expandedMetaRow}>
                         <View style={[styles.priorityPill, styles.priorityPillSm, { backgroundColor: pb.bg, borderColor: pb.border }]}>
-                          <Text style={[styles.priorityPillText, { color: pb.text }]}>{pr}</Text>
+                          <Text style={[styles.priorityPillText, { color: pb.text }]}>{priorityLabel(t, pr)}</Text>
                         </View>
                         <View
                           style={[
@@ -1521,7 +1524,7 @@ export default function TasksScreen() {
                                   : styles.statusPillTextPending
                             }
                           >
-                            {taskStatusLabel(item)}
+                            {localizedTaskStatusForItem(t, item)}
                           </Text>
                         </View>
                       </View>
@@ -1531,38 +1534,38 @@ export default function TasksScreen() {
                   <View style={styles.actionRow}>
                     <TouchableOpacity style={styles.actionOutlineBtn} onPress={() => openAssign(item)} activeOpacity={0.85}>
                       <MaterialCommunityIcons name="account-outline" size={18} color="#475569" />
-                      <Text style={styles.actionOutlineText}>Assign</Text>
+                      <Text style={styles.actionOutlineText}>{t('tasks.assignment.assign')}</Text>
                     </TouchableOpacity>
                     <TouchableOpacity style={styles.actionOutlineBtn} onPress={() => openEdit(item)} activeOpacity={0.85}>
                       <MaterialCommunityIcons name="pencil-outline" size={18} color="#475569" />
-                      <Text style={styles.actionOutlineText}>Edit</Text>
+                      <Text style={styles.actionOutlineText}>{t('common.edit')}</Text>
                     </TouchableOpacity>
                     <TouchableOpacity style={styles.actionOutlineBtn} onPress={() => openSubtask(item)} activeOpacity={0.85}>
-                      <Text style={styles.actionOutlineText}>+ Add Subtask</Text>
+                      <Text style={styles.actionOutlineText}>+ {t('tasks.addSubtask')}</Text>
                     </TouchableOpacity>
                     {!itemDone ? (
                       <TouchableOpacity style={styles.markDoneBtn} onPress={() => toggleComplete(item)} activeOpacity={0.9}>
                         <MaterialCommunityIcons name="check" size={18} color="#fff" />
-                        <Text style={styles.markDoneText}>Mark Complete</Text>
+                        <Text style={styles.markDoneText}>{t('tasks.markComplete')}</Text>
                       </TouchableOpacity>
                     ) : null}
                   </View>
 
-                  <Text style={styles.notesLabel}>Notes</Text>
+                  <Text style={styles.notesLabel}>{t('tasks.notes')}</Text>
                   <View style={styles.notesBox}>
                     {notes ? (
                       <Text style={styles.notesBody}>{notes}</Text>
                     ) : (
                       <View style={styles.notesPlaceholderRow}>
                         <MaterialCommunityIcons name="text-box-outline" size={20} color="#94a3b8" />
-                        <Text style={styles.notesPlaceholder}>No notes</Text>
+                        <Text style={styles.notesPlaceholder}>{t('tasks.noNotes')}</Text>
                       </View>
                     )}
                   </View>
 
                   {subs.length > 0 ? (
                     <View style={styles.subtasksBlock}>
-                      <Text style={styles.subtasksTitle}>Subtasks ({subs.length})</Text>
+                      <Text style={styles.subtasksTitle}>{t('tasks.subtasks', { count: subs.length })}</Text>
                       {subs.map((st, si) => (
                         <View key={eventId(st) || `sub-${si}`} style={styles.subtaskRow}>
                           <MaterialCommunityIcons
@@ -1570,7 +1573,9 @@ export default function TasksScreen() {
                             size={18}
                             color={taskIsCompleted(st) ? '#22c55e' : '#94a3b8'}
                           />
-                          <Text style={[styles.subtaskTitle, taskIsCompleted(st) && styles.taskTitleDone]}>{st.title || 'Subtask'}</Text>
+                          <Text style={[styles.subtaskTitle, taskIsCompleted(st) && styles.taskTitleDone]}>
+                            {st.title || t('tasks.subtaskFallback')}
+                          </Text>
                         </View>
                       ))}
                     </View>
@@ -1578,7 +1583,7 @@ export default function TasksScreen() {
 
                   <TouchableOpacity style={styles.deleteTaskRow} onPress={() => deleteTask(item)} activeOpacity={0.8}>
                     <MaterialCommunityIcons name="trash-can-outline" size={20} color="#dc2626" />
-                    <Text style={styles.deleteTaskText}>Delete Task</Text>
+                    <Text style={styles.deleteTaskText}>{t('tasks.deleteTask')}</Text>
                   </TouchableOpacity>
                 </View>
               ) : null}
@@ -1632,8 +1637,8 @@ export default function TasksScreen() {
               <Pressable style={styles.createModalBox} onPress={(e) => e.stopPropagation?.()}>
                 <View style={styles.createModalHeader}>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.createModalTitle}>Create New Task</Text>
-                  <Text style={styles.createModalSubtitle}>Add a new task to your calendar. Fill in the details below.</Text>
+                  <Text style={styles.createModalTitle}>{t('tasks.createNewTask')}</Text>
+                  <Text style={styles.createModalSubtitle}>{t('tasks.createModalSubtitle')}</Text>
                 </View>
                 <TouchableOpacity
                   onPress={() => {
@@ -1649,19 +1654,19 @@ export default function TasksScreen() {
 
               {showCreateOrgCompany ? (
                   <>
-                    <Text style={styles.fieldLabel}>Organization *</Text>
+                    <Text style={styles.fieldLabel}>{t('tasks.organization')} *</Text>
                     <TouchableOpacity
                       style={styles.selectField}
                       onPress={() => setCreatePicker('organization')}
                       activeOpacity={0.85}
                     >
                       <Text style={styles.selectFieldText} numberOfLines={1}>
-                        {labelFor(createOrgOptions, createOrgId, 'Select organization')}
+                        {labelFor(createOrgOptions, createOrgId, t('tasks.selectOrganization'))}
                       </Text>
                       <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                     </TouchableOpacity>
 
-                    <Text style={styles.fieldLabel}>Company *</Text>
+                    <Text style={styles.fieldLabel}>{t('tasks.company')} *</Text>
                     <TouchableOpacity
                       style={styles.selectField}
                       onPress={() => setCreatePicker('company')}
@@ -1672,55 +1677,57 @@ export default function TasksScreen() {
                         style={[styles.selectFieldText, !createOrgId && styles.selectFieldTextDisabled]}
                         numberOfLines={1}
                       >
-                        {labelFor(createCompanyOptions, createCompanyId, 'Select company')}
+                        {labelFor(createCompanyOptions, createCompanyId, t('tasks.selectCompany'))}
                       </Text>
                       <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                     </TouchableOpacity>
                   </>
                 ) : null}
 
-                <Text style={styles.fieldLabel}>Assign to User</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.assignment.assignToUser')}</Text>
                 <TouchableOpacity style={styles.selectField} onPress={() => setCreatePicker('assign')} activeOpacity={0.85}>
                   <Text style={styles.selectFieldText} numberOfLines={1}>
-                    {labelFor(assignCreateOptions, createAssignKey, 'Assign to myself')}
+                    {labelFor(assignCreateOptions, createAssignKey, t('tasks.assignment.assignToMyself'))}
                   </Text>
                   <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                 </TouchableOpacity>
 
-                <Text style={styles.fieldLabel}>Title *</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.titleLabel')} *</Text>
                 <TextInput
                   style={styles.input}
                   value={newTitle}
                   onChangeText={setNewTitle}
-                  placeholder="Enter task title"
+                  placeholder={t('checklistTemplates.taskTitlePlaceholder')}
                   placeholderTextColor="#94a3b8"
                 />
 
-                <Text style={styles.fieldLabel}>Description</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.description')}</Text>
                 <TextInput
                   style={[styles.input, styles.textArea]}
                   value={newDescription}
                   onChangeText={setNewDescription}
-                  placeholder="Enter task description"
+                  placeholder={t('checklistTemplates.taskDescriptionPlaceholder')}
                   placeholderTextColor="#94a3b8"
                   multiline
                   textAlignVertical="top"
                 />
 
-                <Text style={styles.fieldLabel}>Priority</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.priorityLabel')}</Text>
                 <TouchableOpacity style={styles.selectField} onPress={() => setCreatePicker('priority')} activeOpacity={0.85}>
-                  <Text style={styles.selectFieldText}>{labelFor(createPriorityOptions, createPriority, 'Medium')}</Text>
+                  <Text style={styles.selectFieldText}>
+                    {labelFor(createPriorityOptions, createPriority, priorityLabel(t, 'medium'))}
+                  </Text>
                   <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                 </TouchableOpacity>
 
                 <View style={styles.switchRow}>
-                  <Text style={styles.fieldLabel}>All day</Text>
+                  <Text style={styles.fieldLabel}>{t('tasks.allDay')}</Text>
                   <Switch value={allDay} onValueChange={setAllDay} trackColor={{ false: '#e2e8f0', true: '#93c5fd' }} thumbColor={allDay ? '#2563eb' : '#f4f4f5'} />
                 </View>
 
                 {allDay ? (
                   <>
-                    <Text style={styles.fieldLabel}>Date</Text>
+                    <Text style={styles.fieldLabel}>{t('tasks.date')}</Text>
                     <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setCreatePicker('start')} activeOpacity={0.85}>
                       <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(startStr) && styles.datetimeTriggerPh]}>
                         {displayLocalFromStr(startStr) || 'dd-mm-yyyy --:--'}
@@ -1730,7 +1737,7 @@ export default function TasksScreen() {
                   </>
                 ) : (
                   <>
-                    <Text style={styles.fieldLabel}>Start Time</Text>
+                    <Text style={styles.fieldLabel}>{t('tasks.startTime')}</Text>
                     <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setCreatePicker('start')} activeOpacity={0.85}>
                       <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(startStr) && styles.datetimeTriggerPh]}>
                         {displayLocalFromStr(startStr) || 'dd-mm-yyyy --:--'}
@@ -1738,7 +1745,7 @@ export default function TasksScreen() {
                       <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
                     </TouchableOpacity>
 
-                    <Text style={styles.fieldLabel}>End Time</Text>
+                    <Text style={styles.fieldLabel}>{t('tasks.endTime')}</Text>
                     <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setCreatePicker('end')} activeOpacity={0.85}>
                       <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(endStr) && styles.datetimeTriggerPh]}>
                         {displayLocalFromStr(endStr) || 'dd-mm-yyyy --:--'}
@@ -1756,10 +1763,10 @@ export default function TasksScreen() {
                       setModalOpen(false);
                     }}
                   >
-                    <Text style={styles.cancelOutlineText}>Cancel</Text>
+                    <Text style={styles.cancelOutlineText}>{t('common.cancel')}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={[styles.saveButton, saving && styles.disabled]} onPress={() => void createTask()} disabled={saving}>
-                    <Text style={styles.saveButtonText}>{saving ? 'Saving…' : 'Create Task'}</Text>
+                    <Text style={styles.saveButtonText}>{saving ? t('common.saving') : t('tasks.createTask')}</Text>
                   </TouchableOpacity>
                 </View>
               </Pressable>
@@ -1779,7 +1786,7 @@ export default function TasksScreen() {
                   {createPicker === 'start' || createPicker === 'end' ? (
                     <>
                       <Text style={styles.createModalPickerTitle}>
-                        {createPicker === 'start' ? 'Start time' : 'End time'}
+                        {createPicker === 'start' ? t('tasks.startTime') : t('tasks.endTime')}
                       </Text>
                       <TaskDueDateTimePanel
                         key={createPicker}
@@ -1797,12 +1804,12 @@ export default function TasksScreen() {
                     <>
                       <Text style={styles.createModalPickerTitle}>
                         {createPicker === 'assign'
-                          ? 'Assign to User'
+                          ? t('tasks.assignment.assignToUser')
                           : createPicker === 'organization'
-                            ? 'Organization'
+                            ? t('tasks.organization')
                             : createPicker === 'company'
-                              ? 'Company'
-                              : 'Priority'}
+                              ? t('tasks.company')
+                              : t('tasks.priorityLabel')}
                       </Text>
                       <FlatList
                         data={
@@ -1888,8 +1895,8 @@ export default function TasksScreen() {
               <Pressable style={styles.createModalBox} onPress={(e) => e.stopPropagation?.()}>
                 <View style={styles.createModalHeader}>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.createModalTitle}>Edit Task</Text>
-                    <Text style={styles.createModalSubtitle}>Update the task details below.</Text>
+                    <Text style={styles.createModalTitle}>{t('tasks.editTask')}</Text>
+                    <Text style={styles.createModalSubtitle}>{t('tasks.editModalSubtitle')}</Text>
                   </View>
                   <TouchableOpacity
                     onPress={() => {
@@ -1903,34 +1910,36 @@ export default function TasksScreen() {
                   </TouchableOpacity>
                 </View>
 
-                <Text style={styles.fieldLabel}>Title</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.titleLabel')}</Text>
                 <TextInput
                   style={styles.input}
                   value={editTitle}
                   onChangeText={setEditTitle}
-                  placeholder="Task title"
+                  placeholder={t('checklistTemplates.taskTitle')}
                   placeholderTextColor="#94a3b8"
                 />
 
-                <Text style={styles.fieldLabel}>Description</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.description')}</Text>
                 <TextInput
                   style={[styles.input, styles.textArea]}
                   value={editDescription}
                   onChangeText={setEditDescription}
-                  placeholder="Description"
+                  placeholder={t('tasks.description')}
                   placeholderTextColor="#94a3b8"
                   multiline
                   textAlignVertical="top"
                 />
 
-                <Text style={styles.fieldLabel}>Priority</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.priorityLabel')}</Text>
                 <TouchableOpacity style={styles.selectField} onPress={() => setEditPicker('priority')} activeOpacity={0.85}>
-                  <Text style={styles.selectFieldText}>{labelFor(createPriorityOptions, editPriority, 'Medium')}</Text>
+                  <Text style={styles.selectFieldText}>
+                    {labelFor(createPriorityOptions, editPriority, priorityLabel(t, 'medium'))}
+                  </Text>
                   <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                 </TouchableOpacity>
 
                 <View style={styles.switchRow}>
-                  <Text style={styles.fieldLabel}>All day</Text>
+                  <Text style={styles.fieldLabel}>{t('tasks.allDay')}</Text>
                   <Switch
                     value={editAllDay}
                     onValueChange={setEditAllDay}
@@ -1941,7 +1950,7 @@ export default function TasksScreen() {
 
                 {editAllDay ? (
                   <>
-                    <Text style={styles.fieldLabel}>Date</Text>
+                    <Text style={styles.fieldLabel}>{t('tasks.date')}</Text>
                     <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setEditPicker('start')} activeOpacity={0.85}>
                       <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(editStartStr) && styles.datetimeTriggerPh]}>
                         {displayLocalFromStr(editStartStr) || 'dd-mm-yyyy --:--'}
@@ -1951,7 +1960,7 @@ export default function TasksScreen() {
                   </>
                 ) : (
                   <>
-                    <Text style={styles.fieldLabel}>Start Time</Text>
+                    <Text style={styles.fieldLabel}>{t('tasks.startTime')}</Text>
                     <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setEditPicker('start')} activeOpacity={0.85}>
                       <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(editStartStr) && styles.datetimeTriggerPh]}>
                         {displayLocalFromStr(editStartStr) || 'dd-mm-yyyy --:--'}
@@ -1959,7 +1968,7 @@ export default function TasksScreen() {
                       <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
                     </TouchableOpacity>
 
-                    <Text style={styles.fieldLabel}>End Time</Text>
+                    <Text style={styles.fieldLabel}>{t('tasks.endTime')}</Text>
                     <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setEditPicker('end')} activeOpacity={0.85}>
                       <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(editEndStr) && styles.datetimeTriggerPh]}>
                         {displayLocalFromStr(editEndStr) || 'dd-mm-yyyy --:--'}
@@ -1977,14 +1986,14 @@ export default function TasksScreen() {
                       setEditTask(null);
                     }}
                   >
-                    <Text style={styles.cancelOutlineText}>Cancel</Text>
+                    <Text style={styles.cancelOutlineText}>{t('common.cancel')}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.saveButton, editSaving && styles.disabled]}
                     onPress={() => void submitEdit()}
                     disabled={editSaving}
                   >
-                    <Text style={styles.saveButtonText}>{editSaving ? 'Saving…' : 'Update Task'}</Text>
+                    <Text style={styles.saveButtonText}>{editSaving ? t('common.saving') : t('tasks.updateTask')}</Text>
                   </TouchableOpacity>
                 </View>
               </Pressable>
@@ -2003,7 +2012,7 @@ export default function TasksScreen() {
                   {editPicker === 'start' || editPicker === 'end' ? (
                     <>
                       <Text style={styles.createModalPickerTitle}>
-                        {editPicker === 'start' ? 'Start time' : 'End time'}
+                        {editPicker === 'start' ? t('tasks.startTime') : t('tasks.endTime')}
                       </Text>
                       <TaskDueDateTimePanel
                         key={editPicker}
@@ -2019,7 +2028,7 @@ export default function TasksScreen() {
                     </>
                   ) : (
                     <>
-                      <Text style={styles.createModalPickerTitle}>Priority</Text>
+                      <Text style={styles.createModalPickerTitle}>{t('tasks.priorityLabel')}</Text>
                       <FlatList
                         data={createPriorityOptions}
                         keyExtractor={(i) => i.id}
@@ -2077,8 +2086,8 @@ export default function TasksScreen() {
               <Pressable style={styles.createModalBox} onPress={(e) => e.stopPropagation?.()}>
                 <View style={styles.createModalHeader}>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.createModalTitle}>Assign Task to User</Text>
-                    <Text style={styles.createModalSubtitle}>Select a user to assign this task to</Text>
+                    <Text style={styles.createModalTitle}>{t('tasks.assignTask')}</Text>
+                    <Text style={styles.createModalSubtitle}>{t('tasks.validation.selectUser')}</Text>
                   </View>
                   <TouchableOpacity
                     onPress={() => {
@@ -2092,14 +2101,14 @@ export default function TasksScreen() {
                   </TouchableOpacity>
                 </View>
 
-                <Text style={styles.fieldLabel}>Current Assignment</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.assignment.assignmentStatus')}</Text>
                 <View style={styles.assignCurrentBox}>
                   <Text style={styles.assignCurrentText}>
                     {assignTask ? currentAssigneeName(assignTask) : '—'}
                   </Text>
                 </View>
 
-                <Text style={styles.fieldLabel}>Assign to User</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.assignment.assignToUser')}</Text>
                 <TouchableOpacity
                   style={styles.selectField}
                   onPress={() => setAssignUserPicker(true)}
@@ -2108,7 +2117,7 @@ export default function TasksScreen() {
                   <Text style={[styles.selectFieldText, !assignToId && styles.datetimeTriggerPh]} numberOfLines={1}>
                     {assignToId
                       ? labelFor(assignMemberPickOptions, assignToId, assignToId)
-                      : 'Select a user...'}
+                      : `${t('tasks.validation.selectUser')}...`}
                   </Text>
                   <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                 </TouchableOpacity>
@@ -2121,14 +2130,14 @@ export default function TasksScreen() {
                       setAssignTask(null);
                     }}
                   >
-                    <Text style={styles.cancelOutlineText}>Cancel</Text>
+                    <Text style={styles.cancelOutlineText}>{t('common.cancel')}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.saveButton, assignSaving && styles.disabled]}
                     onPress={() => void submitAssign()}
                     disabled={assignSaving}
                   >
-                    <Text style={styles.saveButtonText}>{assignSaving ? 'Saving…' : 'Assign Task'}</Text>
+                    <Text style={styles.saveButtonText}>{assignSaving ? t('common.saving') : t('tasks.assignTask')}</Text>
                   </TouchableOpacity>
                 </View>
               </Pressable>
@@ -2138,7 +2147,7 @@ export default function TasksScreen() {
               <View style={[styles.createModalPickerLayer, { pointerEvents: 'box-none' }]}>
                 <Pressable style={StyleSheet.absoluteFill} onPress={() => setAssignUserPicker(false)} />
                 <View style={[styles.createModalPickerBox, { pointerEvents: 'auto' }]}>
-                  <Text style={styles.createModalPickerTitle}>Assign to User</Text>
+                  <Text style={styles.createModalPickerTitle}>{t('tasks.assignment.assignToUser')}</Text>
                   <FlatList
                     data={assignMemberPickOptions}
                     keyExtractor={(i) => i.id}
@@ -2198,9 +2207,9 @@ export default function TasksScreen() {
               <Pressable style={styles.createModalBox} onPress={(e) => e.stopPropagation?.()}>
                 <View style={styles.createModalHeader}>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.createModalTitle}>Create Sub Task</Text>
+                    <Text style={styles.createModalTitle}>{t('tasks.createSubTask')}</Text>
                     <Text style={styles.createModalSubtitle}>
-                      Add a sub-task to {subtaskParent?.title || subtaskParent?.name || 'task'}
+                      {t('tasks.createSubTask')}: {subtaskParent?.title || subtaskParent?.name || t('tasks.taskFallback')}
                     </Text>
                   </View>
                   <TouchableOpacity
@@ -2215,42 +2224,44 @@ export default function TasksScreen() {
                   </TouchableOpacity>
                 </View>
 
-                <Text style={styles.fieldLabel}>Assign to User</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.assignment.assignToUser')}</Text>
                 <TouchableOpacity style={styles.selectField} onPress={() => setSubPicker('assign')} activeOpacity={0.85}>
                   <Text style={styles.selectFieldText} numberOfLines={1}>
-                    {labelFor(subtaskAssignOptions, subAssignKey, 'Same as parent task')}
+                    {labelFor(subtaskAssignOptions, subAssignKey, t('tasks.assignment.sameAsParent'))}
                   </Text>
                   <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                 </TouchableOpacity>
 
-                <Text style={styles.fieldLabel}>Title *</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.titleLabel')} *</Text>
                 <TextInput
                   style={styles.input}
                   value={subTitle}
                   onChangeText={setSubTitle}
-                  placeholder="Enter sub-task title"
+                  placeholder={t('checklistTemplates.taskTitlePlaceholder')}
                   placeholderTextColor="#94a3b8"
                 />
 
-                <Text style={styles.fieldLabel}>Description</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.description')}</Text>
                 <TextInput
                   style={[styles.input, styles.textArea]}
                   value={subDescription}
                   onChangeText={setSubDescription}
-                  placeholder="Enter sub-task description"
+                  placeholder={t('checklistTemplates.taskDescriptionPlaceholder')}
                   placeholderTextColor="#94a3b8"
                   multiline
                   textAlignVertical="top"
                 />
 
-                <Text style={styles.fieldLabel}>Priority</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.priorityLabel')}</Text>
                 <TouchableOpacity style={styles.selectField} onPress={() => setSubPicker('priority')} activeOpacity={0.85}>
-                  <Text style={styles.selectFieldText}>{labelFor(createPriorityOptions, subPriority, 'Medium')}</Text>
+                  <Text style={styles.selectFieldText}>
+                    {labelFor(createPriorityOptions, subPriority, priorityLabel(t, 'medium'))}
+                  </Text>
                   <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                 </TouchableOpacity>
 
                 <View style={styles.switchRow}>
-                  <Text style={styles.fieldLabel}>All day</Text>
+                  <Text style={styles.fieldLabel}>{t('tasks.allDay')}</Text>
                   <Switch
                     value={subAllDay}
                     onValueChange={setSubAllDay}
@@ -2261,7 +2272,7 @@ export default function TasksScreen() {
 
                 {subAllDay ? (
                   <>
-                    <Text style={styles.fieldLabel}>Date</Text>
+                    <Text style={styles.fieldLabel}>{t('tasks.date')}</Text>
                     <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setSubPicker('start')} activeOpacity={0.85}>
                       <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(subStartStr) && styles.datetimeTriggerPh]}>
                         {displayLocalFromStr(subStartStr) || 'dd-mm-yyyy --:--'}
@@ -2271,7 +2282,7 @@ export default function TasksScreen() {
                   </>
                 ) : (
                   <>
-                    <Text style={styles.fieldLabel}>Start Time</Text>
+                    <Text style={styles.fieldLabel}>{t('tasks.startTime')}</Text>
                     <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setSubPicker('start')} activeOpacity={0.85}>
                       <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(subStartStr) && styles.datetimeTriggerPh]}>
                         {displayLocalFromStr(subStartStr) || 'dd-mm-yyyy --:--'}
@@ -2279,7 +2290,7 @@ export default function TasksScreen() {
                       <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
                     </TouchableOpacity>
 
-                    <Text style={styles.fieldLabel}>End Time</Text>
+                    <Text style={styles.fieldLabel}>{t('tasks.endTime')}</Text>
                     <TouchableOpacity style={styles.datetimeTrigger} onPress={() => setSubPicker('end')} activeOpacity={0.85}>
                       <Text style={[styles.datetimeTriggerText, !displayLocalFromStr(subEndStr) && styles.datetimeTriggerPh]}>
                         {displayLocalFromStr(subEndStr) || 'dd-mm-yyyy --:--'}
@@ -2297,14 +2308,14 @@ export default function TasksScreen() {
                       setSubtaskParent(null);
                     }}
                   >
-                    <Text style={styles.cancelOutlineText}>Cancel</Text>
+                    <Text style={styles.cancelOutlineText}>{t('common.cancel')}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.saveButton, subSaving && styles.disabled]}
                     onPress={() => void submitSubtask()}
                     disabled={subSaving}
                   >
-                    <Text style={styles.saveButtonText}>{subSaving ? 'Saving…' : 'Create Sub Task'}</Text>
+                    <Text style={styles.saveButtonText}>{subSaving ? t('common.saving') : t('tasks.createSubTask')}</Text>
                   </TouchableOpacity>
                 </View>
               </Pressable>
@@ -2323,7 +2334,7 @@ export default function TasksScreen() {
                   {subPicker === 'start' || subPicker === 'end' ? (
                     <>
                       <Text style={styles.createModalPickerTitle}>
-                        {subPicker === 'start' ? 'Start time' : 'End time'}
+                        {subPicker === 'start' ? t('tasks.startTime') : t('tasks.endTime')}
                       </Text>
                       <TaskDueDateTimePanel
                         key={subPicker}
@@ -2340,7 +2351,7 @@ export default function TasksScreen() {
                   ) : (
                     <>
                       <Text style={styles.createModalPickerTitle}>
-                        {subPicker === 'assign' ? 'Assign to User' : 'Priority'}
+                        {subPicker === 'assign' ? t('tasks.assignment.assignToUser') : t('tasks.priorityLabel')}
                       </Text>
                       <FlatList
                         data={subPicker === 'assign' ? subtaskAssignOptions : createPriorityOptions}

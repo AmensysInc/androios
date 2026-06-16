@@ -1,6 +1,13 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import PlaceholderScreen from '../components/PlaceholderScreen';
 
 export default function OrganizationDashboard() {
-  return <PlaceholderScreen title="Organization Dashboard" subtitle="Same API as web." />;
+  const { t } = useTranslation();
+  return (
+    <PlaceholderScreen
+      title={t('roles.organizationManager')}
+      subtitle={t('superAdminDashboard.subtitle')}
+    />
+  );
 }

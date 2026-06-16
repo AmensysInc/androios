@@ -11,6 +11,7 @@ import {
   Image,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
+import { useTranslation } from 'react-i18next';
 import * as ImagePicker from 'expo-image-picker';
 import * as api from '../../api';
 import type { MotelRoomRow } from '../../api';
@@ -18,7 +19,7 @@ import { HttpError } from '../../lib/api-client';
 import { useAuth } from '../../context/AuthContext';
 import { useHotelCleaningAccess } from '../../hooks/useHotelCleaningAccess';
 import { getPrimaryRoleFromUser } from '../../types/auth';
-import { recordLooksMotelRow } from '../../lib/motelEmployeeAccess';
+import { companyQualifiesForMotelHotel } from '../../lib/motelEmployeeAccess';
 import HotelAdminRoomsView from './HotelAdminRoomsView';
 
 function companyRowOrganizationId(c: Record<string, any> | null | undefined): string {
@@ -39,6 +40,7 @@ function roomLabel(row: MotelRoomRow): string {
 }
 
 export default function HotelCleaningScreen() {
+  const { t } = useTranslation();
   const { user, role, isLoading } = useAuth();
   const navigation = useNavigation();
   const effectiveRole = useMemo(() => role ?? getPrimaryRoleFromUser(user as any), [role, user]);
@@ -66,55 +68,57 @@ export default function HotelCleaningScreen() {
   const [images, setImages] = useState<ImagePicker.ImagePickerAsset[]>([]);
   const [submitBusy, setSubmitBusy] = useState(false);
 
-  const loadRooms = useCallback(async (companyId?: string) => {
-    setError(null);
-    const cid = String(companyId ?? '').trim();
-    const paramSets: Array<Record<string, any> | undefined> = [];
-    if (cid) {
-      paramSets.push(
-        { company_id: cid },
-        { company: cid },
-        { companyId: cid },
-        { company__id: cid },
-        { scheduler_company: cid },
-        { scheduler_company_id: cid }
-      );
-    }
-    /** Session / RBAC-scoped list (some backends ignore query for company managers). */
-    paramSets.push(undefined);
+  const loadRooms = useCallback(
+    async (companyId?: string) => {
+      setError(null);
+      const cid = String(companyId ?? '').trim();
 
-    const roomsWithUuid = (arr: MotelRoomRow[]) =>
-      arr.filter((r) => Boolean(api.pickMotelRoomUuidId(r as any)));
-
-    let lastErr: any = null;
-    let lastEmptyOk: MotelRoomRow[] | null = null;
-    for (const params of paramSets) {
-      try {
-        const list = await api.getMotelRooms(params);
-        const arr = Array.isArray(list) ? list : [];
-        const ok = roomsWithUuid(arr);
-        if (ok.length > 0) {
-          setRooms(ok);
+      if (variant === 'admin_rooms') {
+        if (!cid) {
+          setRooms([]);
           return;
         }
-        if (lastEmptyOk === null) lastEmptyOk = arr;
-      } catch (e: any) {
-        lastErr = e;
+        const list = await api.getMotelRoomsForCompany(cid);
+        setRooms(Array.isArray(list) ? list : []);
+        return;
       }
-    }
-    if (lastEmptyOk) {
-      setRooms(roomsWithUuid(lastEmptyOk));
-      return;
-    }
-    throw lastErr || new Error('Could not load rooms');
-  }, []);
+
+      let list: MotelRoomRow[] = [];
+      try {
+        const scoped = await api.getMotelRooms();
+        list = Array.isArray(scoped) ? scoped : [];
+      } catch (e: any) {
+        if (!cid) throw e;
+      }
+
+      if (list.length === 0 && cid) {
+        list = await api.getMotelRoomsForCompany(cid);
+      }
+
+      if (list.length === 0 && user) {
+        for (const hint of api.companyIdHintsFromAuthUser(user)) {
+          const h = String(hint ?? '').trim();
+          if (!h) continue;
+          try {
+            const batch = await api.getMotelRoomsForCompany(h);
+            if (batch.length > 0) {
+              list = batch;
+              break;
+            }
+          } catch {
+            /* try next hint */
+          }
+        }
+      }
+
+      setRooms(list);
+    },
+    [variant, user]
+  );
 
   useEffect(() => {
     if (!resolved) return;
     if (!allowed) {
-      if (typeof __DEV__ !== 'undefined' && __DEV__) {
-        console.log('[Hotel] Access blocked (screen)');
-      }
       try {
         (navigation as any).goBack();
       } catch {
@@ -133,51 +137,49 @@ export default function HotelCleaningScreen() {
       setLoading(true);
       try {
         if (variant === 'admin_rooms') {
-          const [orgsRaw, compsRaw] = await Promise.all([
-            api.getOrganizations().catch(() => []),
-            api.getCompanies().catch(() => []),
-          ]);
-          const orgs = Array.isArray(orgsRaw) ? orgsRaw : [];
-          const motelOrgIds = new Set(
-            orgs
-              .filter((o: any) => recordLooksMotelRow(o))
-              .map((o: any) => String(o?.id ?? '').trim())
-              .filter(Boolean)
-          );
+          const compsRaw = await api.getCompanies().catch(() => []);
           const mapped = (Array.isArray(compsRaw) ? compsRaw : []).map((c: any) => ({
             id: String(c?.id ?? c?.pk ?? c?.uuid ?? '').trim(),
             name: String(c?.name ?? '—'),
             raw: c,
           }));
-          const underMotels = mapped.filter((c) => {
-            const oid = companyRowOrganizationId(c.raw);
-            if (oid && motelOrgIds.has(oid)) return true;
-            const nested = c.raw?.organization;
-            return nested && typeof nested === 'object' && recordLooksMotelRow(nested);
-          });
 
-          /**
-           * Company managers often get an empty `/scheduler/organizations/` list; `underMotels` then
-           * drops every row. Fall back to RBAC-scoped companies from `/scheduler/companies/` before
-           * applying the manager filter (same idea as `useHotelCleaningAccess`).
-           */
-          let pool =
-            effectiveRole === 'company_manager' && underMotels.length === 0 ? mapped : underMotels;
+          /** Match web Rooms page: filter by company type (motel/hotel), not parent org name alone. */
+          let pool = mapped.filter((c) => companyQualifiesForMotelHotel(c.raw));
 
-          let scoped = pool;
           if (effectiveRole === 'organization_manager' && authOrgId) {
-            scoped = scoped.filter((c) => companyRowOrganizationId(c.raw) === authOrgId);
+            pool = pool.filter((c) => companyRowOrganizationId(c.raw) === authOrgId);
           }
           if (effectiveRole === 'company_manager' && user?.id) {
-            const raws = scoped.map((x) => x.raw);
-            const filtered = api.filterCompaniesForCompanyManagerRole(raws, 'company_manager', user.id);
+            const raws = pool.map((x) => x.raw);
+            const filtered = api.filterCompaniesStrictlyForCompanyManager(raws, user.id);
+            const assignee =
+              filtered.length > 0
+                ? filtered
+                : api.filterCompaniesForCompanyManagerRole(raws, 'company_manager', user.id);
             const allowedIds = new Set(
-              filtered.map((c: any) => String(c?.id ?? c?.pk ?? c?.uuid ?? '').trim()).filter(Boolean)
+              assignee.map((c: any) => String(c?.id ?? c?.pk ?? c?.uuid ?? '').trim()).filter(Boolean)
             );
-            scoped = scoped.filter((c) => allowedIds.has(c.id));
+            pool = pool.filter((c) => allowedIds.has(c.id));
           }
 
-          const list = scoped.map(({ id, name }) => ({ id, name }));
+          if (pool.length === 0 && effectiveRole === 'company_manager' && user) {
+            for (const hint of api.companyIdHintsFromAuthUser(user)) {
+              const h = String(hint ?? '').trim();
+              if (!h) continue;
+              const hit = mapped.find((c) => c.id === h);
+              if (hit && companyQualifiesForMotelHotel(hit.raw)) {
+                pool = [hit];
+                break;
+              }
+              if (h) {
+                pool = [{ id: h, name: String(hit?.name ?? 'My property'), raw: hit?.raw ?? { id: h } }];
+                break;
+              }
+            }
+          }
+
+          const list = pool.map(({ id, name }) => ({ id, name }));
           if (!cancelled) setCompanies(list);
           const defaultId =
             selectedCompanyId && list.some((x) => x.id === selectedCompanyId)
@@ -193,7 +195,7 @@ export default function HotelCleaningScreen() {
           await loadRooms();
         }
       } catch (e: any) {
-        if (!cancelled) setError(e?.message || 'Could not load rooms');
+        if (!cancelled) setError(e?.message || t('housekeeping.couldNotLoadRooms'));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -226,7 +228,7 @@ export default function HotelCleaningScreen() {
         await loadRooms();
       }
     } catch (e: any) {
-      setError(e?.message || 'Could not load rooms');
+      setError(e?.message || t('housekeeping.couldNotLoadRooms'));
     } finally {
       setRefreshing(false);
     }
@@ -244,7 +246,7 @@ export default function HotelCleaningScreen() {
       try {
         await loadRooms(cid);
       } catch (e: any) {
-        setError(e?.message || 'Could not load rooms');
+        setError(e?.message || t('housekeeping.couldNotLoadRooms'));
       } finally {
         setLoading(false);
       }
@@ -254,18 +256,15 @@ export default function HotelCleaningScreen() {
 
   const startCleaning = async (roomId: string) => {
     if (sessionId && activeRoomId && activeRoomId !== roomId) {
-      Alert.alert('Cleaning in progress', 'Finish or complete the current room first.');
+      Alert.alert(t('housekeeping.cleaningInProgress'), t('housekeeping.finishCurrentRoomFirst'));
       return;
     }
     setStartBusy(true);
     try {
-      if (typeof __DEV__ !== 'undefined' && __DEV__) {
-        console.log('[HotelCleaning] start-cleaning room_id:', roomId);
-      }
       const res = (await api.startMotelCleaning(roomId)) as Record<string, any>;
       const sid = api.resolveMotelCleaningSessionId(res);
       if (!sid) {
-        Alert.alert('Start cleaning', 'Server did not return a session id.');
+        Alert.alert(t('housekeeping.workflow.startCleaning'), t('housekeeping.validation.sessionIdMissing'));
         return;
       }
       setActiveRoomId(roomId);
@@ -273,10 +272,7 @@ export default function HotelCleaningScreen() {
       setSeconds(0);
       setIsRunning(true);
     } catch (e: any) {
-      if (typeof __DEV__ !== 'undefined' && __DEV__) {
-        console.log('[HotelCleaning] start-cleaning ERROR:', e instanceof HttpError ? e.body : e?.message ?? e);
-      }
-      Alert.alert('Start cleaning', e?.message || 'Request failed');
+      Alert.alert(t('housekeeping.workflow.startCleaning'), e?.message || t('housekeeping.toast.requestFailed'));
     } finally {
       setStartBusy(false);
     }
@@ -284,7 +280,7 @@ export default function HotelCleaningScreen() {
 
   const openCompleteFlow = () => {
     if (!sessionId) {
-      Alert.alert('Complete', 'Start cleaning first.');
+      Alert.alert(t('housekeeping.workflow.completeCleaning'), t('housekeeping.validation.startCleaningFirst'));
       return;
     }
     setIsRunning(false);
@@ -295,7 +291,7 @@ export default function HotelCleaningScreen() {
   const pickImages = async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
-      Alert.alert('Photos', 'Photo library access is required to upload cleaning images.');
+      Alert.alert(t('housekeeping.photos.cleaningPhotos'), t('housekeeping.photos.libraryRequired'));
       return;
     }
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -309,11 +305,11 @@ export default function HotelCleaningScreen() {
 
   const submitCleaning = async () => {
     if (!sessionId) {
-      Alert.alert('Submit', 'Missing session.');
+      Alert.alert(t('common.submit'), t('housekeeping.validation.sessionMissing'));
       return;
     }
     if (!images.length) {
-      Alert.alert('Submit', 'Pick at least one image.');
+      Alert.alert(t('common.submit'), t('housekeeping.validation.pickOneImage'));
       return;
     }
     setSubmitBusy(true);
@@ -334,9 +330,15 @@ export default function HotelCleaningScreen() {
       setActiveRoomId(null);
       setSeconds(0);
       setIsRunning(false);
-      await loadRooms();
+      if (variant === 'admin_rooms') {
+        const cid = String(selectedCompanyId || '').trim();
+        if (cid) await loadRooms(cid);
+        else setRooms([]);
+      } else {
+        await loadRooms();
+      }
     } catch (e: any) {
-      Alert.alert('Submit', e?.message || 'Upload or complete failed');
+      Alert.alert(t('common.submit'), e?.message || t('housekeeping.toast.uploadFailed'));
     } finally {
       setSubmitBusy(false);
     }
@@ -351,7 +353,7 @@ export default function HotelCleaningScreen() {
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" />
-        <Text style={styles.loadingLabel}>Loading…</Text>
+        <Text style={styles.loadingLabel}>{t('common.loading')}</Text>
       </View>
     );
   }
@@ -360,7 +362,7 @@ export default function HotelCleaningScreen() {
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" />
-        <Text style={styles.loadingLabel}>Loading…</Text>
+        <Text style={styles.loadingLabel}>{t('common.loading')}</Text>
       </View>
     );
   }
@@ -368,7 +370,7 @@ export default function HotelCleaningScreen() {
   if (!allowed) {
     return (
       <View style={styles.centered}>
-        <Text style={styles.accessDenied}>Access Denied</Text>
+        <Text style={styles.accessDenied}>{t('housekeeping.accessDenied')}</Text>
       </View>
     );
   }
@@ -376,10 +378,14 @@ export default function HotelCleaningScreen() {
   if (uploadOpen && variant === 'employee_cleaning') {
     return (
       <View style={styles.container}>
-        <Text style={styles.uploadTitle}>Cleaning photos</Text>
-        <Text style={styles.hint}>Session: {sessionId}</Text>
+        <Text style={styles.uploadTitle}>{t('housekeeping.photos.cleaningPhotos')}</Text>
+        <Text style={styles.hint}>{t('housekeeping.session')}: {sessionId}</Text>
         <TouchableOpacity style={styles.btnPrimary} onPress={pickImages} disabled={submitBusy}>
-          <Text style={styles.btnPrimaryText}>{images.length ? `Selected ${images.length} photo(s)` : 'Pick images'}</Text>
+          <Text style={styles.btnPrimaryText}>
+            {images.length
+              ? t('housekeeping.photos.selectedPhotos', { count: images.length })
+              : t('housekeeping.photos.pickImages')}
+          </Text>
         </TouchableOpacity>
         {images.length > 0 ? (
           <ScrollView
@@ -400,10 +406,10 @@ export default function HotelCleaningScreen() {
           onPress={submitCleaning}
           disabled={submitBusy}
         >
-          {submitBusy ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnPrimaryText}>Submit</Text>}
+          {submitBusy ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnPrimaryText}>{t('common.submit')}</Text>}
         </TouchableOpacity>
         <TouchableOpacity style={styles.btnGhost} onPress={cancelUpload} disabled={submitBusy}>
-          <Text style={styles.btnGhostText}>Back to rooms</Text>
+          <Text style={styles.btnGhostText}>{t('housekeeping.backToRooms')}</Text>
         </TouchableOpacity>
       </View>
     );
@@ -440,7 +446,7 @@ export default function HotelCleaningScreen() {
   if (variant !== 'employee_cleaning') {
     return (
       <View style={styles.centered}>
-        <Text style={styles.accessDenied}>Access Denied</Text>
+        <Text style={styles.accessDenied}>{t('housekeeping.accessDenied')}</Text>
       </View>
     );
   }
@@ -452,7 +458,7 @@ export default function HotelCleaningScreen() {
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
     >
       {error ? <Text style={styles.errorText}>{error}</Text> : null}
-      {rooms.length === 0 && !error ? <Text style={styles.empty}>No rooms assigned.</Text> : null}
+      {rooms.length === 0 && !error ? <Text style={styles.empty}>{t('housekeeping.noRoomsAssigned')}</Text> : null}
       {rooms.map((row) => {
         const id = api.pickMotelRoomUuidId(row as any);
         const isActive = Boolean(id) && activeRoomId === id;
@@ -469,14 +475,14 @@ export default function HotelCleaningScreen() {
               onPress={() => id && startCleaning(id)}
               disabled={startBusy || Boolean(sessionId && !isActive) || !id}
             >
-              <Text style={styles.btnSecondaryText}>Start Cleaning</Text>
+              <Text style={styles.btnSecondaryText}>{t('housekeeping.workflow.startCleaning')}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.btnSecondary, (!isActive || !sessionId) && styles.btnDisabled]}
               onPress={openCompleteFlow}
               disabled={!isActive || !sessionId}
             >
-              <Text style={styles.btnSecondaryText}>Complete</Text>
+              <Text style={styles.btnSecondaryText}>{t('housekeeping.workflow.completeCleaning')}</Text>
             </TouchableOpacity>
           </View>
         );

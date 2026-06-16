@@ -163,7 +163,7 @@ async function verifyMotelContextForEmployee(merged: User): Promise<boolean> {
   const myCid = String(hints[0] ?? (merged as any).company_id ?? '').trim();
   if (myCid) {
     try {
-      const list = await api.getMotelRooms({ company: myCid });
+      const list = await api.getMotelRoomsForCompany(myCid);
       if (Array.isArray(list) && list.length > 0) return true;
     } catch {
       /* ignore */

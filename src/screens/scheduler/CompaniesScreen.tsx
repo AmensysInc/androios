@@ -16,10 +16,13 @@ import {
   KeyboardAvoidingView,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { useAuth } from '../../context/AuthContext';
 import { getPrimaryRoleFromUser } from '../../types/auth';
 import * as api from '../../api';
 import { recordLooksMotelRow } from '../../lib/motelEmployeeAccess';
+import { localizedEmployeeStatus } from '../../lib/i18nLabels';
 
 type Organization = { id: string; name: string; [k: string]: any };
 type Company = { id: string; name: string; organization_id?: string; company_manager_id?: string; [k: string]: any };
@@ -160,14 +163,15 @@ function employeeRowUserId(e: any): string {
   return '';
 }
 
-function assignedEmployeeDisplayName(e: any): string {
+function assignedEmployeeDisplayName(e: any, t: TFunction): string {
   const fn = String(e?.first_name ?? '').trim();
   const ln = String(e?.last_name ?? '').trim();
   if (fn || ln) return `${fn} ${ln}`.trim();
   const profile = e?.profile;
   const full = profile && typeof profile === 'object' ? String((profile as any).full_name ?? '').trim() : '';
   if (full) return full;
-  return String(e?.email ?? e?.username ?? 'Employee').trim() || 'Employee';
+  const fallback = t('common.employee');
+  return String(e?.email ?? e?.username ?? fallback).trim() || fallback;
 }
 
 function assignedEmployeesForCompany(rows: any[], companyId: string, excludeManagerUserId: string): any[] {
@@ -191,19 +195,19 @@ function isAssignedId(v: any): boolean {
   return true;
 }
 
-function getUserLabel(u: any): string {
+function getUserLabel(u: any, t: TFunction): string {
   const full = u?.profile?.full_name ?? u?.full_name;
   const name = full && String(full).trim() ? String(full).trim() : '';
   if (name) return name;
-  return u?.username ?? u?.email ?? 'User';
+  return u?.username ?? u?.email ?? t('common.unknown');
 }
 
-function displayNameFromUserLike(u: any): string {
+function displayNameFromUserLike(u: any, t: TFunction): string {
   if (!u) return '';
   const fn = String(u.first_name ?? '').trim();
   const ln = String(u.last_name ?? '').trim();
   if (fn || ln) return `${fn} ${ln}`.trim();
-  return getUserLabel(u);
+  return getUserLabel(u, t);
 }
 
 function userEmail(u: any): string {
@@ -310,6 +314,7 @@ function OptionPickerModal({
   onSelect: (id: string) => void;
   onClose: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <View style={styles.pickerOverlay}>
@@ -335,7 +340,7 @@ function OptionPickerModal({
             })}
           </ScrollView>
           <TouchableOpacity style={styles.pickerCancelBtn} onPress={onClose}>
-            <Text style={styles.pickerCancelBtnText}>Cancel</Text>
+            <Text style={styles.pickerCancelBtnText}>{t('common.cancel')}</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -352,6 +357,7 @@ function ColorControl({
   fallback?: string;
   onChange: (v: string) => void;
 }) {
+  const { t } = useTranslation();
   const fb = fallback || '#3b82f6';
   const safe = normalizeHexColor(value, fb);
   const apply = (next: string) => onChange(normalizeHexColor(next, fb));
@@ -382,7 +388,7 @@ function ColorControl({
           ? React.createElement('input', {
               type: 'color',
               value: safe,
-              'aria-label': 'Pick brand color',
+              'aria-label': t('companies.brandColor'),
               onChange: (e: any) => apply(e?.target?.value),
               onInput: (e: any) => apply(e?.target?.value),
               style: webColorInputStyle,
@@ -401,6 +407,7 @@ function ColorControl({
 }
 
 export default function CompaniesScreen() {
+  const { t } = useTranslation();
   const { user, role } = useAuth();
   /** Context `role` can lag one frame; align with web sidebar resolution. */
   const effectiveRole = role ?? (user ? getPrimaryRoleFromUser(user) : null);
@@ -582,12 +589,12 @@ export default function CompaniesScreen() {
       setOrganizations(orgsRaw);
       setCompanies(compRaw);
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Failed to load');
+      Alert.alert(t('common.error'), e?.message || t('companies.loadFailed'));
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [isOrgManager, user?.organization_id]);
+  }, [isOrgManager, user?.organization_id, t]);
 
   useEffect(() => {
     load();
@@ -659,7 +666,7 @@ export default function CompaniesScreen() {
       const options: PickerOption[] = filtered
         .map((u: any) => ({
           id: String(u?.id ?? u?.pk ?? u?.uuid ?? ''),
-          label: getUserLabel(u),
+          label: getUserLabel(u, t),
         }))
         .filter((o) => o.id !== '');
       setManagerOptions(options);
@@ -669,7 +676,7 @@ export default function CompaniesScreen() {
       setUsersById({});
       return null;
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (!companyDetails) {
@@ -744,7 +751,7 @@ export default function CompaniesScreen() {
   const saveOrg = async () => {
     const name = formName.trim();
     if (!name) {
-      Alert.alert('Validation', 'Name is required');
+      Alert.alert(t('common.validation'), t('companies.nameRequired'));
       return;
     }
     setSaving(true);
@@ -769,19 +776,19 @@ export default function CompaniesScreen() {
         } catch {
           await api.updateOrganization(editOrg.id, minimalUpdate);
         }
-        Alert.alert('Success', 'Organization updated');
+        Alert.alert(t('common.success'), t('companies.orgUpdated'));
       } else {
         try {
           await api.createOrganization(richPayload);
         } catch {
           await api.createOrganization(minimalCreate);
         }
-        Alert.alert('Success', 'Organization created');
+        Alert.alert(t('common.success'), t('companies.orgCreated'));
       }
       setModal(null);
       load();
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Failed to save');
+      Alert.alert(t('common.error'), e?.message || t('companies.saveFailed'));
     } finally {
       setSaving(false);
     }
@@ -790,7 +797,7 @@ export default function CompaniesScreen() {
   const deleteOrg = async () => {
     if (!editOrg?.id) return;
     if (typeof (globalThis as any).confirm === 'function') {
-      const ok = (globalThis as any).confirm(`Delete organization "${editOrg.name}"?`);
+      const ok = (globalThis as any).confirm(t('employee.deleteConfirm', { name: editOrg.name }));
       if (!ok) return;
     }
     setSaving(true);
@@ -799,9 +806,9 @@ export default function CompaniesScreen() {
       setModal(null);
       setEditOrg(null);
       await load();
-      Alert.alert('Success', 'Organization deleted');
+      Alert.alert(t('common.success'), t('companies.orgDeleted'));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Failed to delete organization');
+      Alert.alert(t('common.error'), e?.message || t('companies.orgDeleteFailed'));
     } finally {
       setSaving(false);
     }
@@ -843,11 +850,11 @@ export default function CompaniesScreen() {
   const saveCompany = async () => {
     const name = formName.trim();
     if (!name) {
-      Alert.alert('Validation', 'Name is required');
+      Alert.alert(t('common.validation'), t('companies.nameRequired'));
       return;
     }
     if (!editCompany && !orgIdForCompany) {
-      Alert.alert('Validation', 'Select an organization');
+      Alert.alert(t('common.validation'), t('companies.selectOrganization'));
       return;
     }
     setSaving(true);
@@ -891,19 +898,19 @@ export default function CompaniesScreen() {
         } catch {
           await api.updateCompany(editCompany.id, minimalUpdate);
         }
-        Alert.alert('Success', 'Company updated');
+        Alert.alert(t('common.success'), t('companies.companyUpdated'));
       } else {
         try {
           await api.createCompany(richPayload);
         } catch {
           await api.createCompany(minimalCreate);
         }
-        Alert.alert('Success', 'Company created');
+        Alert.alert(t('common.success'), t('companies.companyCreated'));
       }
       setModal(null);
       load();
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Failed to save');
+      Alert.alert(t('common.error'), e?.message || t('companies.saveFailed'));
     } finally {
       setSaving(false);
     }
@@ -912,7 +919,7 @@ export default function CompaniesScreen() {
   const deleteCompany = async () => {
     if (!editCompany?.id) return;
     if (typeof (globalThis as any).confirm === 'function') {
-      const ok = (globalThis as any).confirm(`Delete company "${editCompany.name}"?`);
+      const ok = (globalThis as any).confirm(t('employee.deleteConfirm', { name: editCompany.name }));
       if (!ok) return;
     }
     setSaving(true);
@@ -921,18 +928,20 @@ export default function CompaniesScreen() {
       setModal(null);
       setEditCompany(null);
       await load();
-      Alert.alert('Success', 'Company deleted');
+      Alert.alert(t('common.success'), t('companies.companyDeleted'));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Failed to delete company');
+      Alert.alert(t('common.error'), e?.message || t('companies.companyDeleteFailed'));
     } finally {
       setSaving(false);
     }
   };
 
   const managerPickerOptions = React.useMemo<PickerOption[]>(
-    () => [{ id: '__none__', label: 'No company manager' }, ...managerOptions],
-    [managerOptions]
+    () => [{ id: '__none__', label: t('companies.noManagerAssigned') }, ...managerOptions],
+    [managerOptions, t]
   );
+
+  const noManagerLabel = t('companies.noManagerAssigned');
 
   const assignManager = async () => {
     if (!assignManagerCompany) return;
@@ -948,12 +957,12 @@ export default function CompaniesScreen() {
       } catch {
         await api.updateCompany(assignManagerCompany.id, { manager_id: selected || null, manager: selected || null });
       }
-      setManagerByCompany((prev) => ({ ...prev, [assignManagerCompany.id]: label || 'No company manager' }));
+      setManagerByCompany((prev) => ({ ...prev, [assignManagerCompany.id]: label || noManagerLabel }));
       setAssignManagerCompany(null);
-      Alert.alert('Saved', 'Company manager assigned.');
+      Alert.alert(t('common.success'), t('companies.managerAssignedSuccess'));
       load();
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Failed to assign manager');
+      Alert.alert(t('common.error'), e?.message || t('companies.assignManagerFailed'));
     } finally {
       setSaving(false);
     }
@@ -980,7 +989,7 @@ export default function CompaniesScreen() {
         <Text style={styles.companyTypeText}>{String((c as any).type || 'general').toLowerCase()}</Text>
         {companyManagerAssigned ? (
           <View style={styles.companyAssignedBadge}>
-            <Text style={styles.assignedBadgeText}>Manager Assigned</Text>
+            <Text style={styles.assignedBadgeText}>{t('companies.managerAssigned')}</Text>
           </View>
         ) : null}
         {canEditCompany && (
@@ -1012,13 +1021,11 @@ export default function CompaniesScreen() {
         <View style={styles.headerTopRow}>
           <View style={styles.headerTitleBlock}>
             <Text style={styles.title}>
-              {role === 'organization_manager' ? 'Companies' : 'Organizations & Companies'}
-            </Text>
-            <Text style={styles.subtitle}>
               {role === 'organization_manager'
-                ? "Your organization's companies"
-                : 'Manage organizations and companies'}
+                ? t('companies.title')
+                : t('superAdminDashboard.organizationsCompanies')}
             </Text>
+            <Text style={styles.subtitle}>{t('companies.subtitle')}</Text>
           </View>
           <View style={styles.headerToolbar}>
             <TouchableOpacity
@@ -1033,7 +1040,7 @@ export default function CompaniesScreen() {
                 color={orgListFilter === 'active' ? '#0f172a' : '#94a3b8'}
               />
               <Text style={[styles.statusPillText, orgListFilter === 'active' && styles.statusPillTextSelected]}>
-                Active ({orgManagerFlatView ? orgManagerActiveCompanyCount : activeOrgList.length})
+                {t('companies.active')} ({orgManagerFlatView ? orgManagerActiveCompanyCount : activeOrgList.length})
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -1048,12 +1055,12 @@ export default function CompaniesScreen() {
                 color={orgListFilter === 'archived' ? '#0f172a' : '#94a3b8'}
               />
               <Text style={[styles.statusPillText, orgListFilter === 'archived' && styles.statusPillTextSelected]}>
-                Archived ({orgManagerFlatView ? orgManagerArchivedCompanyCount : archivedOrgList.length})
+                {t('companies.archived')} ({orgManagerFlatView ? orgManagerArchivedCompanyCount : archivedOrgList.length})
               </Text>
             </TouchableOpacity>
             {canCreateOrg ? (
               <TouchableOpacity style={styles.headerNewOrgButton} onPress={handleCreateOrg} accessibilityRole="button">
-                <Text style={styles.headerNewOrgButtonText}>+ New org</Text>
+                <Text style={styles.headerNewOrgButtonText}>{t('companies.newOrg')}</Text>
               </TouchableOpacity>
             ) : null}
             {canCreateCompany && role === 'organization_manager' ? (
@@ -1068,7 +1075,7 @@ export default function CompaniesScreen() {
                 }
                 accessibilityRole="button"
               >
-                <Text style={styles.headerNewOrgButtonText}>+ New company</Text>
+                <Text style={styles.headerNewOrgButtonText}>{t('companies.newCompany')}</Text>
               </TouchableOpacity>
             ) : null}
           </View>
@@ -1082,14 +1089,14 @@ export default function CompaniesScreen() {
           {orgManagerCompaniesForList.length === 0 ? (
             <View style={styles.empty}>
               <Text style={styles.emptyText}>
-                {orgListFilter === 'archived' ? 'No archived companies' : 'No companies yet'}
+                {orgListFilter === 'archived' ? t('companies.noArchivedCompanies') : t('companies.noCompaniesYet')}
               </Text>
               {canCreateCompany && orgListFilter === 'active' && orgIdForOrgManagerActions ? (
                 <TouchableOpacity
                   style={styles.primaryButton}
                   onPress={() => handleCreateCompany(orgIdForOrgManagerActions)}
                 >
-                  <Text style={styles.primaryButtonText}>+ New company</Text>
+                  <Text style={styles.primaryButtonText}>{t('companies.newCompany')}</Text>
                 </TouchableOpacity>
               ) : null}
             </View>
@@ -1105,7 +1112,7 @@ export default function CompaniesScreen() {
                     onPress={() => handleCreateCompany(orgIdForOrgManagerActions)}
                   >
                     <MaterialCommunityIcons name="plus" size={28} color="#64748b" />
-                    <Text style={styles.addCompanyGhostText}>Add Company</Text>
+                    <Text style={styles.addCompanyGhostText}>{t('companies.addCompany')}</Text>
                   </TouchableOpacity>
                 ) : null}
               </View>
@@ -1123,20 +1130,20 @@ export default function CompaniesScreen() {
               <Text style={styles.emptyText}>
                 {role === 'organization_manager'
                   ? orgListFilter === 'archived'
-                    ? 'No archived organizations'
-                    : 'No organization loaded. Check that your profile includes an organization, then pull to refresh.'
+                    ? t('companies.noArchivedOrganizations')
+                    : t('companies.noOrganizationLoaded')
                   : orgListFilter === 'archived'
-                    ? 'No archived organizations'
-                    : 'No organizations yet'}
+                    ? t('companies.noArchivedOrganizations')
+                    : t('companies.noOrganizationsYet')}
               </Text>
               {canCreateOrg && orgListFilter === 'active' ? (
                 <TouchableOpacity style={styles.primaryButton} onPress={handleCreateOrg}>
-                  <Text style={styles.primaryButtonText}>Create organization</Text>
+                  <Text style={styles.primaryButtonText}>{t('companies.createOrganization')}</Text>
                 </TouchableOpacity>
               ) : null}
               {canCreateCompany && role === 'organization_manager' && orgListFilter === 'active' && filteredOrgs[0]?.id ? (
                 <TouchableOpacity style={styles.primaryButton} onPress={() => handleCreateCompany(filteredOrgs[0].id)}>
-                  <Text style={styles.primaryButtonText}>+ New company</Text>
+                  <Text style={styles.primaryButtonText}>{t('companies.newCompany')}</Text>
                 </TouchableOpacity>
               ) : null}
             </View>
@@ -1158,11 +1165,11 @@ export default function CompaniesScreen() {
                         <Text style={styles.sectionTitle}>{org.name}</Text>
                         <View style={styles.orgSubRow}>
                           <Text style={styles.orgSub}>
-                            {orgCompanies.length} compan{orgCompanies.length === 1 ? 'y' : 'ies'}
+                            {t('companies.companyCount', { count: orgCompanies.length })}
                           </Text>
                           {orgManagerAssigned ? (
                             <View style={styles.assignedBadge}>
-                              <Text style={styles.assignedBadgeText}>Organization Manager Assigned</Text>
+                              <Text style={styles.assignedBadgeText}>{t('companies.orgManagerAssigned')}</Text>
                             </View>
                           ) : null}
                         </View>
@@ -1191,7 +1198,7 @@ export default function CompaniesScreen() {
                       {canCreateCompany && (
                         <TouchableOpacity style={styles.addCompanyGhost} onPress={() => handleCreateCompany(org.id)}>
                           <MaterialCommunityIcons name="plus" size={28} color="#64748b" />
-                          <Text style={styles.addCompanyGhostText}>Add Company</Text>
+                          <Text style={styles.addCompanyGhostText}>{t('companies.addCompany')}</Text>
                         </TouchableOpacity>
                       )}
                     </View>
@@ -1206,7 +1213,9 @@ export default function CompaniesScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalBox}>
             <View style={styles.modalHeaderRow}>
-              <Text style={[styles.modalTitle, { marginBottom: 0 }]}>{editOrg ? 'Edit organization' : 'Create New Organization'}</Text>
+              <Text style={[styles.modalTitle, { marginBottom: 0 }]}>
+                {editOrg ? `${t('common.edit')} ${t('common.organization')}` : t('companies.createOrganizationBtn')}
+              </Text>
               <TouchableOpacity onPress={() => setModal(null)} hitSlop={12} style={styles.modalCloseBtn} disabled={saving}>
                 <MaterialCommunityIcons name="close" size={24} color="#64748b" />
               </TouchableOpacity>
@@ -1214,19 +1223,19 @@ export default function CompaniesScreen() {
 
             {editOrg ? (
               <>
-                <Text style={styles.label}>Organization Name *</Text>
-                <TextInput style={styles.input} value={formName} onChangeText={setFormName} placeholder="Enter organization name" />
-                <Text style={styles.label}>Brand Color</Text>
+                <Text style={styles.label}>{t('companies.organizationName')} *</Text>
+                <TextInput style={styles.input} value={formName} onChangeText={setFormName} placeholder={t('companies.orgNamePlaceholder')} />
+                <Text style={styles.label}>{t('companies.brandColor')}</Text>
                 <ColorControl value={brandColor} fallback="#6366f1" onChange={setBrandColor} />
-                <Text style={styles.label}>Address</Text>
-                <TextInput style={styles.input} value={address} onChangeText={setAddress} placeholder="Enter organization address" />
+                <Text style={styles.label}>{t('companies.address')}</Text>
+                <TextInput style={styles.input} value={address} onChangeText={setAddress} placeholder={t('companies.orgAddressPlaceholder')} />
                 <View style={styles.twoColRow}>
                   <View style={{ flex: 1 }}>
                     <TextInput
                       style={[styles.input, styles.inputNoMargin]}
                       value={phone}
                       onChangeText={handlePhoneChange}
-                      placeholder="(555) 123-4567"
+                      placeholder={t('employee.phonePlaceholder')}
                       keyboardType="phone-pad"
                       maxLength={14}
                     />
@@ -1236,51 +1245,49 @@ export default function CompaniesScreen() {
                       style={[styles.input, styles.inputNoMargin]}
                       value={email}
                       onChangeText={setEmail}
-                      placeholder="contact@organization.com"
+                      placeholder={t('companies.orgEmailPlaceholder')}
                       keyboardType="email-address"
                       autoCapitalize="none"
                     />
                   </View>
                 </View>
-                <Text style={styles.label}>Organization Manager</Text>
+                <Text style={styles.label}>{t('companies.organizationManager')}</Text>
                 <TouchableOpacity style={styles.selectField} onPress={() => setManagerPicker(true)}>
                   <Text style={[styles.selectFieldText, !managerId && styles.selectPlaceholder]}>
-                    {managerId ? managerOptions.find((o) => o.id === managerId)?.label : 'Select organization manager'}
+                    {managerId ? managerOptions.find((o) => o.id === managerId)?.label : t('companies.organizationManager')}
                   </Text>
                   <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                 </TouchableOpacity>
-                <Text style={styles.helperText}>
-                  The organization manager has super admin access to all companies within this organization.
-                </Text>
+                <Text style={styles.helperText}>{t('companies.subtitle')}</Text>
                 <View style={styles.modalActions}>
                   {canDeleteOrg ? (
                     <TouchableOpacity style={styles.deleteButton} onPress={() => void deleteOrg()} disabled={saving}>
                       <MaterialCommunityIcons name="trash-can-outline" size={16} color="#fff" />
-                      <Text style={styles.deleteButtonText}>Delete</Text>
+                      <Text style={styles.deleteButtonText}>{t('common.delete')}</Text>
                     </TouchableOpacity>
                   ) : null}
                   <TouchableOpacity style={styles.modalCancelButton} onPress={() => setModal(null)}>
-                    <Text style={styles.cancelButtonText}>Cancel</Text>
+                    <Text style={styles.cancelButtonText}>{t('common.cancel')}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={[styles.modalPrimaryButton, saving && styles.disabled]} onPress={saveOrg} disabled={saving}>
-                    <Text style={styles.primaryButtonText}>{saving ? 'Saving…' : 'Update Organization'}</Text>
+                    <Text style={styles.primaryButtonText}>{saving ? t('common.saving') : t('companies.updateOrganization')}</Text>
                   </TouchableOpacity>
                 </View>
               </>
             ) : (
               <>
-                <Text style={styles.label}>Organization Name *</Text>
-                <TextInput style={styles.input} value={formName} onChangeText={setFormName} placeholder="Enter organization name" />
+                <Text style={styles.label}>{t('companies.organizationName')} *</Text>
+                <TextInput style={styles.input} value={formName} onChangeText={setFormName} placeholder={t('companies.orgNamePlaceholder')} />
 
-                <Text style={styles.label}>Brand Color</Text>
+                <Text style={styles.label}>{t('companies.brandColor')}</Text>
                 <ColorControl value={brandColor} fallback="#3b82f6" onChange={setBrandColor} />
 
-                <Text style={styles.label}>Address</Text>
+                <Text style={styles.label}>{t('companies.address')}</Text>
                 <TextInput
                   style={styles.input}
                   value={address}
                   onChangeText={setAddress}
-                  placeholder="Enter organization address"
+                  placeholder={t('companies.orgAddressPlaceholder')}
                 />
 
                 <View style={styles.twoColRow}>
@@ -1289,7 +1296,7 @@ export default function CompaniesScreen() {
                       style={[styles.input, styles.inputNoMargin]}
                       value={phone}
                       onChangeText={handlePhoneChange}
-                      placeholder="(555) 123-4567"
+                      placeholder={t('employee.phonePlaceholder')}
                       keyboardType="phone-pad"
                       maxLength={14}
                     />
@@ -1299,27 +1306,27 @@ export default function CompaniesScreen() {
                       style={[styles.input, styles.inputNoMargin]}
                       value={email}
                       onChangeText={setEmail}
-                      placeholder="contact@organization.com"
+                      placeholder={t('companies.orgEmailPlaceholder')}
                       keyboardType="email-address"
                       autoCapitalize="none"
                     />
                   </View>
                 </View>
 
-                <Text style={styles.label}>Organization Manager</Text>
+                <Text style={styles.label}>{t('companies.organizationManager')}</Text>
                 <TouchableOpacity style={styles.selectField} onPress={() => setManagerPicker(true)}>
                   <Text style={[styles.selectFieldText, !managerId && styles.selectPlaceholder]}>
-                    {managerId ? managerOptions.find((o) => o.id === managerId)?.label : 'Select organization manager'}
+                    {managerId ? managerOptions.find((o) => o.id === managerId)?.label : t('companies.organizationManager')}
                   </Text>
                   <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                 </TouchableOpacity>
 
                 <View style={styles.modalActions}>
                   <TouchableOpacity style={styles.modalCancelButton} onPress={() => setModal(null)}>
-                    <Text style={styles.cancelButtonText}>Cancel</Text>
+                    <Text style={styles.cancelButtonText}>{t('common.cancel')}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={[styles.modalPrimaryButton, saving && styles.disabled]} onPress={saveOrg} disabled={saving}>
-                    <Text style={styles.primaryButtonText}>{saving ? 'Saving…' : 'Create Organization'}</Text>
+                    <Text style={styles.primaryButtonText}>{saving ? t('common.saving') : t('companies.createOrganizationBtn')}</Text>
                   </TouchableOpacity>
                 </View>
               </>
@@ -1331,17 +1338,19 @@ export default function CompaniesScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalBox}>
             <View style={styles.modalHeaderRow}>
-              <Text style={[styles.modalTitle, { marginBottom: 0 }]}>{editCompany ? 'Edit company' : 'Create New Company'}</Text>
+              <Text style={[styles.modalTitle, { marginBottom: 0 }]}>
+                {editCompany ? `${t('common.edit')} ${t('common.company')}` : t('companies.addCompany')}
+              </Text>
               <TouchableOpacity onPress={() => setModal(null)} hitSlop={12} style={styles.modalCloseBtn} disabled={saving}>
                 <MaterialCommunityIcons name="close" size={24} color="#64748b" />
               </TouchableOpacity>
             </View>
             {!editCompany ? (
               <>
-                <Text style={styles.label}>Company Name *</Text>
-                <TextInput style={styles.input} value={formName} onChangeText={setFormName} placeholder="Enter company name" />
+                <Text style={styles.label}>{t('companies.companyName')} *</Text>
+                <TextInput style={styles.input} value={formName} onChangeText={setFormName} placeholder={t('companies.companyNamePlaceholder')} />
 
-                <Text style={styles.label}>Organization (Business Type) *</Text>
+                <Text style={styles.label}>{t('companies.businessType')} *</Text>
                 <TouchableOpacity
                   style={styles.selectField}
                   onPress={() => setCompanyOrgPicker(true)}
@@ -1350,7 +1359,7 @@ export default function CompaniesScreen() {
                   <Text style={[styles.selectFieldText, !orgIdForCompany && styles.selectPlaceholder]} numberOfLines={1}>
                     {orgIdForCompany
                       ? filteredOrgs.find((o) => o.id === orgIdForCompany)?.name
-                      : 'Select organization'}
+                      : t('companies.selectOrganization')}
                   </Text>
                   <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                 </TouchableOpacity>
@@ -1358,91 +1367,91 @@ export default function CompaniesScreen() {
                 {companyFormIsMotelsOrg ? (
                   <View style={styles.threeColRow}>
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.labelInline}>No of Floors</Text>
+                      <Text style={styles.labelInline}>{t('companies.noOfFloors')}</Text>
                       <TextInput
                         style={[styles.input, styles.inputNoMargin]}
                         value={noOfFloors}
                         onChangeText={setNoOfFloors}
-                        placeholder="e.g. 3"
+                        placeholder={t('companies.floorsPlaceholder')}
                         keyboardType="number-pad"
                       />
                     </View>
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.labelInline}>No of Rooms</Text>
+                      <Text style={styles.labelInline}>{t('companies.noOfRooms')}</Text>
                       <TextInput
                         style={[styles.input, styles.inputNoMargin]}
                         value={noOfRooms}
                         onChangeText={setNoOfRooms}
-                        placeholder="e.g. 36"
+                        placeholder={t('companies.roomsPlaceholder')}
                         keyboardType="number-pad"
                       />
                     </View>
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.labelInline}>No of Rooms for Floor</Text>
+                      <Text style={styles.labelInline}>{t('companies.noOfRoomsForFloor')}</Text>
                       <TextInput
                         style={[styles.input, styles.inputNoMargin]}
                         value={noOfRoomsPerFloor}
                         onChangeText={setNoOfRoomsPerFloor}
-                        placeholder="e.g. 12"
+                        placeholder={t('companies.roomsPerFloorPlaceholder')}
                         keyboardType="number-pad"
                       />
                     </View>
                   </View>
                 ) : null}
 
-                <Text style={styles.label}>Brand Color</Text>
+                <Text style={styles.label}>{t('companies.brandColor')}</Text>
                 <ColorControl value={brandColor} fallback="#3b82f6" onChange={setBrandColor} />
 
-                <Text style={styles.label}>Address</Text>
-                <TextInput style={styles.input} value={address} onChangeText={setAddress} placeholder="Enter company address" />
+                <Text style={styles.label}>{t('companies.address')}</Text>
+                <TextInput style={styles.input} value={address} onChangeText={setAddress} placeholder={t('companies.companyAddressPlaceholder')} />
 
                 <View style={styles.twoColRow}>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.labelInline}>Phone</Text>
+                    <Text style={styles.labelInline}>{t('companies.phone')}</Text>
                     <TextInput
                       style={[styles.input, styles.inputNoMargin]}
                       value={phone}
                       onChangeText={handlePhoneChange}
-                      placeholder="(555) 123-4567"
+                      placeholder={t('employee.phonePlaceholder')}
                       keyboardType="phone-pad"
                       maxLength={14}
                     />
                   </View>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.labelInline}>Email</Text>
+                    <Text style={styles.labelInline}>{t('companies.email')}</Text>
                     <TextInput
                       style={[styles.input, styles.inputNoMargin]}
                       value={email}
                       onChangeText={setEmail}
-                      placeholder="contact@company.com"
+                      placeholder={t('companies.companyEmailPlaceholder')}
                       keyboardType="email-address"
                       autoCapitalize="none"
                     />
                   </View>
                 </View>
 
-                <Text style={styles.label}>Company Manager</Text>
+                <Text style={styles.label}>{t('companies.companyManager')}</Text>
                 <TouchableOpacity style={styles.selectField} onPress={() => setManagerPicker(true)}>
                   <Text style={[styles.selectFieldText, !managerId && styles.selectPlaceholder]} numberOfLines={1}>
-                    {managerId ? managerOptions.find((o) => o.id === managerId)?.label : 'Select company manager'}
+                    {managerId ? managerOptions.find((o) => o.id === managerId)?.label : t('companies.companyManager')}
                   </Text>
                   <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                 </TouchableOpacity>
               </>
             ) : (
               <>
-                <Text style={styles.label}>Company Name *</Text>
-                <TextInput style={styles.input} value={formName} onChangeText={setFormName} placeholder="Enter company name" />
+                <Text style={styles.label}>{t('companies.companyName')} *</Text>
+                <TextInput style={styles.input} value={formName} onChangeText={setFormName} placeholder={t('companies.companyNamePlaceholder')} />
 
-                <Text style={styles.label}>Business Type *</Text>
+                <Text style={styles.label}>{t('companies.businessTypeShort')} *</Text>
                 <TouchableOpacity style={styles.selectField} onPress={() => setCompanyTypePicker(true)}>
                   <Text style={[styles.selectFieldText, !formCompanyType && styles.selectPlaceholder]} numberOfLines={1}>
-                    {formCompanyType || 'Select type'}
+                    {formCompanyType || t('companies.businessTypeShort')}
                   </Text>
                   <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                 </TouchableOpacity>
 
-                <Text style={styles.label}>Brand Color</Text>
+                <Text style={styles.label}>{t('companies.brandColor')}</Text>
                 <View style={styles.colorSwatchRow}>
                   {['#3b82f6', '#ec4899', '#10b981', '#f59e0b', '#8b5cf6', '#f97316'].map((c) => {
                     const norm = normalizeHexColor(c, '#3b82f6');
@@ -1457,8 +1466,8 @@ export default function CompaniesScreen() {
                   })}
                 </View>
 
-                <Text style={styles.label}>Address</Text>
-                <TextInput style={styles.input} value={address} onChangeText={setAddress} placeholder="Enter company address" />
+                <Text style={styles.label}>{t('companies.address')}</Text>
+                <TextInput style={styles.input} value={address} onChangeText={setAddress} placeholder={t('companies.companyAddressPlaceholder')} />
 
                 <View style={styles.twoColRow}>
                   <View style={{ flex: 1 }}>
@@ -1466,7 +1475,7 @@ export default function CompaniesScreen() {
                       style={[styles.input, styles.inputNoMargin]}
                       value={phone}
                       onChangeText={handlePhoneChange}
-                      placeholder="(555) 123-4567"
+                      placeholder={t('employee.phonePlaceholder')}
                       keyboardType="phone-pad"
                       maxLength={14}
                     />
@@ -1476,7 +1485,7 @@ export default function CompaniesScreen() {
                       style={[styles.input, styles.inputNoMargin]}
                       value={email}
                       onChangeText={setEmail}
-                      placeholder="Enter company email"
+                      placeholder={t('companies.companyEmailEnterPlaceholder')}
                       keyboardType="email-address"
                       autoCapitalize="none"
                     />
@@ -1486,32 +1495,32 @@ export default function CompaniesScreen() {
                 {companyFormIsMotelsOrg ? (
                   <View style={styles.threeColRow}>
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.labelInline}>No of Floors</Text>
+                      <Text style={styles.labelInline}>{t('companies.noOfFloors')}</Text>
                       <TextInput
                         style={[styles.input, styles.inputNoMargin]}
                         value={noOfFloors}
                         onChangeText={setNoOfFloors}
-                        placeholder="0"
+                        placeholder={t('companies.floorsPlaceholder')}
                         keyboardType="number-pad"
                       />
                     </View>
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.labelInline}>No of Rooms</Text>
+                      <Text style={styles.labelInline}>{t('companies.noOfRooms')}</Text>
                       <TextInput
                         style={[styles.input, styles.inputNoMargin]}
                         value={noOfRooms}
                         onChangeText={setNoOfRooms}
-                        placeholder="0"
+                        placeholder={t('companies.roomsPlaceholder')}
                         keyboardType="number-pad"
                       />
                     </View>
                     <View style={{ flex: 1 }}>
-                      <Text style={styles.labelInline}>No of Rooms for Floor</Text>
+                      <Text style={styles.labelInline}>{t('companies.noOfRoomsForFloor')}</Text>
                       <TextInput
                         style={[styles.input, styles.inputNoMargin]}
                         value={noOfRoomsPerFloor}
                         onChangeText={setNoOfRoomsPerFloor}
-                        placeholder="0"
+                        placeholder={t('companies.roomsPerFloorPlaceholder')}
                         keyboardType="number-pad"
                       />
                     </View>
@@ -1523,15 +1532,19 @@ export default function CompaniesScreen() {
               {editCompany ? (
                 <TouchableOpacity style={styles.deleteButton} onPress={() => void deleteCompany()} disabled={saving}>
                   <MaterialCommunityIcons name="trash-can-outline" size={16} color="#fff" />
-                  <Text style={styles.deleteButtonText}>Delete</Text>
+                  <Text style={styles.deleteButtonText}>{t('common.delete')}</Text>
                 </TouchableOpacity>
               ) : null}
                 <TouchableOpacity style={styles.modalCancelButton} onPress={() => setModal(null)}>
-                <Text style={styles.cancelButtonText}>Cancel</Text>
+                <Text style={styles.cancelButtonText}>{t('common.cancel')}</Text>
               </TouchableOpacity>
                 <TouchableOpacity style={[styles.modalPrimaryButton, saving && styles.disabled]} onPress={saveCompany} disabled={saving}>
                 <Text style={styles.primaryButtonText}>
-                  {saving ? 'Saving…' : editCompany ? 'Update Company' : 'Create Company'}
+                  {saving
+                    ? t('common.saving')
+                    : editCompany
+                      ? `${t('common.update')} ${t('common.company')}`
+                      : `${t('common.save')} ${t('common.company')}`}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -1550,7 +1563,7 @@ export default function CompaniesScreen() {
               }}
             >
               <MaterialCommunityIcons name="eye-outline" size={18} color="#0f172a" />
-              <Text style={styles.companyMenuText}>View Details</Text>
+              <Text style={styles.companyMenuText}>{t('common.viewDetails')}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.companyMenuItem}
@@ -1561,7 +1574,7 @@ export default function CompaniesScreen() {
               }}
             >
               <MaterialCommunityIcons name="square-edit-outline" size={18} color="#0f172a" />
-              <Text style={styles.companyMenuText}>Edit Company</Text>
+              <Text style={styles.companyMenuText}>{`${t('common.edit')} ${t('common.company')}`}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.companyMenuItem}
@@ -1576,7 +1589,7 @@ export default function CompaniesScreen() {
               }}
             >
               <MaterialCommunityIcons name="account-tie-outline" size={18} color="#0f172a" />
-              <Text style={styles.companyMenuText}>Assign Managers</Text>
+              <Text style={styles.companyMenuText}>{t('companies.assignManager')}</Text>
             </TouchableOpacity>
           </Pressable>
         </Pressable>
@@ -1586,30 +1599,28 @@ export default function CompaniesScreen() {
           <Pressable style={styles.assignManagerBox} onPress={(e) => e.stopPropagation()}>
             <View style={styles.modalHeaderRow}>
               <Text style={[styles.modalTitle, { marginBottom: 0 }]}>
-                Assign Manager - {assignManagerCompany?.name || ''}
+                {t('companies.assignManager')} - {assignManagerCompany?.name || ''}
               </Text>
               <TouchableOpacity onPress={() => setAssignManagerCompany(null)} hitSlop={12} style={styles.modalCloseBtn}>
                 <MaterialCommunityIcons name="close" size={22} color="#64748b" />
               </TouchableOpacity>
             </View>
-            <Text style={styles.label}>Company Manager</Text>
+            <Text style={styles.label}>{t('companies.companyManager')}</Text>
             <TouchableOpacity style={styles.selectField} onPress={() => setManagerPicker(true)} disabled={saving}>
               <Text style={[styles.selectFieldText, !managerId && styles.selectPlaceholder]}>
                 {managerId && managerId !== '__none__'
                   ? managerOptions.find((o) => o.id === managerId)?.label
-                  : 'No company manager'}
+                  : noManagerLabel}
               </Text>
               <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
             </TouchableOpacity>
-            <Text style={styles.helperText}>
-              The company manager will have full admin access to all operations within this company.
-            </Text>
+            <Text style={styles.helperText}>{t('companies.managerAssigned')}</Text>
             <View style={styles.modalActions}>
               <TouchableOpacity style={styles.modalCancelButton} onPress={() => setAssignManagerCompany(null)} disabled={saving}>
-                <Text style={styles.cancelButtonText}>Cancel</Text>
+                <Text style={styles.cancelButtonText}>{t('common.cancel')}</Text>
               </TouchableOpacity>
               <TouchableOpacity style={[styles.modalPrimaryButton, saving && styles.disabled]} onPress={() => void assignManager()} disabled={saving}>
-                <Text style={styles.primaryButtonText}>{saving ? 'Saving…' : 'Assign Manager'}</Text>
+                <Text style={styles.primaryButtonText}>{saving ? t('common.saving') : t('companies.assignManager')}</Text>
               </TouchableOpacity>
             </View>
           </Pressable>
@@ -1643,7 +1654,7 @@ export default function CompaniesScreen() {
                   />
                 </View>
                 <View>
-                  <Text style={styles.companyDetailsTitle}>{companyDetails?.name || 'Company'}</Text>
+                  <Text style={styles.companyDetailsTitle}>{companyDetails?.name || t('common.company')}</Text>
                   <Text style={styles.companyTypeText}>{String((companyDetails as any)?.type || 'car_wash').toLowerCase()}</Text>
                 </View>
               </View>
@@ -1660,36 +1671,36 @@ export default function CompaniesScreen() {
                   setCompanyDetails(null);
                 }}
               >
-                <Text style={styles.cancelButtonText}>Assign existing user</Text>
+                <Text style={styles.cancelButtonText}>{t('userManagement.assignToOrganization')}</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.modalPrimaryButton}>
-                <Text style={styles.primaryButtonText}>Add new employee</Text>
+                <Text style={styles.primaryButtonText}>{t('companies.addNewEmployee')}</Text>
               </TouchableOpacity>
             </View>
             <View style={styles.companyDetailsGrid}>
               <View style={styles.detailsCard}>
-                <Text style={styles.detailsCardTitle}>Company Details</Text>
+                <Text style={styles.detailsCardTitle}>{`${t('common.company')} ${t('common.viewDetails')}`}</Text>
                 <View style={styles.detailsLine}>
                   <MaterialCommunityIcons name="map-marker-outline" size={18} color="#64748b" />
                   <Text style={styles.detailsLineText} numberOfLines={2}>
-                    {String((companyDetails as any)?.address || '—')}
+                    {String((companyDetails as any)?.address || t('common.notAvailable'))}
                   </Text>
                 </View>
                 <View style={styles.detailsLine}>
                   <MaterialCommunityIcons name="phone-outline" size={18} color="#64748b" />
                   <Text style={styles.detailsLineText}>
-                    {displayUsPhoneFromRaw(String((companyDetails as any)?.phone || '')) || '—'}
+                    {displayUsPhoneFromRaw(String((companyDetails as any)?.phone || '')) || t('common.notAvailable')}
                   </Text>
                 </View>
                 <View style={styles.detailsLine}>
                   <MaterialCommunityIcons name="email-outline" size={18} color="#64748b" />
                   <Text style={styles.detailsLineText} numberOfLines={1}>
-                    {String((companyDetails as any)?.email || '—')}
+                    {String((companyDetails as any)?.email || t('common.notAvailable'))}
                   </Text>
                 </View>
               </View>
               <View style={styles.detailsCard}>
-                <Text style={styles.detailsCardTitle}>Manager</Text>
+                <Text style={styles.detailsCardTitle}>{t('companies.companyManager')}</Text>
                 {(() => {
                   const mid = companyManagerUserId(companyDetails);
                   const nested = nestedCompanyManagerUser(companyDetails);
@@ -1698,15 +1709,15 @@ export default function CompaniesScreen() {
                     companyDetails?.id != null
                       ? managerByCompany[String(companyDetails.id)]
                       : '';
-                  const label = u ? displayNameFromUserLike(u) : '';
+                  const label = u ? displayNameFromUserLike(u, t) : '';
                   const email = u ? userEmail(u) : '';
                   const st = u ? userStatusToken(u) : '';
-                  const badgeText = st ? st.charAt(0).toUpperCase() + st.slice(1) : 'Active';
+                  const badgeText = localizedEmployeeStatus(t, st || 'active');
                   if (companyDetailsManagerLoading && mid && !nested) {
                     return <ActivityIndicator style={{ marginVertical: 12 }} color="#3b82f6" />;
                   }
                   if (!mid && !nested) {
-                    return <Text style={styles.emptyText}>No manager assigned</Text>;
+                    return <Text style={styles.emptyText}>{t('companies.noManagerAssigned')}</Text>;
                   }
                   if (u) {
                     return (
@@ -1719,7 +1730,7 @@ export default function CompaniesScreen() {
                             {label}
                           </Text>
                           <Text style={styles.managerEmail} numberOfLines={1}>
-                            {email || '—'}
+                            {email || t('common.notAvailable')}
                           </Text>
                           <View style={[styles.managerStatusPill, st === 'inactive' && styles.managerStatusPillInactive]}>
                             <Text style={[styles.managerStatusText, st === 'inactive' && styles.managerStatusTextInactive]}>
@@ -1730,7 +1741,7 @@ export default function CompaniesScreen() {
                       </View>
                     );
                   }
-                  if (cachedName && cachedName !== 'No company manager') {
+                  if (cachedName && cachedName !== noManagerLabel) {
                     return (
                       <View style={styles.managerCard}>
                         <View style={styles.managerAvatar}>
@@ -1741,10 +1752,10 @@ export default function CompaniesScreen() {
                             {cachedName}
                           </Text>
                           <Text style={styles.managerEmail} numberOfLines={1}>
-                            —
+                            {t('common.notAvailable')}
                           </Text>
                           <View style={styles.managerStatusPill}>
-                            <Text style={styles.managerStatusText}>Active</Text>
+                            <Text style={styles.managerStatusText}>{t('employee.statusLabels.active')}</Text>
                           </View>
                         </View>
                       </View>
@@ -1753,25 +1764,25 @@ export default function CompaniesScreen() {
                   if (mid) {
                     return (
                       <Text style={styles.emptyText}>
-                        Manager assigned — profile details could not be loaded.
+                        {t('companies.loadFailed')}
                       </Text>
                     );
                   }
-                  return <Text style={styles.emptyText}>No manager assigned</Text>;
+                  return <Text style={styles.emptyText}>{t('companies.noManagerAssigned')}</Text>;
                 })()}
               </View>
             </View>
             <View style={styles.detailsEmployeesCard}>
               <Text style={styles.detailsCardTitle}>
-                Assigned Employees ({companyDetailsEmployees.length})
+                {t('employee.totalEmployees')} ({companyDetailsEmployees.length})
               </Text>
               {companyDetailsEmployeesLoading ? (
                 <ActivityIndicator style={{ marginVertical: 16 }} color="#3b82f6" />
               ) : companyDetailsEmployees.length === 0 ? (
                 <>
-                  <Text style={styles.emptyText}>No employees assigned to this company yet</Text>
+                  <Text style={styles.emptyText}>{t('companies.noEmployeesAssigned')}</Text>
                   <TouchableOpacity style={[styles.modalCancelButton, { marginTop: 12 }]}>
-                    <Text style={styles.cancelButtonText}>Add First Employee</Text>
+                    <Text style={styles.cancelButtonText}>{t('companies.addNewEmployee')}</Text>
                   </TouchableOpacity>
                 </>
               ) : (
@@ -1783,13 +1794,13 @@ export default function CompaniesScreen() {
                 >
                   {companyDetailsEmployees.map((e, i) => {
                     const eid = String(e?.id ?? e?.pk ?? '').trim() || `emp-${i}`;
-                    const name = assignedEmployeeDisplayName(e);
-                    const mail = String(e?.email ?? '').trim() || '—';
+                    const name = assignedEmployeeDisplayName(e, t);
+                    const mail = String(e?.email ?? '').trim() || t('common.notAvailable');
                     const dept =
                       typeof e?.department === 'object' && e?.department?.name
                         ? String(e.department.name)
-                        : String(e?.department_name ?? e?.department ?? '').trim() || '—';
-                    const pos = String(e?.position ?? e?.job_title ?? e?.title ?? '').trim() || '—';
+                        : String(e?.department_name ?? e?.department ?? '').trim() || t('common.notAvailable');
+                    const pos = String(e?.position ?? e?.job_title ?? e?.title ?? '').trim() || t('employee.noPosition');
                     return (
                       <View key={eid} style={styles.assignedEmployeeRow}>
                         <View style={styles.assignedEmployeeAvatar}>
@@ -1817,7 +1828,7 @@ export default function CompaniesScreen() {
       </Modal>
       <OptionPickerModal
         visible={companyOrgPicker}
-        title="Organization (Business Type)"
+        title={t('companies.businessType')}
         options={filteredOrgs.map((o) => ({ id: o.id, label: o.name }))}
         selectedId={orgIdForCompany}
         onSelect={(id) => setOrgIdForCompany(id)}
@@ -1825,15 +1836,15 @@ export default function CompaniesScreen() {
       />
       <OptionPickerModal
         visible={companyTypePicker}
-        title="Business Type"
-        options={COMPANY_TYPES.map((t) => ({ id: t, label: t }))}
+        title={t('companies.businessTypeShort')}
+        options={COMPANY_TYPES.map((type) => ({ id: type, label: type }))}
         selectedId={formCompanyType}
         onSelect={(id) => setFormCompanyType(id)}
         onClose={() => setCompanyTypePicker(false)}
       />
       <OptionPickerModal
         visible={managerPicker}
-        title={modal === 'org' ? 'Organization Manager' : 'Company Manager'}
+        title={modal === 'org' ? t('companies.organizationManager') : t('companies.companyManager')}
         options={modal === 'org' ? managerOptions : managerPickerOptions}
         selectedId={managerId ?? undefined}
         onSelect={(id) => setManagerId(id)}

@@ -17,6 +17,12 @@ import {
 } from 'react-native';
 import type { MotelRoomRow } from '../../api';
 import * as api from '../../api';
+import { useTranslation } from 'react-i18next';
+import {
+  localizedAdminStatus,
+  localizedCleaningSubStatus,
+  localizedFloorLabel,
+} from '../../lib/housekeepingI18n';
 
 function roomNumber(room: MotelRoomRow): string {
   const n =
@@ -97,14 +103,6 @@ function roomShowBook(room: MotelRoomRow): boolean {
   return rs === 'available';
 }
 
-function cleaningLabel(room: MotelRoomRow): string {
-  const rs = String((room as any).status ?? '').trim().toLowerCase();
-  if (rs === 'available') return '';
-  const s = String((room as any).cleaning_status ?? '').trim().toLowerCase();
-  if (s === 'pending') return 'Needs cleaning';
-  return '';
-}
-
 /** Wider approval dialog + thumb size so up to 5 cleaning photos fit on one row without horizontal scroll. */
 function cleaningApprovalThumbLayout(
   windowWidth: number,
@@ -148,6 +146,7 @@ export default function HotelAdminRoomsView({
   onRefresh,
   enableCleaningApprovalWorkflow = false,
 }: Props) {
+  const { t } = useTranslation();
   const { width } = useWindowDimensions();
   const [roomGridInnerWidth, setRoomGridInnerWidth] = useState(0);
   const tileMargin = 5;
@@ -202,7 +201,7 @@ export default function HotelAdminRoomsView({
   const openEdit = (room: MotelRoomRow) => {
     const pk = roomPk(room);
     if (!pk) {
-      Alert.alert('Edit room', 'This room has no server id. Refresh the list and try again.');
+      Alert.alert(t('housekeeping.admin.editRoom'), t('housekeeping.admin.roomIdMissingRefresh'));
       return;
     }
     setEditNumberDraft(roomNumber(room));
@@ -212,7 +211,7 @@ export default function HotelAdminRoomsView({
   const openBook = (room: MotelRoomRow) => {
     const pk = roomPk(room);
     if (!pk) {
-      Alert.alert('Book room', 'This room has no server id. Refresh the list and try again.');
+      Alert.alert(t('housekeeping.admin.bookRoom'), t('housekeeping.admin.roomIdMissingRefresh'));
       return;
     }
     setGuestNameDraft('');
@@ -225,7 +224,7 @@ export default function HotelAdminRoomsView({
     if (!pk) return;
     const next = editNumberDraft.trim();
     if (!next) {
-      Alert.alert('Edit room', 'Enter a room number.');
+      Alert.alert(t('housekeeping.admin.editRoom'), t('housekeeping.validation.roomNumberRequired'));
       return;
     }
     setSavingEdit(true);
@@ -234,7 +233,7 @@ export default function HotelAdminRoomsView({
       setEditRoom(null);
       await onRefresh();
     } catch (e: any) {
-      Alert.alert('Edit room', e?.message || 'Could not update room number');
+      Alert.alert(t('housekeeping.admin.editRoom'), e?.message || t('housekeeping.admin.couldNotUpdateRoom'));
     } finally {
       setSavingEdit(false);
     }
@@ -246,7 +245,7 @@ export default function HotelAdminRoomsView({
     if (!pk) return;
     const guest = guestNameDraft.trim();
     if (!guest) {
-      Alert.alert('Book room', 'Enter the guest name.');
+      Alert.alert(t('housekeeping.admin.bookRoom'), t('housekeeping.validation.guestNameRequired'));
       return;
     }
     setSavingBook(true);
@@ -255,7 +254,7 @@ export default function HotelAdminRoomsView({
       setBookRoom(null);
       await onRefresh();
     } catch (e: any) {
-      Alert.alert('Book room', e?.message || 'Could not book room');
+      Alert.alert(t('housekeeping.admin.bookRoom'), e?.message || t('housekeeping.admin.couldNotBook'));
     } finally {
       setSavingBook(false);
     }
@@ -264,7 +263,7 @@ export default function HotelAdminRoomsView({
   const runVacate = async (room: MotelRoomRow) => {
     const pk = roomPk(room);
     if (!pk) {
-      Alert.alert('Vacate', 'This room has no server id. Refresh and try again.');
+      Alert.alert(t('housekeeping.admin.vacate'), t('housekeeping.admin.roomIdMissingRefresh'));
       return;
     }
     const label = roomNumber(room);
@@ -274,18 +273,18 @@ export default function HotelAdminRoomsView({
         await api.vacateMotelRoom(pk);
         await onRefresh();
       } catch (e: any) {
-        Alert.alert('Vacate', e?.message || 'Could not vacate room');
+        Alert.alert(t('housekeeping.admin.vacate'), e?.message || t('housekeeping.admin.couldNotVacate'));
       } finally {
         setVacatingPk(null);
       }
     };
     if (Platform.OS === 'web' && typeof (globalThis as any).confirm === 'function') {
-      if ((globalThis as any).confirm(`Vacate room ${label}? This will check out the guest.`)) void go();
+      if ((globalThis as any).confirm(t('housekeeping.admin.vacateConfirmWeb', { label }))) void go();
       return;
     }
-    Alert.alert('Vacate room', `Check out the guest in room ${label}?`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Vacate', style: 'destructive', onPress: () => void go() },
+    Alert.alert(t('housekeeping.admin.vacateRoom'), t('housekeeping.admin.vacateConfirm', { label }), [
+      { text: t('common.cancel'), style: 'cancel' },
+      { text: t('housekeeping.admin.vacate'), style: 'destructive', onPress: () => void go() },
     ]);
   };
 
@@ -300,7 +299,7 @@ export default function HotelAdminRoomsView({
       const d = await api.getMotelRoomCleaningDetails(pk);
       setApprovalDetails(d as any);
     } catch (e: any) {
-      Alert.alert('Cleaning details', e?.message || 'Could not load cleaning details');
+      Alert.alert(t('housekeeping.admin.cleaningDetails'), e?.message || t('housekeeping.admin.couldNotLoadCleaningDetails'));
       setApprovalRoom(null);
     } finally {
       setApprovalLoading(false);
@@ -317,7 +316,7 @@ export default function HotelAdminRoomsView({
       setApprovalDetails(null);
       await onRefresh();
     } catch (e: any) {
-      Alert.alert('Approve', e?.message || 'Could not approve cleaning');
+      Alert.alert(t('housekeeping.inspection.approve'), e?.message || t('housekeeping.admin.couldNotApprove'));
     } finally {
       setApprovalSaving(false);
     }
@@ -332,7 +331,7 @@ export default function HotelAdminRoomsView({
       await api.markMotelRoomAvailable(pk);
       await onRefresh();
     } catch (e: any) {
-      Alert.alert('Available', e?.message || 'Could not mark room available');
+      Alert.alert(t('housekeeping.admin.markAvailable'), e?.message || t('housekeeping.admin.couldNotMarkAvailable'));
     } finally {
       setVacatingPk(null);
     }
@@ -341,7 +340,7 @@ export default function HotelAdminRoomsView({
   if (loading) {
     return (
       <View style={styles.centered}>
-        <Text style={styles.muted}>Loading rooms…</Text>
+        <Text style={styles.muted}>{t('housekeeping.loadingRooms')}</Text>
       </View>
     );
   }
@@ -352,25 +351,23 @@ export default function HotelAdminRoomsView({
       contentContainerStyle={styles.scrollContent}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
     >
-      <Text style={styles.title}>Hotel</Text>
-      <Text style={styles.subtitle}>
-        Room status from the motel rooms table (including status). Book, vacate, assign cleaning, or mark cleaned based on your role.
-      </Text>
+      <Text style={styles.title}>{t('housekeeping.titleHotel')}</Text>
+      <Text style={styles.subtitle}>{t('housekeeping.subtitleAdminGrid')}</Text>
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
       <View style={styles.filtersCard}>
-        <Text style={styles.filtersTitle}>Filters</Text>
+        <Text style={styles.filtersTitle}>{t('housekeeping.filters')}</Text>
         <Text style={styles.filtersHint}>
           {companyManagerSolo
-            ? 'Rooms for your company. Use floor to narrow the grid.'
+            ? t('housekeeping.subtitleAdminSolo')
             : showCompanyFilter
-              ? 'Select a motel company and optional floor.'
-              : 'Optional floor filter.'}
+              ? t('housekeeping.filtersHintAdmin')
+              : t('housekeeping.filtersHint')}
         </Text>
 
         {showCompanyFilter ? (
           <>
-            <Text style={styles.filterLabel}>Company</Text>
+            <Text style={styles.filterLabel}>{t('common.company')}</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipRow}>
               {companies.map((c) => (
                 <TouchableOpacity
@@ -386,16 +383,20 @@ export default function HotelAdminRoomsView({
             </ScrollView>
           </>
         ) : !companyManagerSolo && companies[0] ? (
-          <Text style={styles.companyOnlyHint}>Showing rooms for {companies[0].name}.</Text>
+          <Text style={styles.companyOnlyHint}>
+            {t('housekeeping.showingRoomsFor', { name: companies[0].name })}
+          </Text>
         ) : null}
 
-        <Text style={styles.filterLabel}>Floor</Text>
+        <Text style={styles.filterLabel}>{t('housekeeping.floorLabel')}</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipRow}>
           <TouchableOpacity
             style={[styles.chip, selectedFloor === '__all__' && styles.chipActive]}
             onPress={() => setSelectedFloor('__all__')}
           >
-            <Text style={[styles.chipText, selectedFloor === '__all__' && styles.chipTextActive]}>All floors</Text>
+            <Text style={[styles.chipText, selectedFloor === '__all__' && styles.chipTextActive]}>
+              {t('housekeeping.allFloors')}
+            </Text>
           </TouchableOpacity>
           {floors.map((f) => (
             <TouchableOpacity
@@ -403,39 +404,41 @@ export default function HotelAdminRoomsView({
               style={[styles.chip, selectedFloor === f && styles.chipActive]}
               onPress={() => setSelectedFloor(f)}
             >
-              <Text style={[styles.chipText, selectedFloor === f && styles.chipTextActive]}>Floor {f}</Text>
+              <Text style={[styles.chipText, selectedFloor === f && styles.chipTextActive]}>
+                {localizedFloorLabel(t, f)}
+              </Text>
             </TouchableOpacity>
           ))}
         </ScrollView>
 
         <TouchableOpacity style={styles.refreshBtn} onPress={onRefresh} activeOpacity={0.85}>
-          <Text style={styles.refreshBtnText}>Refresh</Text>
+          <Text style={styles.refreshBtnText}>{t('housekeeping.refreshRooms')}</Text>
         </TouchableOpacity>
       </View>
 
       <View style={styles.gridHeader}>
-        <Text style={styles.gridTitle}>Room grid</Text>
+        <Text style={styles.gridTitle}>{t('housekeeping.roomGrid')}</Text>
         <View style={styles.legendRow}>
           <View style={styles.legendItem}>
             <View style={[styles.legendDot, { backgroundColor: '#86EFAC' }]} />
-            <Text style={styles.legendText}>Available</Text>
+            <Text style={styles.legendText}>{t('housekeeping.legend.available')}</Text>
           </View>
           <View style={styles.legendItem}>
             <View style={[styles.legendDot, { backgroundColor: '#FCA5A5' }]} />
-            <Text style={styles.legendText}>Occupied</Text>
+            <Text style={styles.legendText}>{t('housekeeping.legend.occupied')}</Text>
           </View>
           <View style={styles.legendItem}>
             <View style={[styles.legendDot, { backgroundColor: '#FDE68A' }]} />
-            <Text style={styles.legendText}>Needs cleaning</Text>
+            <Text style={styles.legendText}>{t('housekeeping.legend.needsCleaning')}</Text>
           </View>
           <View style={styles.legendItem}>
             <View style={[styles.legendDot, { backgroundColor: VACATED_TILE_BG, borderColor: '#d4c4a8' }]} />
-            <Text style={styles.legendText}>Vacated</Text>
+            <Text style={styles.legendText}>{t('housekeeping.legend.vacated')}</Text>
           </View>
         </View>
       </View>
 
-      {filtered.length === 0 && !error ? <Text style={styles.muted}>No rooms for this filter.</Text> : null}
+      {filtered.length === 0 && !error ? <Text style={styles.muted}>{t('housekeeping.noRoomsFilter')}</Text> : null}
 
       <View
         style={styles.grid}
@@ -457,14 +460,18 @@ export default function HotelAdminRoomsView({
             ]}
           >
             <Text style={styles.tileNumber}>{roomNumber(room)}</Text>
-            <Text style={styles.tileStatus}>Status: {roomMotelStatusLabel(room)}</Text>
-            {cleaningLabel(room) ? <Text style={styles.tileSubStatus}>{cleaningLabel(room)}</Text> : null}
+            <Text style={styles.tileStatus}>
+              {t('housekeeping.admin.tileStatus', { status: localizedAdminStatus(t, roomMotelStatusLabel(room)) })}
+            </Text>
+            {localizedCleaningSubStatus(t, room) ? (
+              <Text style={styles.tileSubStatus}>{localizedCleaningSubStatus(t, room)}</Text>
+            ) : null}
             <TouchableOpacity style={styles.tileBtn} onPress={() => openEdit(room)} activeOpacity={0.85}>
-              <Text style={styles.tileBtnText}>Edit</Text>
+              <Text style={styles.tileBtnText}>{t('common.edit')}</Text>
             </TouchableOpacity>
             {enableCleaningApprovalWorkflow && (room as any).cleaning_completed === true && (room as any).approved !== true ? (
               <TouchableOpacity style={styles.tileBtn} onPress={() => void openApproval(room)} activeOpacity={0.85}>
-                <Text style={styles.tileBtnText}>Cleaning Completed</Text>
+                <Text style={styles.tileBtnText}>{t('housekeeping.admin.cleaningCompletedBtn')}</Text>
               </TouchableOpacity>
             ) : null}
             {enableCleaningApprovalWorkflow &&
@@ -476,7 +483,11 @@ export default function HotelAdminRoomsView({
                 activeOpacity={0.85}
                 disabled={vacatingPk === roomPk(room)}
               >
-                {vacatingPk === roomPk(room) ? <ActivityIndicator color="#0f172a" /> : <Text style={styles.tileBtnText}>Available</Text>}
+                {vacatingPk === roomPk(room) ? (
+                  <ActivityIndicator color="#0f172a" />
+                ) : (
+                  <Text style={styles.tileBtnText}>{t('housekeeping.admin.markAvailable')}</Text>
+                )}
               </TouchableOpacity>
             ) : null}
             {roomShowVacate(room) ? (
@@ -489,12 +500,12 @@ export default function HotelAdminRoomsView({
                 {vacatingPk === roomPk(room) ? (
                   <ActivityIndicator color="#0f172a" />
                 ) : (
-                  <Text style={styles.tileBtnText}>Vacate</Text>
+                  <Text style={styles.tileBtnText}>{t('housekeeping.admin.vacate')}</Text>
                 )}
               </TouchableOpacity>
             ) : roomShowBook(room) ? (
               <TouchableOpacity style={styles.tileBtn} onPress={() => openBook(room)} activeOpacity={0.85}>
-                <Text style={styles.tileBtnText}>Book</Text>
+                <Text style={styles.tileBtnText}>{t('housekeeping.admin.book')}</Text>
               </TouchableOpacity>
             ) : null}
           </View>
@@ -512,8 +523,8 @@ export default function HotelAdminRoomsView({
           <View style={styles.modalCenter} pointerEvents="box-none">
             <View style={[styles.modalCard, { maxWidth: Math.min(1100, Math.max(320, width - 32)) }]}>
               <View style={styles.modalTitleRow}>
-                <Text style={styles.modalTitle}>Cleaning approval</Text>
-                <TouchableOpacity onPress={() => !approvalSaving && setApprovalRoom(null)} hitSlop={12} accessibilityLabel="Close">
+                <Text style={styles.modalTitle}>{t('housekeeping.inspection.cleaningApproval')}</Text>
+                <TouchableOpacity onPress={() => !approvalSaving && setApprovalRoom(null)} hitSlop={12} accessibilityLabel={t('housekeeping.close')}>
                   <Text style={styles.modalClose}>×</Text>
                 </TouchableOpacity>
               </View>
@@ -525,7 +536,10 @@ export default function HotelAdminRoomsView({
               ) : approvalDetails ? (
                 <>
                   <Text style={styles.modalHint}>
-                    Room {approvalRoom ? roomNumber(approvalRoom) : '—'} • {approvalDetails.images?.length || 0} image(s)
+                    {t('housekeeping.admin.approvalRoomHint', {
+                      number: approvalRoom ? roomNumber(approvalRoom) : '—',
+                      count: approvalDetails.images?.length || 0,
+                    })}
                   </Text>
                   {approvalDetails.images?.length ? (
                     (() => {
@@ -546,7 +560,7 @@ export default function HotelAdminRoomsView({
                       );
                     })()
                   ) : (
-                    <Text style={styles.muted}>No images uploaded yet.</Text>
+                    <Text style={styles.muted}>{t('housekeeping.photos.noImagesYet')}</Text>
                   )}
                   <View style={styles.modalActions}>
                     <TouchableOpacity
@@ -554,7 +568,7 @@ export default function HotelAdminRoomsView({
                       onPress={() => !approvalSaving && setApprovalRoom(null)}
                       disabled={approvalSaving}
                     >
-                      <Text style={styles.modalBtnGhostText}>Close</Text>
+                      <Text style={styles.modalBtnGhostText}>{t('housekeeping.close')}</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={styles.modalBtnPrimary}
@@ -564,13 +578,13 @@ export default function HotelAdminRoomsView({
                       {approvalSaving ? (
                         <ActivityIndicator color="#fff" />
                       ) : (
-                        <Text style={styles.modalBtnPrimaryText}>Approve</Text>
+                        <Text style={styles.modalBtnPrimaryText}>{t('housekeeping.inspection.approve')}</Text>
                       )}
                     </TouchableOpacity>
                   </View>
                 </>
               ) : (
-                <Text style={styles.muted}>No details.</Text>
+                <Text style={styles.muted}>{t('housekeeping.noDetails')}</Text>
               )}
             </View>
           </View>
@@ -589,7 +603,7 @@ export default function HotelAdminRoomsView({
               <Image source={{ uri: imageViewerUri }} style={styles.viewerImage} resizeMode="contain" />
             ) : null}
             <TouchableOpacity style={styles.viewerCloseBtn} onPress={() => setImageViewerUri(null)} activeOpacity={0.85}>
-              <Text style={styles.viewerCloseText}>Close</Text>
+              <Text style={styles.viewerCloseText}>{t('housekeeping.close')}</Text>
             </TouchableOpacity>
           </Pressable>
         </Pressable>
@@ -601,20 +615,20 @@ export default function HotelAdminRoomsView({
           <View style={styles.modalCenter} pointerEvents="box-none">
             <View style={styles.modalCard}>
             <View style={styles.modalTitleRow}>
-              <Text style={styles.modalTitle}>Edit room number</Text>
-              <TouchableOpacity onPress={() => !savingEdit && setEditRoom(null)} hitSlop={12} accessibilityLabel="Close">
+              <Text style={styles.modalTitle}>{t('housekeeping.admin.editRoomNumber')}</Text>
+              <TouchableOpacity onPress={() => !savingEdit && setEditRoom(null)} hitSlop={12} accessibilityLabel={t('housekeeping.close')}>
                 <Text style={styles.modalClose}>×</Text>
               </TouchableOpacity>
             </View>
             <Text style={styles.modalHint}>
-              Update the display number for this room.{editRoom ? ` Room id: ${roomPk(editRoom) || '—'}` : ''}
+              {t('housekeeping.admin.updateRoomHint', { id: editRoom ? roomPk(editRoom) || '—' : '—' })}
             </Text>
-            <Text style={styles.modalLabel}>New room number</Text>
+            <Text style={styles.modalLabel}>{t('housekeeping.admin.newRoomNumber')}</Text>
             <TextInput
               style={styles.modalInput}
               value={editNumberDraft}
               onChangeText={setEditNumberDraft}
-              placeholder="e.g. 101"
+              placeholder={t('housekeeping.admin.roomNumberExample')}
               placeholderTextColor="#94a3b8"
               editable={!savingEdit}
               autoCapitalize="none"
@@ -625,7 +639,7 @@ export default function HotelAdminRoomsView({
                 onPress={() => !savingEdit && setEditRoom(null)}
                 disabled={savingEdit}
               >
-                <Text style={styles.modalBtnGhostText}>Cancel</Text>
+                <Text style={styles.modalBtnGhostText}>{t('common.cancel')}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.modalBtnPrimary}
@@ -635,7 +649,7 @@ export default function HotelAdminRoomsView({
                 {savingEdit ? (
                   <ActivityIndicator color="#fff" />
                 ) : (
-                  <Text style={styles.modalBtnPrimaryText}>Save</Text>
+                  <Text style={styles.modalBtnPrimaryText}>{t('common.save')}</Text>
                 )}
               </TouchableOpacity>
             </View>
@@ -650,18 +664,20 @@ export default function HotelAdminRoomsView({
           <View style={styles.modalCenter} pointerEvents="box-none">
             <View style={styles.modalCard}>
             <View style={styles.modalTitleRow}>
-              <Text style={styles.modalTitle}>Book room</Text>
-              <TouchableOpacity onPress={() => !savingBook && setBookRoom(null)} hitSlop={12} accessibilityLabel="Close">
+              <Text style={styles.modalTitle}>{t('housekeeping.admin.bookRoom')}</Text>
+              <TouchableOpacity onPress={() => !savingBook && setBookRoom(null)} hitSlop={12} accessibilityLabel={t('housekeeping.close')}>
                 <Text style={styles.modalClose}>×</Text>
               </TouchableOpacity>
             </View>
-            {bookRoom ? <Text style={styles.modalHint}>Room {roomNumber(bookRoom)}</Text> : null}
-            <Text style={styles.modalLabel}>Customer / guest name</Text>
+            {bookRoom ? (
+              <Text style={styles.modalHint}>{t('housekeeping.roomTitle', { number: roomNumber(bookRoom) })}</Text>
+            ) : null}
+            <Text style={styles.modalLabel}>{t('housekeeping.admin.guestName')}</Text>
             <TextInput
               style={styles.modalInput}
               value={guestNameDraft}
               onChangeText={setGuestNameDraft}
-              placeholder="Guest name"
+              placeholder={t('housekeeping.admin.guestNamePlaceholder')}
               placeholderTextColor="#94a3b8"
               editable={!savingBook}
             />
@@ -671,7 +687,7 @@ export default function HotelAdminRoomsView({
                 onPress={() => !savingBook && setBookRoom(null)}
                 disabled={savingBook}
               >
-                <Text style={styles.modalBtnGhostText}>Cancel</Text>
+                <Text style={styles.modalBtnGhostText}>{t('common.cancel')}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.modalBtnPrimary}
@@ -681,7 +697,7 @@ export default function HotelAdminRoomsView({
                 {savingBook ? (
                   <ActivityIndicator color="#fff" />
                 ) : (
-                  <Text style={styles.modalBtnPrimaryText}>Book</Text>
+                  <Text style={styles.modalBtnPrimaryText}>{t('housekeeping.admin.book')}</Text>
                 )}
               </TouchableOpacity>
             </View>

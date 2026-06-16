@@ -1,5 +1,6 @@
 import React, { memo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { useTranslation } from 'react-i18next';
 import type { MotelRoomRow } from '../../api';
 import {
   getEmployeeRoomCleaningBadge,
@@ -7,6 +8,7 @@ import {
   motelRoomNumber,
   motelRoomType,
 } from '../../lib/motelRoomDisplay';
+import { localizedCleaningBadgeLabel, localizedFloorLabel } from '../../lib/housekeepingI18n';
 
 type Props = {
   room: MotelRoomRow;
@@ -14,17 +16,23 @@ type Props = {
 };
 
 function MotelRoomCardInner({ room, onPress }: Props) {
+  const { t } = useTranslation();
   const badge = getEmployeeRoomCleaningBadge(room);
+  const badgeLabel = localizedCleaningBadgeLabel(t, room);
   return (
     <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.88}>
       <View style={styles.row}>
-        <Text style={styles.roomNum}>Room {motelRoomNumber(room)}</Text>
+        <Text style={styles.roomNum}>{t('housekeeping.roomTitle', { number: motelRoomNumber(room) })}</Text>
         <View style={[styles.badge, { backgroundColor: badge.bg }]}>
-          <Text style={[styles.badgeText, { color: badge.text }]}>{badge.label}</Text>
+          <Text style={[styles.badgeText, { color: badge.text }]}>{badgeLabel}</Text>
         </View>
       </View>
-      <Text style={styles.meta}>Type: {motelRoomType(room)}</Text>
-      <Text style={styles.meta}>Floor: {motelRoomFloor(room)}</Text>
+      <Text style={styles.meta}>
+        {t('housekeeping.details.roomType')}: {motelRoomType(room)}
+      </Text>
+      <Text style={styles.meta}>
+        {t('housekeeping.details.floor')}: {localizedFloorLabel(t, motelRoomFloor(room))}
+      </Text>
     </TouchableOpacity>
   );
 }

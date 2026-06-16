@@ -6,6 +6,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Alert, Platform } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import apiClient, { HttpError } from './api-client';
+import i18n from '../i18n';
 
 const LOGIN_FACE_GATE_KEY = '@zenotime/login_face_gate_done_user';
 
@@ -26,7 +27,7 @@ export async function getFaceEnrollmentStatus(): Promise<FaceEnrollmentStatus> {
 async function ensureCameraPermission(): Promise<boolean> {
   const perm = await ImagePicker.requestCameraPermissionsAsync();
   if (!perm.granted) {
-    Alert.alert('Camera permission', 'Allow camera access to capture your face for enrollment or verification.');
+    Alert.alert(i18n.t('authLibs.cameraPermissionTitle'), i18n.t('authLibs.cameraPermissionMessage'));
     return false;
   }
   return true;
@@ -101,20 +102,20 @@ export async function confirmAccountFaceForClockOrAlert(): Promise<boolean> {
 
   const uri = await pickFacePhotoFromCamera();
   if (!uri) {
-    Alert.alert('Face required', 'Clock actions require a matching face photo when enrollment is enabled.');
+    Alert.alert(i18n.t('authLibs.faceRequiredTitle'), i18n.t('authLibs.faceRequiredMessage'));
     return false;
   }
 
   const res = await verifyFaceWithUri(uri);
   if (res.unavailable) {
     Alert.alert(
-      'Face verification unavailable',
-      'The server is not configured for face matching (or the service is down). You cannot clock until this is fixed or enrollment is removed in Account.',
+      i18n.t('authLibs.faceVerificationUnavailableTitle'),
+      i18n.t('authLibs.faceVerificationUnavailableMessage'),
     );
     return false;
   }
   if (!res.verified) {
-    Alert.alert('Face not recognized', 'Try again with good lighting, facing the camera.');
+    Alert.alert(i18n.t('authLibs.faceNotRecognizedTitle'), i18n.t('authLibs.faceNotRecognizedMessage'));
     return false;
   }
   return true;
@@ -136,11 +137,11 @@ export async function runPostLoginFacePromptIfNeeded(userId: string): Promise<vo
 
   await new Promise<void>((resolve) => {
     Alert.alert(
-      'Verify your face',
-      'You have account face enrollment. Take a quick photo to confirm it is you (optional).',
+      i18n.t('authLibs.verifyFaceTitle'),
+      i18n.t('authLibs.verifyFaceMessage'),
       [
         {
-          text: 'Later',
+          text: i18n.t('authLibs.later'),
           style: 'cancel',
           onPress: () => {
             void (async () => {
@@ -150,16 +151,16 @@ export async function runPostLoginFacePromptIfNeeded(userId: string): Promise<vo
           },
         },
         {
-          text: 'Verify',
+          text: i18n.t('authLibs.verify'),
           onPress: () => {
             void (async () => {
               const uri = await pickFacePhotoFromCamera();
               if (uri) {
                 const res = await verifyFaceWithUri(uri);
                 if (res.unavailable) {
-                  Alert.alert('Unavailable', res.message || 'Face verification is not available on the server.');
+                  Alert.alert(i18n.t('authLibs.faceUnavailableTitle'), res.message || i18n.t('authLibs.faceNotVerifiedMessage'));
                 } else if (!res.verified) {
-                  Alert.alert('Not verified', 'Face did not match. You can try again from Account or at clock-in.');
+                  Alert.alert(i18n.t('authLibs.faceNotVerifiedTitle'), i18n.t('authLibs.faceNotVerifiedMessage'));
                 }
               }
               await AsyncStorage.setItem(LOGIN_FACE_GATE_KEY, userId);

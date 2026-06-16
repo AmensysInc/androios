@@ -15,6 +15,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useTranslation } from 'react-i18next';
 import * as api from '../../api';
 import { HttpError } from '../../lib/api-client';
 
@@ -26,11 +27,11 @@ export type ShiftTasksModalEmployee = {
   company_id?: string;
 };
 
-function displayName(emp: ShiftTasksModalEmployee): string {
+function displayName(emp: ShiftTasksModalEmployee, employeeFallback: string): string {
   const fn = (emp.first_name || '').trim();
   const ln = (emp.last_name || '').trim();
   if (fn || ln) return `${fn} ${ln}`.trim();
-  return emp.email || 'Employee';
+  return emp.email || employeeFallback;
 }
 
 function shiftIdOf(shift: any): string {
@@ -81,13 +82,13 @@ function isHovered(state: { pressed: boolean; hovered?: boolean }): boolean {
   return !!state.pressed || !!(Platform.OS === 'web' && state.hovered);
 }
 
-function formatApiError(e: unknown): string {
+function formatApiError(e: unknown, fallback: string): string {
   if (e instanceof HttpError) {
     const b = e.body as Record<string, unknown> | null | undefined;
     if (b?.detail && typeof b.detail === 'string') return b.detail;
   }
   if (e instanceof Error) return e.message;
-  return 'Request failed';
+  return fallback;
 }
 
 /** Create shift tasks from checklist template rows when apply-checklist has no calendar masters. */
@@ -129,6 +130,7 @@ export default function ShiftTasksModal({
   onClose,
   onTasksChanged,
 }: Props) {
+  const { t } = useTranslation();
   const { width, height } = useWindowDimensions();
   const [tasks, setTasks] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -156,12 +158,12 @@ export default function ShiftTasksModal({
       return list;
     } catch (e) {
       setTasks([]);
-      Alert.alert('Error', formatApiError(e));
+      Alert.alert(t('common.error'), formatApiError(e, t('shiftTasks.requestFailed')));
       return [];
     } finally {
       setLoading(false);
     }
-  }, [sid]);
+  }, [sid, t]);
 
   const loadCompanyTemplates = useCallback(async () => {
     const cid = String(companyId).trim();
@@ -236,7 +238,7 @@ export default function ShiftTasksModal({
       await loadShiftTasks();
       onTasksChanged?.();
     } catch (e) {
-      Alert.alert('Error', formatApiError(e));
+      Alert.alert(t('common.error'), formatApiError(e, t('shiftTasks.requestFailed')));
     } finally {
       setSaving(false);
     }
@@ -245,24 +247,28 @@ export default function ShiftTasksModal({
   const removeTask = (task: any) => {
     const id = shiftTaskId(task);
     if (!id) return;
-    Alert.alert('Remove task', `Remove "${shiftTaskTitle(task)}" from this shift?`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Remove',
-        style: 'destructive',
-        onPress: () => {
-          void (async () => {
-            try {
-              await api.deleteShiftTask(id);
-              await loadShiftTasks();
-              onTasksChanged?.();
-            } catch (e) {
-              Alert.alert('Error', formatApiError(e));
-            }
-          })();
+    Alert.alert(
+      t('shiftTasks.removeTaskTitle'),
+      t('shiftTasks.removeTaskConfirm', { title: shiftTaskTitle(task) }),
+      [
+        { text: t('common.cancel'), style: 'cancel' },
+        {
+          text: t('shiftTasks.remove'),
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              try {
+                await api.deleteShiftTask(id);
+                await loadShiftTasks();
+                onTasksChanged?.();
+              } catch (e) {
+                Alert.alert(t('common.error'), formatApiError(e, t('shiftTasks.requestFailed')));
+              }
+            })();
+          },
         },
-      },
-    ]);
+      ]
+    );
   };
 
   const applyTemplate = async (templateId: string, templateName: string) => {
@@ -291,7 +297,7 @@ export default function ShiftTasksModal({
       setChecklistOpen(true);
       onTasksChanged?.();
     } catch (e) {
-      Alert.alert('Error', formatApiError(e));
+      Alert.alert(t('common.error'), formatApiError(e, t('shiftTasks.requestFailed')));
     } finally {
       setApplyingTemplateId(null);
     }
@@ -318,7 +324,7 @@ export default function ShiftTasksModal({
           ]}
         >
           <View style={styles.head}>
-            <Text style={styles.title}>Shift tasks</Text>
+            <Text style={styles.title}>{t('shiftTasks.title')}</Text>
             <TouchableOpacity onPress={onClose} hitSlop={10}>
               <MaterialCommunityIcons name="close" size={22} color="#64748b" />
             </TouchableOpacity>
@@ -330,28 +336,31 @@ export default function ShiftTasksModal({
             keyboardShouldPersistTaps="handled"
           >
             <Text style={styles.empLine}>
-              {displayName(employee)} · {timeLabel}
+              {displayName(employee, t('common.employee'))} · {timeLabel}
             </Text>
-            <Text style={styles.hint}>These tasks will be shown to the employee when they clock in.</Text>
+            <Text style={styles.hint}>{t('shiftTasks.hint')}</Text>
 
             <View style={styles.tasksBox}>
               {loading ? (
                 <ActivityIndicator color="#2563eb" style={{ marginVertical: 16 }} />
               ) : tasks.length === 0 ? (
-                <Text style={styles.emptyTasks}>
-                  No tasks yet. Pick a checklist below or add one manually.
-                </Text>
+                <Text style={styles.emptyTasks}>{t('shiftTasks.emptyTasks')}</Text>
               ) : (
                 <>
                   {checklistHeaderName ? (
                     <Text style={styles.checklistGroupLabel}>
-                      Checklist: {checklistHeaderName}
+                      {t('shiftTasks.checklistLabel', { name: checklistHeaderName })}
                     </Text>
                   ) : null}
-                  {tasks.map((t, index) => {
-                    const tid = shiftTaskId(t) || `row-${index}`;
+                  {tasks.map((task, index) => {
+                    const tid = shiftTaskId(task) || `row-${index}`;
                     const fromChecklist =
-                      isChecklistShiftTask(t) || (!!appliedTemplateName && tasks.length > 0);
+                      isChecklistShiftTask(task) || (!!appliedTemplateName && tasks.length > 0);
+                    const taskTitle = shiftTaskTitle(task);
+                    const displayTitle =
+                      taskTitle === 'Task' && !(task?.title ?? task?.task_name)
+                        ? t('shiftTasks.taskFallback')
+                        : taskTitle;
                     return (
                       <View
                         key={tid}
@@ -361,17 +370,19 @@ export default function ShiftTasksModal({
                         ]}
                       >
                         <Text style={styles.taskRowTitle} numberOfLines={2}>
-                          {shiftTaskTitle(t)}
+                          {displayTitle}
                         </Text>
                         {fromChecklist ? (
                           <View style={styles.checklistBadge}>
-                            <Text style={styles.checklistBadgeText}>Checklist</Text>
+                            <Text style={styles.checklistBadgeText}>
+                              {t('shiftTasks.checklistFallback')}
+                            </Text>
                           </View>
                         ) : null}
                         <TouchableOpacity
-                          onPress={() => removeTask(t)}
+                          onPress={() => removeTask(task)}
                           hitSlop={10}
-                          accessibilityLabel="Delete task"
+                          accessibilityLabel={t('shiftTasks.deleteTaskA11y')}
                         >
                           <MaterialCommunityIcons name="trash-can-outline" size={20} color="#dc2626" />
                         </TouchableOpacity>
@@ -383,13 +394,13 @@ export default function ShiftTasksModal({
             </View>
 
             <View style={styles.checklistHead}>
-              <Text style={styles.sectionLabel}>Company checklists</Text>
+              <Text style={styles.sectionLabel}>{t('shiftTasks.companyChecklists')}</Text>
               <Pressable
                 style={(state) => [styles.checklistBtn, isHovered(state) && styles.checklistBtnHover]}
                 onPress={() => setChecklistOpen((o) => !o)}
               >
                 <Text style={styles.checklistBtnText}>
-                  {checklistOpen ? 'Hide checklists' : '+ checklist'}
+                  {checklistOpen ? t('shiftTasks.hideChecklists') : t('shiftTasks.addChecklist')}
                 </Text>
               </Pressable>
             </View>
@@ -399,13 +410,11 @@ export default function ShiftTasksModal({
                 {templatesLoading ? (
                   <ActivityIndicator color="#2563eb" style={{ marginVertical: 12 }} />
                 ) : templates.length === 0 ? (
-                  <Text style={styles.emptyChecklist}>
-                    No checklist templates for this company. Create them on the Check Lists page.
-                  </Text>
+                  <Text style={styles.emptyChecklist}>{t('shiftTasks.emptyTemplates')}</Text>
                 ) : (
                   templates.map((tpl) => {
                     const tplId = templateRowId(tpl);
-                    const name = tpl.name || tpl.title || 'Checklist';
+                    const name = tpl.name || tpl.title || t('shiftTasks.checklistFallback');
                     const expanded = expandedTemplateId === tplId;
                     const isApplied = appliedTemplateId === tplId;
                     const preview = templateTasksCache[tplId] ?? [];
@@ -429,7 +438,7 @@ export default function ShiftTasksModal({
                               </Text>
                               {isApplied && !expanded ? (
                                 <Text style={styles.tplAppliedHint}>
-                                  Click to show tasks above
+                                  {t('shiftTasks.appliedHint')}
                                 </Text>
                               ) : null}
                             </View>
@@ -446,7 +455,7 @@ export default function ShiftTasksModal({
                             {applyingTemplateId === tplId ? (
                               <ActivityIndicator size="small" color="#fff" />
                             ) : (
-                              <Text style={styles.applyBtnText}>Apply</Text>
+                              <Text style={styles.applyBtnText}>{t('shiftTasks.apply')}</Text>
                             )}
                           </TouchableOpacity>
                         </View>
@@ -455,13 +464,16 @@ export default function ShiftTasksModal({
                             {loadingPreview ? (
                               <ActivityIndicator size="small" color="#64748b" />
                             ) : preview.length === 0 ? (
-                              <Text style={styles.tplTaskEmpty}>No tasks in this template.</Text>
+                              <Text style={styles.tplTaskEmpty}>{t('shiftTasks.emptyTemplateTasks')}</Text>
                             ) : (
-                              preview.map((tk, i) => (
-                                <Text key={`${tplId}-${i}`} style={styles.tplTaskLine}>
-                                  · {templateTaskTitle(tk) || 'Task'}
-                                </Text>
-                              ))
+                              preview.map((tk, i) => {
+                                const previewTitle = templateTaskTitle(tk);
+                                return (
+                                  <Text key={`${tplId}-${i}`} style={styles.tplTaskLine}>
+                                    · {previewTitle || t('shiftTasks.taskFallback')}
+                                  </Text>
+                                );
+                              })
                             )}
                           </View>
                         ) : null}
@@ -472,12 +484,12 @@ export default function ShiftTasksModal({
               </View>
             ) : null}
 
-            <Text style={styles.addSectionTitle}>Add shift task</Text>
+            <Text style={styles.addSectionTitle}>{t('shiftTasks.addSectionTitle')}</Text>
             <TextInput
               style={styles.input}
               value={newTitle}
               onChangeText={setNewTitle}
-              placeholder="New task (e.g. Stock shelves, Clean restroom)"
+              placeholder={t('shiftTasks.newTaskPlaceholder')}
               placeholderTextColor="#94a3b8"
             />
             <Pressable
@@ -492,7 +504,7 @@ export default function ShiftTasksModal({
               {saving ? (
                 <ActivityIndicator color="#fff" />
               ) : (
-                <Text style={styles.addTaskBtnText}>Add task</Text>
+                <Text style={styles.addTaskBtnText}>{t('shiftTasks.addTask')}</Text>
               )}
             </Pressable>
           </ScrollView>

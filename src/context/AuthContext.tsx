@@ -10,6 +10,7 @@ import {
   clearBiometricLogin,
 } from '../lib/biometricAuth';
 import { clearFaceSessionFlags } from '../lib/accountFaceAuth';
+import i18n from '../i18n';
 
 export interface User {
   id: string;
@@ -72,7 +73,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const bioOn = Platform.OS !== 'web' && (await isBiometricLoginEnabled());
 
         if (bioOn) {
-          const unlocked = await authenticateWithBiometrics('Unlock Zeno Time Flow');
+          const unlocked = await authenticateWithBiometrics(i18n.t('login.unlockBiometricPrompt'));
           if (!mounted) return;
           if (!unlocked) {
             setUser(null);

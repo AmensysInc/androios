@@ -10,6 +10,7 @@ import {
   Alert,
   ActivityIndicator,
 } from 'react-native';
+import { useTranslation } from 'react-i18next';
 import apiClient from '../lib/api-client';
 import { useAuth } from '../context/AuthContext';
 
@@ -32,6 +33,7 @@ function shouldForcePasswordChange(user: any): boolean {
 }
 
 export default function AuthScreen({ navigation }: any) {
+  const { t } = useTranslation();
   const [mode, setMode] = useState<'login' | 'reset' | 'firstLogin'>('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -44,7 +46,7 @@ export default function AuthScreen({ navigation }: any) {
   const handleSignIn = async () => {
     const trimmed = username.trim();
     if (!trimmed || !password) {
-      Alert.alert('Validation', 'Please enter username and password');
+      Alert.alert(t('login.validationTitle'), t('login.validationError'));
       return;
     }
     setLoading(true);
@@ -55,7 +57,7 @@ export default function AuthScreen({ navigation }: any) {
         setCurrentPassword(password);
         setNewPassword('');
         setConfirmPassword('');
-        Alert.alert('Password update required', 'For first login, change your password to continue.');
+        Alert.alert(t('login.passwordUpdateRequired'), t('login.firstLoginDescription'));
         return;
       }
       await setSessionFromLogin({
@@ -64,7 +66,7 @@ export default function AuthScreen({ navigation }: any) {
         refresh,
       });
     } catch (e: any) {
-      Alert.alert('Sign in failed', e?.message || 'Invalid username or password.');
+      Alert.alert(t('login.signInFailed'), e?.message || t('login.invalidCredentials'));
     } finally {
       setLoading(false);
     }
@@ -73,11 +75,11 @@ export default function AuthScreen({ navigation }: any) {
   const handleResetPassword = async () => {
     const trimmed = username.trim();
     if (!trimmed || !currentPassword || !newPassword || !confirmPassword) {
-      Alert.alert('Validation', 'Please fill all password fields.');
+      Alert.alert(t('login.validationTitle'), t('login.completeAllPasswordFields'));
       return;
     }
     if (newPassword !== confirmPassword) {
-      Alert.alert('Validation', 'New password and confirm password do not match.');
+      Alert.alert(t('login.validationTitle'), t('login.passwordsDoNotMatch'));
       return;
     }
     setLoading(true);
@@ -87,7 +89,7 @@ export default function AuthScreen({ navigation }: any) {
         const { user, access, refresh } = await apiClient.loginWithSession(trimmed, newPassword);
         await setSessionFromLogin({ user, access, refresh });
       } else {
-        Alert.alert('Success', 'Password reset successful. Please sign in.');
+        Alert.alert(t('login.successTitle'), t('login.passwordResetSuccess'));
         setMode('login');
         setPassword('');
         setCurrentPassword('');
@@ -95,11 +97,18 @@ export default function AuthScreen({ navigation }: any) {
         setConfirmPassword('');
       }
     } catch (e: any) {
-      Alert.alert('Reset failed', e?.message || 'Failed to reset password.');
+      Alert.alert(t('login.resetFailed'), e?.message || t('login.failedToResetPassword'));
     } finally {
       setLoading(false);
     }
   };
+
+  const subtitle =
+    mode === 'login'
+      ? t('login.title')
+      : mode === 'firstLogin'
+        ? t('login.firstLoginTitle')
+        : t('login.resetPasswordTitle');
 
   return (
     <KeyboardAvoidingView
@@ -107,13 +116,11 @@ export default function AuthScreen({ navigation }: any) {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <View style={styles.card}>
-        <Text style={styles.title}>Zeno Time Flow</Text>
-        <Text style={styles.subtitle}>
-          {mode === 'login' ? 'Sign in' : mode === 'firstLogin' ? 'First login: change password' : 'Reset password'}
-        </Text>
+        <Text style={styles.title}>{t('login.appName')}</Text>
+        <Text style={styles.subtitle}>{subtitle}</Text>
         <TextInput
           style={styles.input}
-          placeholder="Username or email"
+          placeholder={t('login.usernamePlaceholder')}
           value={username}
           onChangeText={setUsername}
           autoCapitalize="none"
@@ -124,7 +131,7 @@ export default function AuthScreen({ navigation }: any) {
           <>
             <TextInput
               style={styles.input}
-              placeholder="Password"
+              placeholder={t('login.passwordPlaceholder')}
               value={password}
               onChangeText={setPassword}
               secureTextEntry
@@ -137,32 +144,32 @@ export default function AuthScreen({ navigation }: any) {
               {loading ? (
                 <ActivityIndicator color="#fff" />
               ) : (
-                <Text style={styles.buttonText}>Sign in</Text>
+                <Text style={styles.buttonText}>{t('login.submit')}</Text>
               )}
             </TouchableOpacity>
             <TouchableOpacity style={styles.link} onPress={() => setMode('reset')}>
-              <Text style={styles.linkText}>Reset Password</Text>
+              <Text style={styles.linkText}>{t('login.forgotPassword')}</Text>
             </TouchableOpacity>
           </>
         ) : (
           <>
             <TextInput
               style={styles.input}
-              placeholder="Current Password"
+              placeholder={t('login.currentPassword')}
               value={currentPassword}
               onChangeText={setCurrentPassword}
               secureTextEntry
             />
             <TextInput
               style={styles.input}
-              placeholder="New Password"
+              placeholder={t('login.newPassword')}
               value={newPassword}
               onChangeText={setNewPassword}
               secureTextEntry
             />
             <TextInput
               style={styles.input}
-              placeholder="Confirm New Password"
+              placeholder={t('login.confirmPassword')}
               value={confirmPassword}
               onChangeText={setConfirmPassword}
               secureTextEntry
@@ -175,12 +182,14 @@ export default function AuthScreen({ navigation }: any) {
               {loading ? (
                 <ActivityIndicator color="#fff" />
               ) : (
-                <Text style={styles.buttonText}>{mode === 'firstLogin' ? 'Change and Continue' : 'Reset Password'}</Text>
+                <Text style={styles.buttonText}>
+                  {mode === 'firstLogin' ? t('login.changePasswordAndContinue') : t('login.forgotPassword')}
+                </Text>
               )}
             </TouchableOpacity>
             {mode !== 'firstLogin' && (
               <TouchableOpacity style={styles.link} onPress={() => setMode('login')}>
-                <Text style={styles.linkText}>Back to sign in</Text>
+                <Text style={styles.linkText}>{t('login.backToSignIn')}</Text>
               </TouchableOpacity>
             )}
           </>
@@ -189,7 +198,7 @@ export default function AuthScreen({ navigation }: any) {
           style={styles.link}
           onPress={() => navigation.navigate('AdminAuth')}
         >
-          <Text style={styles.linkText}>Admin sign in</Text>
+          <Text style={styles.linkText}>{t('login.adminSignIn')}</Text>
         </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>

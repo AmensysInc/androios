@@ -8,6 +8,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as LocalAuthentication from 'expo-local-authentication';
 import * as SecureStore from 'expo-secure-store';
 import { Alert, Platform } from 'react-native';
+import i18n from '../i18n';
 
 /** Must match `TOKEN_KEY` in api-client.ts */
 const ACCESS_TOKEN_STORAGE_KEY = '@zenotime/access_token';
@@ -50,7 +51,7 @@ export async function authenticateWithBiometrics(promptMessage: string): Promise
     const result = await LocalAuthentication.authenticateAsync({
       promptMessage,
       fallbackLabel: 'Use passcode',
-      cancelLabel: 'Cancel',
+      cancelLabel: i18n.t('common.cancel'),
       disableDeviceFallback: false,
     });
     return result.success === true;
@@ -118,7 +119,7 @@ export async function requireClockBiometricOrAllow(): Promise<boolean> {
 export async function confirmClockBiometricOrAlert(): Promise<boolean> {
   const ok = await requireClockBiometricOrAllow();
   if (!ok) {
-    Alert.alert('Authentication required', 'Clock action was cancelled.');
+    Alert.alert(i18n.t('authLibs.authRequiredTitle'), i18n.t('authLibs.clockActionCancelled'));
   }
   return ok;
 }

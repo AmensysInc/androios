@@ -4,6 +4,7 @@
  */
 import { Alert, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import i18n from '../i18n';
 import apiClient from './api-client';
 import {
   authenticateWithBiometrics,
@@ -50,11 +51,11 @@ export async function promptFirstTimeDeviceRegistration(userId: string): Promise
   if (!can) {
     openPromptForUser = userId;
     Alert.alert(
-      'Biometrics not set up on this device',
-      'Add Face ID, Touch ID, or fingerprint in your device Settings to use secure verification at clock-in. You can still use the app with your password.',
+      i18n.t('authLibs.biometricsNotSetupTitle'),
+      i18n.t('authLibs.biometricsNotSetupMessage'),
       [
         {
-          text: 'OK',
+          text: i18n.t('authLibs.ok'),
           onPress: () => {
             openPromptForUser = null;
             void setStatus(userId, 'skipped');
@@ -68,11 +69,11 @@ export async function promptFirstTimeDeviceRegistration(userId: string): Promise
   openPromptForUser = userId;
   const label = await humanReadableBiometricTypes();
   Alert.alert(
-    'Register this device',
-    `Use ${label} on this device for an extra check when you clock in or out. Each device is separate. For account-wide face verification (any device), enroll under Account → Face verification.`,
+    i18n.t('authLibs.registerDeviceTitle'),
+    i18n.t('authLibs.registerDeviceMessage', { label }),
     [
       {
-        text: 'Not now',
+        text: i18n.t('authLibs.notNow'),
         style: 'cancel',
         onPress: () => {
           openPromptForUser = null;
@@ -80,7 +81,7 @@ export async function promptFirstTimeDeviceRegistration(userId: string): Promise
         },
       },
       {
-        text: 'Register',
+        text: i18n.t('authLibs.register'),
         onPress: () =>
           void runRegister(userId, () => {
             openPromptForUser = null;
@@ -92,11 +93,11 @@ export async function promptFirstTimeDeviceRegistration(userId: string): Promise
 
 async function runRegister(userId: string, onDone: () => void): Promise<void> {
   try {
-    const ok = await authenticateWithBiometrics('Verify your identity to register this device');
+    const ok = await authenticateWithBiometrics(i18n.t('authLibs.registerDeviceVerifyPrompt'));
     if (!ok) {
       Alert.alert(
-        'Not registered',
-        'Biometric verification was cancelled. You can try again after the next sign-in.',
+        i18n.t('authLibs.notRegisteredTitle'),
+        i18n.t('authLibs.notRegisteredMessage'),
       );
       return;
     }
@@ -105,12 +106,11 @@ async function runRegister(userId: string, onDone: () => void): Promise<void> {
     await setClockBiometricEnabled(true);
     await setStatus(userId, 'registered');
     Alert.alert(
-      'Device registered',
-      'We’ll ask for your face or fingerprint when you clock in or out on this device. You can turn this off on the Clock In screen anytime.',
+      i18n.t('authLibs.deviceRegisteredTitle'),
+      i18n.t('authLibs.deviceRegisteredMessage'),
     );
-  } catch (e) {
-    console.warn(e);
-    Alert.alert('Error', 'Could not complete registration. Try again after signing in.');
+  } catch {
+    Alert.alert(i18n.t('common.error'), i18n.t('authLibs.registrationFailed'));
   } finally {
     onDone();
   }

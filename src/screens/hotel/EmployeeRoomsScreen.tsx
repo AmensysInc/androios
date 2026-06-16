@@ -13,6 +13,7 @@ import {
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useFocusEffect, useNavigation, useRoute, type RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { useTranslation } from 'react-i18next';
 import type { MotelRoomRow } from '../../api';
 import { useAuth, type User } from '../../context/AuthContext';
 import { getPrimaryRoleFromUser, mergeNestedAuthUserPayload } from '../../types/auth';
@@ -21,6 +22,7 @@ import { useHotelCleaningAccess } from '../../hooks/useHotelCleaningAccess';
 import { useEmployeeMotelRooms } from '../../hooks/useEmployeeMotelRooms';
 import { useMotelCleaningSessionContext } from '../../context/MotelCleaningSessionContext';
 import { motelRoomFloor, motelRoomUuid, sortFloorKeys } from '../../lib/motelRoomDisplay';
+import { localizedFloorLabel } from '../../lib/housekeepingI18n';
 import MotelRoomGridTile from '../../components/hotel/MotelRoomGridTile';
 import RoomListSkeleton from '../../components/hotel/RoomListSkeleton';
 import RoomActionModal from '../../components/hotel/RoomActionModal';
@@ -29,19 +31,13 @@ import type { EmployeeRoomsStackParamList } from '../../navigation/EmployeeRooms
 type Nav = NativeStackNavigationProp<EmployeeRoomsStackParamList, 'EmployeeRoomsList'>;
 type ListRoute = RouteProp<EmployeeRoomsStackParamList, 'EmployeeRoomsList'>;
 
-const LEGEND = [
-  { color: '#86EFAC', label: 'Available' },
-  { color: '#DDD6FE', label: 'Pending Approval' },
-  { color: '#BFDBFE', label: 'Approved' },
-  { color: '#5EEAD4', label: 'Completed' },
-] as const;
-
 function roomFloorKey(room: MotelRoomRow): string {
   const f = motelRoomFloor(room);
   return !f || f === '—' ? 'Other' : f;
 }
 
 export default function EmployeeRoomsScreen() {
+  const { t } = useTranslation();
   const { width } = useWindowDimensions();
   const navigation = useNavigation<Nav>();
   const route = useRoute<ListRoute>();
@@ -55,6 +51,17 @@ export default function EmployeeRoomsScreen() {
   const { allowed: hotelAllowed, resolved: hotelResolved, variant: hotelVariant } = useHotelCleaningAccess(
     user,
     effectiveRole
+  );
+
+  const legend = useMemo(
+    () =>
+      [
+        { color: '#86EFAC', label: t('housekeeping.legend.available') },
+        { color: '#DDD6FE', label: t('housekeeping.legend.pendingApproval') },
+        { color: '#BFDBFE', label: t('housekeeping.legend.approved') },
+        { color: '#5EEAD4', label: t('housekeeping.legend.completed') },
+      ] as const,
+    [t]
   );
 
   const { rooms, loading, refreshing, error, refresh, patchRoom, initialLoad } = useEmployeeMotelRooms(
@@ -166,22 +173,21 @@ export default function EmployeeRoomsScreen() {
     <>
       <View style={styles.heroCard}>
         <MaterialCommunityIcons name="door-open" size={28} color="#2563eb" style={styles.heroIcon} />
-        <Text style={styles.subtitle}>
-          Tap a room to view details, start cleaning, run the timer, then capture required photos (camera only) and
-          save.
-        </Text>
+        <Text style={styles.subtitle}>{t('housekeeping.subtitleEmployee')}</Text>
       </View>
 
       <View style={styles.filtersCard}>
-        <Text style={styles.filtersTitle}>Filters</Text>
-        <Text style={styles.filtersHint}>Optional floor filter.</Text>
-        <Text style={styles.filterLabel}>Floor</Text>
+        <Text style={styles.filtersTitle}>{t('housekeeping.filters')}</Text>
+        <Text style={styles.filtersHint}>{t('housekeeping.filtersHint')}</Text>
+        <Text style={styles.filterLabel}>{t('housekeeping.floorLabel')}</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.floorScroll}>
           <TouchableOpacity
             style={[styles.floorChip, selectedFloor === null && styles.floorChipActive]}
             onPress={() => setSelectedFloor(null)}
           >
-            <Text style={[styles.floorChipText, selectedFloor === null && styles.floorChipTextActive]}>All floors</Text>
+            <Text style={[styles.floorChipText, selectedFloor === null && styles.floorChipTextActive]}>
+              {t('housekeeping.allFloors')}
+            </Text>
           </TouchableOpacity>
           {sortedFloors.map((f) => (
             <TouchableOpacity
@@ -190,12 +196,17 @@ export default function EmployeeRoomsScreen() {
               onPress={() => setSelectedFloor(f)}
             >
               <Text style={[styles.floorChipText, selectedFloor === f && styles.floorChipTextActive]}>
-                {f === 'Other' ? 'Other' : `Floor ${f}`}
+                {localizedFloorLabel(t, f)}
               </Text>
             </TouchableOpacity>
           ))}
         </ScrollView>
-        <TouchableOpacity style={styles.refreshBtn} onPress={onRefresh} activeOpacity={0.85}>
+        <TouchableOpacity
+          style={styles.refreshBtn}
+          onPress={onRefresh}
+          activeOpacity={0.85}
+          accessibilityLabel={t('housekeeping.refreshRooms')}
+        >
           <MaterialCommunityIcons name="refresh" size={22} color="#0f172a" />
         </TouchableOpacity>
       </View>
@@ -207,15 +218,15 @@ export default function EmployeeRoomsScreen() {
           activeOpacity={0.9}
         >
           <Text style={styles.activeBannerText}>
-            Cleaning in progress • {cleaningSession.timerLabel} — tap to continue
+            {t('housekeeping.activeSessionBanner', { timer: cleaningSession.timerLabel })}
           </Text>
         </TouchableOpacity>
       ) : null}
 
       <View style={styles.gridHeader}>
-        <Text style={styles.gridTitle}>Room grid</Text>
+        <Text style={styles.gridTitle}>{t('housekeeping.roomGrid')}</Text>
         <View style={styles.legendRow}>
-          {LEGEND.map((item) => (
+          {legend.map((item) => (
             <View key={item.label} style={styles.legendItem}>
               <View style={[styles.legendDot, { backgroundColor: item.color }]} />
               <Text style={styles.legendText}>{item.label}</Text>
@@ -232,7 +243,7 @@ export default function EmployeeRoomsScreen() {
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" />
-        <Text style={styles.muted}>Loading…</Text>
+        <Text style={styles.muted}>{t('common.loading')}</Text>
       </View>
     );
   }
@@ -248,7 +259,7 @@ export default function EmployeeRoomsScreen() {
   if (!isEmp || !hotelAllowed || hotelVariant !== 'employee_cleaning') {
     return (
       <View style={styles.centered}>
-        <Text style={styles.denied}>Access denied</Text>
+        <Text style={styles.denied}>{t('housekeeping.accessDenied')}</Text>
       </View>
     );
   }
@@ -273,7 +284,7 @@ export default function EmployeeRoomsScreen() {
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
           ListEmptyComponent={
             <Text style={styles.muted}>
-              {error ? error : 'No rooms found for your company. Pull down to refresh.'}
+              {error ? error : t('housekeeping.noRoomsEmployee')}
             </Text>
           }
           initialNumToRender={12}

@@ -16,6 +16,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
 import { confirmClockBiometricOrAlert } from '../lib/biometricAuth';
@@ -144,6 +145,7 @@ function schedulerEmployeeRowId(e: any): string {
 }
 
 export default function EmployeeDashboard() {
+  const { t } = useTranslation();
   const { width: windowWidth } = useWindowDimensions();
   /** Stack banner actions vertically on phones / narrow web (e.g. devtools device toolbar). */
   const heroCompact = windowWidth < 640;
@@ -325,7 +327,16 @@ export default function EmployeeDashboard() {
       api.shiftStartsAtMs(todayShift) ?? (todayShift.start_time ? new Date(todayShift.start_time).getTime() : null);
     const startStr = ms != null && !Number.isNaN(ms) ? formatTime(ms) : '—';
     const endStr = todayShift.end_time ? formatTime(new Date(todayShift.end_time).getTime()) : '—';
-    return `Scheduled: ${startStr} - ${endStr}`;
+    return t('employeeDashboard.scheduled', { range: `${startStr} - ${endStr}` });
+  }, [todayShift, t]);
+
+  const todayShiftTime = useMemo(() => {
+    if (!todayShift) return null;
+    const ms =
+      api.shiftStartsAtMs(todayShift) ?? (todayShift.start_time ? new Date(todayShift.start_time).getTime() : null);
+    const startStr = ms != null && !Number.isNaN(ms) ? formatTime(ms) : '—';
+    const endStr = todayShift.end_time ? formatTime(new Date(todayShift.end_time).getTime()) : '—';
+    return endStr !== '—' ? `${startStr} - ${endStr}` : startStr;
   }, [todayShift]);
 
   const todayEntries = entries.filter((e) => e.clock_in && isToday(new Date(e.clock_in)));
@@ -396,7 +407,7 @@ export default function EmployeeDashboard() {
       await api.clockIn({ employee_id: employee.id, shift_id: todayShift?.id });
       await load();
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Clock in failed');
+      Alert.alert(t('common.error'), e?.message || t('employeeDashboard.clockInFailed'));
     } finally {
       setActionLoading(false);
     }
@@ -404,7 +415,7 @@ export default function EmployeeDashboard() {
   const handleClockOut = async () => {
     const entryId = api.timeClockEntryId(activeEntry);
     if (!entryId) {
-      Alert.alert('Error', 'No active time entry to clock out.');
+      Alert.alert(t('common.error'), t('employeeDashboard.noActiveEntry'));
       return;
     }
     if (!(await confirmAccountFaceForClockOrAlert())) return;
@@ -414,7 +425,7 @@ export default function EmployeeDashboard() {
       await api.clockOut({ time_clock_entry_id: entryId, employee_id: employee.id });
       await load();
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Clock out failed');
+      Alert.alert(t('common.error'), e?.message || t('employeeDashboard.clockOutFailed'));
     } finally {
       setActionLoading(false);
     }
@@ -429,7 +440,7 @@ export default function EmployeeDashboard() {
       await api.startBreak(entryId);
       await load();
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Start break failed');
+      Alert.alert(t('common.error'), e?.message || t('employeeDashboard.startBreakFailed'));
     } finally {
       setActionLoading(false);
     }
@@ -444,7 +455,7 @@ export default function EmployeeDashboard() {
       await api.endBreak(entryId);
       await load();
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'End break failed');
+      Alert.alert(t('common.error'), e?.message || t('employeeDashboard.endBreakFailed'));
     } finally {
       setActionLoading(false);
     }
@@ -464,7 +475,7 @@ export default function EmployeeDashboard() {
     if (!employee?.id) return;
     const ymd = leaveDateYmd.trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) {
-      Alert.alert('Leave date', 'Use a valid date (YYYY-MM-DD).');
+      Alert.alert(t('employeeDashboard.leaveDateTitle'), t('employeeDashboard.leaveDateInvalid'));
       return;
     }
     const empId = String(employee.id ?? (employee as any).pk ?? '').trim();
@@ -524,15 +535,15 @@ export default function EmployeeDashboard() {
           _localPending: true,
         });
         Alert.alert(
-          'Request saved',
-          'Your leave request was stored for manager review. If your server supports leave requests, it will sync when available.'
+          t('employeeDashboard.requestSaved'),
+          t('employeeDashboard.leaveSavedLocal')
         );
       } else {
-        Alert.alert('Sent', 'Leave request submitted.');
+        Alert.alert(t('employeeDashboard.sent'), t('employeeDashboard.leaveSubmitted'));
       }
       setLeaveOpen(false);
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Could not submit leave request');
+      Alert.alert(t('common.error'), e?.message || t('employeeDashboard.leaveSubmitFailed'));
     } finally {
       setLeaveSending(false);
     }
@@ -540,11 +551,11 @@ export default function EmployeeDashboard() {
 
   const openSwapModal = () => {
     if (shifts.length === 0) {
-      Alert.alert('Request Swap', 'No shifts found for this week. Pull to refresh after your schedule is published.');
+      Alert.alert(t('employeeDashboard.swapModalTitle'), t('employeeDashboard.swapNoShifts'));
       return;
     }
     if (peerOptions.length === 0) {
-      Alert.alert('Request Swap', 'No coworkers found in your company to swap with.');
+      Alert.alert(t('employeeDashboard.swapModalTitle'), t('employeeDashboard.swapNoCoworkers'));
       return;
     }
     setSwapPicker(null);
@@ -576,7 +587,7 @@ export default function EmployeeDashboard() {
     const shift = resolveShiftFromSelection(shiftIdUse);
     const peer = coworkers.find((e) => schedulerEmployeeRowId(e) === peerIdUse);
     if (!shift || !peer) {
-      Alert.alert('Swap', 'Select a shift and a coworker.');
+      Alert.alert(t('employeeDashboard.swapModalTitle'), t('employeeDashboard.swapSelectBoth'));
       return;
     }
     const shiftPk = String(shift.id ?? shift.pk ?? shift.uuid ?? '').trim();
@@ -676,16 +687,16 @@ export default function EmployeeDashboard() {
           _localPending: true,
         });
         Alert.alert(
-          'Request saved',
-          'Your swap request was stored for manager review. If your server supports swap requests, it will sync when available.'
+          t('employeeDashboard.requestSaved'),
+          t('employeeDashboard.swapSavedLocal')
         );
       } else {
-        Alert.alert('Sent', 'Swap request submitted.');
+        Alert.alert(t('employeeDashboard.sent'), t('employeeDashboard.swapSubmitted'));
       }
       setSwapPicker(null);
       setSwapOpen(false);
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Could not submit swap request');
+      Alert.alert(t('common.error'), e?.message || t('employeeDashboard.swapSubmitFailed'));
     } finally {
       setSwapSending(false);
     }
@@ -698,7 +709,7 @@ export default function EmployeeDashboard() {
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color="#3b82f6" />
-        <Text style={styles.loadingText}>Loading dashboard...</Text>
+        <Text style={styles.loadingText}>{t('employeeDashboard.loading')}</Text>
       </View>
     );
   }
@@ -706,8 +717,8 @@ export default function EmployeeDashboard() {
   if (!employee) {
     return (
       <View style={styles.centered}>
-        <Text style={styles.noEmployeeTitle}>Not an employee</Text>
-        <Text style={styles.noEmployeeText}>Your account is not linked to an employee record.</Text>
+        <Text style={styles.noEmployeeTitle}>{t('employeeDashboard.notAnEmployee')}</Text>
+        <Text style={styles.noEmployeeText}>{t('employeeDashboard.notLinkedDescription')}</Text>
       </View>
     );
   }
@@ -729,13 +740,15 @@ export default function EmployeeDashboard() {
       </View>
       <View style={styles.card}>
         <Text style={styles.name}>{[employee.first_name, employee.last_name].filter(Boolean).join(' ') || 'Employee'}</Text>
-        {todayShift && <Text style={styles.shiftText}>Today: {scheduledLine?.replace('Scheduled: ', '') ?? '—'}</Text>}
+        {todayShift && todayShiftTime ? (
+          <Text style={styles.shiftText}>{t('employeeDashboard.todayLabel', { time: todayShiftTime })}</Text>
+        ) : null}
       </View>
 
       {!clockedIn && (
         <View style={[styles.card, heroCompact ? styles.heroBannerCompact : styles.heroBannerWide]}>
           <View style={[styles.heroLeft, heroCompact && styles.heroLeftCompact]}>
-            <Text style={styles.heroStatus}>{todayShift ? 'Not Clocked In' : 'No shift today'}</Text>
+            <Text style={styles.heroStatus}>{todayShift ? t('employeeDashboard.notClockedIn') : t('employeeDashboard.noShiftToday')}</Text>
             {scheduledLine ? <Text style={styles.heroScheduled}>{scheduledLine}</Text> : null}
           </View>
           <View
@@ -749,13 +762,13 @@ export default function EmployeeDashboard() {
               style={[styles.outlineBtn, heroCompact && styles.heroBtnFull]}
               onPress={openLeaveModal}
             >
-              <Text style={styles.outlineBtnText}>Request Leave</Text>
+              <Text style={styles.outlineBtnText}>{t('employeeDashboard.requestLeave')}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.outlineBtn, heroCompact && styles.heroBtnFull]}
               onPress={openSwapModal}
             >
-              <Text style={styles.outlineBtnText}>Request Swap</Text>
+              <Text style={styles.outlineBtnText}>{t('employeeDashboard.requestSwap')}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[
@@ -768,7 +781,7 @@ export default function EmployeeDashboard() {
             >
               <MaterialCommunityIcons name="play-circle-outline" size={20} color="#fff" />
               <MaterialCommunityIcons name="map-marker-outline" size={18} color="#fff" style={{ marginLeft: 6 }} />
-              <Text style={styles.clockInBlueText}>{actionLoading ? '…' : 'Clock In'}</Text>
+              <Text style={styles.clockInBlueText}>{actionLoading ? '…' : t('employeeDashboard.clockIn')}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -777,45 +790,45 @@ export default function EmployeeDashboard() {
       <View style={styles.statGrid}>
         <View style={styles.statCard}>
           <MaterialCommunityIcons name="clock-outline" size={22} color="#64748b" />
-          <Text style={styles.statCardTitle}>Today</Text>
+          <Text style={styles.statCardTitle}>{t('employeeDashboard.today')}</Text>
           <Text style={styles.statCardValue}>{hoursOneDecimal(todayHours)}</Text>
-          <Text style={styles.statCardMeta}>{todayEntries.length} entries</Text>
+          <Text style={styles.statCardMeta}>{todayEntries.length} {t('employeeDashboard.entries')}</Text>
         </View>
         <View style={styles.statCard}>
           <MaterialCommunityIcons name="calendar-month-outline" size={22} color="#64748b" />
-          <Text style={styles.statCardTitle}>This Week</Text>
+          <Text style={styles.statCardTitle}>{t('employeeDashboard.thisWeek')}</Text>
           <Text style={styles.statCardValue}>{hoursOneDecimal(weekHours)}</Text>
-          <Text style={styles.statCardMeta}>{weekEntries.length} entries</Text>
+          <Text style={styles.statCardMeta}>{weekEntries.length} {t('employeeDashboard.entries')}</Text>
         </View>
         <View style={styles.statCard}>
           <MaterialCommunityIcons name="chart-line" size={22} color="#64748b" />
-          <Text style={styles.statCardTitle}>This Month</Text>
+          <Text style={styles.statCardTitle}>{t('employeeDashboard.thisMonth')}</Text>
           <Text style={styles.statCardValue}>{hoursOneDecimal(monthHours)}</Text>
-          <Text style={styles.statCardMeta}>{monthEntries.length} entries</Text>
+          <Text style={styles.statCardMeta}>{monthEntries.length} {t('employeeDashboard.entries')}</Text>
         </View>
         <View style={styles.statCard}>
           <MaterialCommunityIcons name="check-circle-outline" size={22} color="#64748b" />
-          <Text style={styles.statCardTitle}>Upcoming Shifts</Text>
+          <Text style={styles.statCardTitle}>{t('employeeDashboard.upcomingShifts')}</Text>
           <Text style={styles.statCardValue}>{upcomingThisWeekCount}</Text>
-          <Text style={styles.statCardMeta}>This week</Text>
+          <Text style={styles.statCardMeta}>{t('employeeDashboard.thisWeekLabel')}</Text>
         </View>
       </View>
 
       {clockedIn && (
         <View style={[styles.statusBox, onBreak ? styles.statusBreak : styles.statusClockedIn]}>
-          <Text style={styles.statusTitle}>{onBreak ? 'ON BREAK' : 'CLOCKED IN'}</Text>
+          <Text style={styles.statusTitle}>{onBreak ? t('employeeDashboard.onBreak') : t('employeeDashboard.clockedIn')}</Text>
           <Text style={styles.statusTime}>{formatDuration(onBreak ? breakDuration : elapsed)}</Text>
           {onBreak ? (
             <TouchableOpacity style={styles.buttonGreen} onPress={handleEndBreak} disabled={actionLoading}>
-              <Text style={styles.buttonText}>{actionLoading ? '…' : 'End break'}</Text>
+              <Text style={styles.buttonText}>{actionLoading ? '…' : t('employeeDashboard.endBreak')}</Text>
             </TouchableOpacity>
           ) : (
             <View style={styles.buttonRow}>
               <TouchableOpacity style={styles.buttonOrange} onPress={handleStartBreak} disabled={actionLoading}>
-                <Text style={styles.buttonTextDark}>Break</Text>
+                <Text style={styles.buttonTextDark}>{t('employeeDashboard.break')}</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.buttonRed} onPress={handleClockOut} disabled={actionLoading}>
-                <Text style={styles.buttonText}>{actionLoading ? '…' : 'Clock out'}</Text>
+                <Text style={styles.buttonText}>{actionLoading ? '…' : t('employeeDashboard.clockOut')}</Text>
               </TouchableOpacity>
             </View>
           )}
@@ -824,7 +837,7 @@ export default function EmployeeDashboard() {
 
       {shifts.length > 0 && (
         <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Upcoming shifts</Text>
+          <Text style={styles.sectionTitle}>{t('employeeDashboard.upcomingShiftsSection')}</Text>
           {shifts.slice(0, 7).map((s) => {
             const startMs =
               api.shiftStartsAtMs(s) ?? (s.start_time ? new Date(s.start_time).getTime() : null);
@@ -832,7 +845,7 @@ export default function EmployeeDashboard() {
               <Text key={String(s.id ?? s.pk ?? startMs)} style={styles.shiftRow}>
                 {startMs != null
                   ? `${new Date(startMs).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })} – ${formatTime(startMs)}`
-                  : 'Shift'}
+                  : t('employeeDashboard.shiftFallback')}
                 {s.end_time ? ` – ${formatTime(new Date(s.end_time).getTime())}` : ''}
               </Text>
             );
@@ -840,25 +853,25 @@ export default function EmployeeDashboard() {
         </View>
       )}
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Upcoming tasks</Text>
+        <Text style={styles.sectionTitle}>{t('employeeDashboard.upcomingTasks')}</Text>
         {tasks.length === 0 ? (
-          <Text style={styles.shiftRow}>No tasks found</Text>
+          <Text style={styles.shiftRow}>{t('employeeDashboard.noTasksFound')}</Text>
         ) : (
           tasks
             .slice()
             .sort((a, b) => (eventStartMs(a) ?? 0) - (eventStartMs(b) ?? 0))
             .slice(0, 6)
-            .map((t) => (
+            .map((task) => (
               <Text
                 key={String(
-                  t?.id ??
-                    t?.pk ??
-                    t?.uuid ??
-                    `${String(t?.title ?? t?.name ?? '')}|${String(t?.start_time ?? t?.created_at ?? '')}`
+                  task?.id ??
+                    task?.pk ??
+                    task?.uuid ??
+                    `${String(task?.title ?? task?.name ?? '')}|${String(task?.start_time ?? task?.created_at ?? '')}`
                 )}
                 style={styles.shiftRow}
               >
-                {String(t?.title ?? t?.name ?? 'Task')}
+                {String(task?.title ?? task?.name ?? t('employeeDashboard.taskFallback'))}
               </Text>
             ))
         )}
@@ -874,13 +887,13 @@ export default function EmployeeDashboard() {
         <Pressable style={StyleSheet.absoluteFill} onPress={() => !leaveSending && setLeaveOpen(false)} />
         <View style={styles.modalCard}>
           <View style={styles.modalHead}>
-            <Text style={styles.modalTitle}>Request Leave</Text>
+            <Text style={styles.modalTitle}>{t('employeeDashboard.leaveModalTitle')}</Text>
             <TouchableOpacity onPress={() => !leaveSending && setLeaveOpen(false)} hitSlop={12}>
               <MaterialCommunityIcons name="close" size={22} color="#64748b" />
             </TouchableOpacity>
           </View>
-          <Text style={styles.modalHint}>Select leave date to send request for approval.</Text>
-          <Text style={styles.modalLabel}>Leave Date</Text>
+          <Text style={styles.modalHint}>{t('employeeDashboard.leaveModalHint')}</Text>
+          <Text style={styles.modalLabel}>{t('employeeDashboard.leaveDate')}</Text>
           <TextInput
             style={styles.modalInput}
             value={leaveDateYmd}
@@ -893,21 +906,21 @@ export default function EmployeeDashboard() {
                 } as any)
               : {})}
           />
-          <Text style={[styles.modalLabel, { marginTop: 12 }]}>Reason (optional)</Text>
+          <Text style={[styles.modalLabel, { marginTop: 12 }]}>{t('employeeDashboard.reasonOptional')}</Text>
           <TextInput
             style={[styles.modalInput, styles.modalTextArea]}
             value={leaveReason}
             onChangeText={setLeaveReason}
-            placeholder="Add a note for your manager"
+            placeholder={t('employeeDashboard.notePlaceholder')}
             placeholderTextColor="#94a3b8"
             multiline
           />
           <View style={styles.modalActions}>
             <TouchableOpacity style={styles.modalGhost} onPress={() => !leaveSending && setLeaveOpen(false)}>
-              <Text style={styles.modalGhostText}>Cancel</Text>
+              <Text style={styles.modalGhostText}>{t('common.cancel')}</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.modalPrimary} onPress={() => void submitLeave()} disabled={leaveSending}>
-              {leaveSending ? <ActivityIndicator color="#fff" /> : <Text style={styles.modalPrimaryText}>Send Request</Text>}
+              {leaveSending ? <ActivityIndicator color="#fff" /> : <Text style={styles.modalPrimaryText}>{t('employeeDashboard.sendRequest')}</Text>}
             </TouchableOpacity>
           </View>
         </View>
@@ -944,9 +957,9 @@ export default function EmployeeDashboard() {
               <>
                 <TouchableOpacity style={styles.pickerBackRow} onPress={() => setSwapPicker(null)} disabled={swapSending}>
                   <MaterialCommunityIcons name="arrow-left" size={22} color="#2563eb" />
-                  <Text style={styles.pickerBackText}>Back</Text>
+                  <Text style={styles.pickerBackText}>{t('employeeDashboard.back')}</Text>
                 </TouchableOpacity>
-                <Text style={[styles.modalTitle, { marginBottom: 8 }]}>Your Shift</Text>
+                <Text style={[styles.modalTitle, { marginBottom: 8 }]}>{t('employeeDashboard.yourShift')}</Text>
                 <ScrollView style={styles.pickerScroll} keyboardShouldPersistTaps="handled">
                   {shiftOptions.map((o, idx) => (
                     <TouchableOpacity
@@ -966,9 +979,9 @@ export default function EmployeeDashboard() {
               <>
                 <TouchableOpacity style={styles.pickerBackRow} onPress={() => setSwapPicker(null)} disabled={swapSending}>
                   <MaterialCommunityIcons name="arrow-left" size={22} color="#2563eb" />
-                  <Text style={styles.pickerBackText}>Back</Text>
+                  <Text style={styles.pickerBackText}>{t('employeeDashboard.back')}</Text>
                 </TouchableOpacity>
-                <Text style={[styles.modalTitle, { marginBottom: 8 }]}>Swap With</Text>
+                <Text style={[styles.modalTitle, { marginBottom: 8 }]}>{t('employeeDashboard.swapWith')}</Text>
                 <ScrollView style={styles.pickerScroll} keyboardShouldPersistTaps="handled">
                   {peerOptions.map((o, idx) => (
                     <TouchableOpacity
@@ -987,7 +1000,7 @@ export default function EmployeeDashboard() {
             ) : (
               <>
                 <View style={styles.modalHead}>
-                  <Text style={styles.modalTitle}>Request Swap</Text>
+                  <Text style={styles.modalTitle}>{t('employeeDashboard.swapModalTitle')}</Text>
                   <TouchableOpacity
                     onPress={() => {
                       if (!swapSending) {
@@ -1000,22 +1013,22 @@ export default function EmployeeDashboard() {
                     <MaterialCommunityIcons name="close" size={22} color="#64748b" />
                   </TouchableOpacity>
                 </View>
-                <Text style={styles.modalHint}>Select your shift and replacement coworker.</Text>
-                <Text style={styles.modalLabel}>Your Shift</Text>
+                <Text style={styles.modalHint}>{t('employeeDashboard.swapModalHint')}</Text>
+                <Text style={styles.modalLabel}>{t('employeeDashboard.yourShift')}</Text>
                 <TouchableOpacity style={styles.modalSelect} onPress={() => setSwapPicker('shift')} disabled={swapSending}>
                   <Text style={styles.modalSelectText} numberOfLines={2}>
                     {shiftOptions.find((o) => o.id === swapShiftId)?.label ??
                       shiftOptions[0]?.label ??
-                      'Select shift'}
+                      t('employeeDashboard.selectShift')}
                   </Text>
                   <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                 </TouchableOpacity>
-                <Text style={[styles.modalLabel, { marginTop: 12 }]}>Swap With</Text>
+                <Text style={[styles.modalLabel, { marginTop: 12 }]}>{t('employeeDashboard.swapWith')}</Text>
                 <TouchableOpacity style={styles.modalSelect} onPress={() => setSwapPicker('peer')} disabled={swapSending}>
                   <Text style={styles.modalSelectText} numberOfLines={1}>
                     {peerOptions.find((o) => o.id === swapPeerId)?.label ??
                       peerOptions[0]?.label ??
-                      'Select employee'}
+                      t('employeeDashboard.selectEmployee')}
                   </Text>
                   <MaterialCommunityIcons name="chevron-down" size={22} color="#64748b" />
                 </TouchableOpacity>
@@ -1029,13 +1042,13 @@ export default function EmployeeDashboard() {
                       }
                     }}
                   >
-                    <Text style={styles.modalGhostText}>Cancel</Text>
+                    <Text style={styles.modalGhostText}>{t('common.cancel')}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={styles.modalPrimary} onPress={() => void submitSwap()} disabled={swapSending}>
                     {swapSending ? (
                       <ActivityIndicator color="#fff" />
                     ) : (
-                      <Text style={styles.modalPrimaryText}>Send Request</Text>
+                      <Text style={styles.modalPrimaryText}>{t('employeeDashboard.sendRequest')}</Text>
                     )}
                   </TouchableOpacity>
                 </View>

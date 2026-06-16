@@ -10,6 +10,7 @@ import {
   ScrollView,
   Switch,
 } from 'react-native';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../context/AuthContext';
 import * as api from '../api';
 import {
@@ -26,21 +27,19 @@ function parseMs(iso: string | null): number | null {
 }
 
 export default function ClockInScreen() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [employee, setEmployee] = useState<any>(null);
   const [activeEntry, setActiveEntry] = useState<any>(null);
-  const [entries, setEntries] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const [now, setNow] = useState(Date.now());
   const [requireBioForClock, setRequireBioForClock] = useState(false);
 
   useEffect(() => {
     isClockBiometricEnabled().then(setRequireBioForClock);
   }, []);
-
 
   const load = useCallback(async () => {
     if (!user?.id) {
@@ -57,7 +56,6 @@ export default function ClockInScreen() {
       }
       const entryList = await api.getTimeClockEntriesForEmployee(emp.id);
       const list = Array.isArray(entryList) ? entryList : [];
-      setEntries(list);
       const active = api.pickActiveTimeClockEntry(list);
       setActiveEntry(active);
       if (active) {
@@ -84,8 +82,7 @@ export default function ClockInScreen() {
 
   useEffect(() => {
     if (!activeEntry) return;
-    const t = setInterval(() => {
-      setNow(Date.now());
+    const timer = setInterval(() => {
       const ci = parseMs(activeEntry.clock_in);
       const bs = parseMs(activeEntry.break_start);
       const be = parseMs(activeEntry.break_end);
@@ -93,7 +90,7 @@ export default function ClockInScreen() {
       if (bs && be) breakSec = Math.floor((be - bs) / 1000);
       setElapsed(Math.max(0, Math.floor((Date.now() - (ci || 0)) / 1000) - breakSec));
     }, 1000);
-    return () => clearInterval(t);
+    return () => clearInterval(timer);
   }, [activeEntry]);
 
   const onClockIn = async () => {
@@ -104,8 +101,9 @@ export default function ClockInScreen() {
     try {
       await api.clockIn({ employee_id: employee.id });
       await load();
+      Alert.alert(t('common.success'), t('timeClock.clockInSuccessful'));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Clock in failed');
+      Alert.alert(t('common.error'), e?.message || t('timeClock.clockInFailed'));
     } finally {
       setActionLoading(false);
     }
@@ -114,7 +112,7 @@ export default function ClockInScreen() {
   const onClockOut = async () => {
     const entryId = api.timeClockEntryId(activeEntry);
     if (!entryId) {
-      Alert.alert('Error', 'No active time entry to clock out.');
+      Alert.alert(t('common.error'), t('employeeDashboard.noActiveEntry'));
       return;
     }
     if (!(await confirmAccountFaceForClockOrAlert())) return;
@@ -123,8 +121,9 @@ export default function ClockInScreen() {
     try {
       await api.clockOut({ time_clock_entry_id: entryId, employee_id: employee.id });
       await load();
+      Alert.alert(t('common.success'), t('timeClock.clockOutSuccessful'));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Clock out failed');
+      Alert.alert(t('common.error'), e?.message || t('timeClock.clockOutFailed'));
     } finally {
       setActionLoading(false);
     }
@@ -139,8 +138,9 @@ export default function ClockInScreen() {
     try {
       await api.startBreak(entryId);
       await load();
+      Alert.alert(t('common.success'), t('timeClock.breakStarted'));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Start break failed');
+      Alert.alert(t('common.error'), e?.message || t('employeeDashboard.startBreakFailed'));
     } finally {
       setActionLoading(false);
     }
@@ -155,8 +155,9 @@ export default function ClockInScreen() {
     try {
       await api.endBreak(entryId);
       await load();
+      Alert.alert(t('common.success'), t('timeClock.breakEnded'));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'End break failed');
+      Alert.alert(t('common.error'), e?.message || t('employeeDashboard.endBreakFailed'));
     } finally {
       setActionLoading(false);
     }
@@ -175,7 +176,7 @@ export default function ClockInScreen() {
   if (!employee) {
     return (
       <View style={styles.centered}>
-        <Text style={styles.msg}>No employee record linked to your account. Use My Dashboard for time clock.</Text>
+        <Text style={styles.msg}>{t('timeClock.noEmployeeLinked')}</Text>
       </View>
     );
   }
@@ -186,13 +187,13 @@ export default function ClockInScreen() {
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
     >
       <View style={styles.header}>
-        <Text style={styles.title}>Clock In</Text>
+        <Text style={styles.title}>{t('timeClock.clockIn')}</Text>
         <Text style={styles.sub}>{employee.first_name} {employee.last_name}</Text>
       </View>
       <View style={styles.bioRow}>
         <View style={styles.bioTextWrap}>
-          <Text style={styles.bioLabel}>Require Face ID / fingerprint for clock actions</Text>
-          <Text style={styles.bioHint}>Extra check before clock in, clock out, and breaks</Text>
+          <Text style={styles.bioLabel}>{t('timeClock.requireBiometric')}</Text>
+          <Text style={styles.bioHint}>{t('timeClock.requireBiometricHint')}</Text>
         </View>
         <Switch
           value={requireBioForClock}
@@ -205,29 +206,29 @@ export default function ClockInScreen() {
       {activeEntry ? (
         <>
           <View style={styles.card}>
-            <Text style={styles.clockLabel}>Currently clocked in</Text>
+            <Text style={styles.clockLabel}>{t('timeClock.currentlyClockedIn')}</Text>
             <Text style={styles.clockTime}>
               {Math.floor(elapsed / 3600)}h {Math.floor((elapsed % 3600) / 60)}m
             </Text>
           </View>
           {inBreak ? (
             <TouchableOpacity style={styles.btnPrimary} onPress={onEndBreak} disabled={actionLoading}>
-              <Text style={styles.btnText}>{actionLoading ? '…' : 'End Break'}</Text>
+              <Text style={styles.btnText}>{actionLoading ? '…' : t('timeClock.endBreak')}</Text>
             </TouchableOpacity>
           ) : (
             <>
               <TouchableOpacity style={styles.btnSecondary} onPress={onStartBreak} disabled={actionLoading}>
-                <Text style={styles.btnTextSecondary}>{actionLoading ? '…' : 'Start Break'}</Text>
+                <Text style={styles.btnTextSecondary}>{actionLoading ? '…' : t('timeClock.startBreak')}</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.btnDanger} onPress={onClockOut} disabled={actionLoading}>
-                <Text style={styles.btnText}>{actionLoading ? '…' : 'Clock Out'}</Text>
+                <Text style={styles.btnText}>{actionLoading ? '…' : t('timeClock.clockOut')}</Text>
               </TouchableOpacity>
             </>
           )}
         </>
       ) : (
         <TouchableOpacity style={styles.btnPrimary} onPress={onClockIn} disabled={actionLoading}>
-          <Text style={styles.btnText}>{actionLoading ? '…' : 'Clock In'}</Text>
+          <Text style={styles.btnText}>{actionLoading ? '…' : t('timeClock.clockIn')}</Text>
         </TouchableOpacity>
       )}
     </ScrollView>

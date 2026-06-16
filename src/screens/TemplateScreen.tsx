@@ -16,7 +16,9 @@ import {
   KeyboardAvoidingView,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../context/AuthContext';
+import { priorityLabel, priorityOptions } from '../lib/taskI18n';
 import * as api from '../api';
 import { HttpError } from '../lib/api-client';
 import { useTasksScopeFilters } from '../hooks/useTasksScopeFilters';
@@ -55,7 +57,7 @@ function taskRowId(t: any): string {
   return id != null ? String(id) : '';
 }
 
-function formatTemplateError(e: unknown): string {
+function formatTemplateError(e: unknown, requestFailed: string): string {
   if (e instanceof HttpError) {
     const b = e.body as Record<string, unknown> | null | undefined;
     if (b && typeof b === 'object') {
@@ -70,24 +72,18 @@ function formatTemplateError(e: unknown): string {
       }
       if (parts.length) return parts.join('\n');
     }
-    return e.message || 'Request failed';
+    return e.message || requestFailed;
   }
   if (e instanceof Error) return e.message;
-  return 'Request failed';
+  return requestFailed;
 }
 
-const PRIORITY_OPTIONS = [
-  { id: 'low', label: 'Low' },
-  { id: 'medium', label: 'Medium' },
-  { id: 'high', label: 'High' },
-];
-
-function templateTaskCreatedLine(tk: any): string {
+function templateTaskCreatedLine(tk: any, createdLabel: string): string {
   const raw = tk?.created_at ?? tk?.created;
   if (!raw) return '';
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) return '';
-  return `Created ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`;
+  return `${createdLabel} ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`;
 }
 
 function templateTaskPriority(tk: any): string {
@@ -113,7 +109,9 @@ function priorityBadgeStyle(pr: string) {
 }
 
 export default function TemplateScreen() {
+  const { t } = useTranslation();
   const { user, role } = useAuth();
+  const priorityOpts = useMemo(() => priorityOptions(t), [t]);
   const [templates, setTemplates] = useState<any[]>([]);
   const [templateTasks, setTemplateTasks] = useState<Record<string, any[]>>({});
   const [loading, setLoading] = useState(true);
@@ -339,17 +337,17 @@ export default function TemplateScreen() {
   const submitCreate = async () => {
     const name = newName.trim();
     if (!name) {
-      Alert.alert('Validation', 'Enter a template name');
+      Alert.alert(t('common.validation'), t('checklistTemplates.validation.nameRequired'));
       return;
     }
     const orgId = String(createOrgId ?? '').trim();
     const companyId = String(createCompanyId ?? '').trim();
     if (!companyId) {
-      Alert.alert('Validation', 'Select a company');
+      Alert.alert(t('common.validation'), t('checklistTemplates.validation.companyRequired'));
       return;
     }
     if (isDuplicateTemplate(templates, name, companyId, orgId || undefined)) {
-      Alert.alert('Validation', 'A checklist with this name already exists for this company.');
+      Alert.alert(t('common.validation'), t('checklistTemplates.validation.duplicateName'));
       return;
     }
     setSaving(true);
@@ -366,7 +364,7 @@ export default function TemplateScreen() {
       setCreateModal(false);
       await loadTemplates();
     } catch (e: unknown) {
-      Alert.alert('Error', formatTemplateError(e));
+      Alert.alert(t('common.error'), formatTemplateError(e, t('tasks.requestFailed')));
     } finally {
       setSaving(false);
     }
@@ -378,25 +376,25 @@ export default function TemplateScreen() {
     return out;
   }
 
-  const deleteTemplate = (t: any) => {
-    const id = templateRowId(t);
+  const deleteTemplate = (template: any) => {
+    const id = templateRowId(template);
     if (!id) return;
-    const name = t.name || t.title || 'this checklist';
+    const name = template.name || template.title || t('checklistTemplates.checklistFallback');
     const run = async () => {
       try {
         await api.deleteTemplate(id);
         await load();
       } catch (e: unknown) {
-        Alert.alert('Error', formatTemplateError(e));
+        Alert.alert(t('common.error'), formatTemplateError(e, t('tasks.requestFailed')));
       }
     };
     if (Platform.OS === 'web' && typeof (globalThis as any).confirm === 'function') {
-      if ((globalThis as any).confirm(`Delete "${name}"?`)) void run();
+      if ((globalThis as any).confirm(t('checklistTemplates.deleteTemplateConfirm', { name }))) void run();
       return;
     }
-    Alert.alert('Delete', `Delete "${name}"?`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => void run() },
+    Alert.alert(t('tasks.deleteTitle'), t('checklistTemplates.deleteTemplateConfirm', { name }), [
+      { text: t('common.cancel'), style: 'cancel' },
+      { text: t('common.delete'), style: 'destructive', onPress: () => void run() },
     ]);
   };
 
@@ -448,11 +446,11 @@ export default function TemplateScreen() {
     if (!editModal) return;
     const name = editModal.name.trim();
     if (!name) {
-      Alert.alert('Validation', 'Name is required');
+      Alert.alert(t('common.validation'), t('checklistTemplates.validation.nameRequired'));
       return;
     }
     if (!editModal.companyId) {
-      Alert.alert('Validation', 'Select a company');
+      Alert.alert(t('common.validation'), t('checklistTemplates.validation.companyRequired'));
       return;
     }
     setEditSaving(true);
@@ -470,7 +468,7 @@ export default function TemplateScreen() {
       setEditModal(null);
       await loadTemplates();
     } catch (e: unknown) {
-      Alert.alert('Error', formatTemplateError(e));
+      Alert.alert(t('common.error'), formatTemplateError(e, t('tasks.requestFailed')));
     } finally {
       setEditSaving(false);
     }
@@ -488,12 +486,12 @@ export default function TemplateScreen() {
     if (!taskModal) return;
     const title = taskTitle.trim();
     if (!title) {
-      Alert.alert('Validation', 'Task title is required');
+      Alert.alert(t('common.validation'), t('checklistTemplates.validation.taskTitleRequired'));
       return;
     }
     const existing = templateTasks[taskModal.templateId] || [];
     if (isDuplicateTemplateTask(existing, title)) {
-      Alert.alert('Validation', 'A task with this title already exists in this template.');
+      Alert.alert(t('common.validation'), t('checklistTemplates.validation.duplicateTaskTitle'));
       return;
     }
 
@@ -511,13 +509,13 @@ export default function TemplateScreen() {
       setTaskPicker(null);
       await loadTasksForTemplates(displayedTemplates.length ? displayedTemplates : templates);
     } catch (e: unknown) {
-      Alert.alert('Error', formatTemplateError(e));
+      Alert.alert(t('common.error'), formatTemplateError(e, t('tasks.requestFailed')));
     } finally {
       setTaskSaving(false);
     }
   };
 
-  const labelPriority = (id: string) => PRIORITY_OPTIONS.find((p) => p.id === id)?.label ?? id;
+  const labelPriority = (id: string) => priorityLabel(t, id);
 
   const toggleExpanded = (id: string) => {
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -530,14 +528,14 @@ export default function TemplateScreen() {
   const openEditTask = (tk: any, templateId: string, templateName: string) => {
     const id = taskRowId(tk);
     if (!id) {
-      Alert.alert('Error', 'This task cannot be edited (missing id).');
+      Alert.alert(t('common.error'), t('checklistTemplates.validation.missingTaskId'));
       return;
     }
     setEditTaskModal({
       id,
       templateId,
       templateName,
-      originalTitle: tk.title || tk.task_name || 'Task',
+      originalTitle: tk.title || tk.task_name || t('checklistTemplates.taskFallback'),
     });
     setEditTaskTitle(tk.title || tk.task_name || '');
     setEditTaskDescription(templateTaskNotes(tk));
@@ -549,7 +547,7 @@ export default function TemplateScreen() {
     if (!editTaskModal) return;
     const title = editTaskTitle.trim();
     if (!title) {
-      Alert.alert('Validation', 'Task title is required');
+      Alert.alert(t('common.validation'), t('checklistTemplates.validation.taskTitleRequired'));
       return;
     }
     setEditTaskSaving(true);
@@ -563,7 +561,7 @@ export default function TemplateScreen() {
       setEditTaskPicker(null);
       await loadTasksForTemplates(displayedTemplates.length ? displayedTemplates : templates);
     } catch (e: unknown) {
-      Alert.alert('Error', formatTemplateError(e));
+      Alert.alert(t('common.error'), formatTemplateError(e, t('tasks.requestFailed')));
     } finally {
       setEditTaskSaving(false);
     }
@@ -572,14 +570,14 @@ export default function TemplateScreen() {
   const deleteTemplateTaskRow = (tk: any, fromModal?: boolean) => {
     const id = taskRowId(tk);
     if (!id) {
-      Alert.alert('Error', 'This task cannot be deleted (missing id).');
+      Alert.alert(t('common.error'), t('checklistTemplates.validation.missingDeleteId'));
       return;
     }
-    const title = tk.title || tk.task_name || 'this task';
-    Alert.alert('Delete Task', `Delete "${title}"?`, [
-      { text: 'Cancel', style: 'cancel' },
+    const title = tk.title || tk.task_name || t('checklistTemplates.taskFallback');
+    Alert.alert(t('checklistTemplates.deleteTaskTitle'), t('checklistTemplates.deleteTaskConfirm', { title }), [
+      { text: t('common.cancel'), style: 'cancel' },
       {
-        text: 'Delete',
+        text: t('common.delete'),
         style: 'destructive',
         onPress: () => {
           void (async () => {
@@ -597,7 +595,7 @@ export default function TemplateScreen() {
               });
               await loadTasksForTemplates(displayedTemplates.length ? displayedTemplates : templates);
             } catch (e: unknown) {
-              Alert.alert('Error', formatTemplateError(e));
+              Alert.alert(t('common.error'), formatTemplateError(e, t('tasks.requestFailed')));
             } finally {
               if (fromModal) setEditTaskDeleting(false);
             }
@@ -611,10 +609,11 @@ export default function TemplateScreen() {
     return (
       <View style={styles.centered}>
         <MaterialCommunityIcons name="book-lock-outline" size={56} color="#cbd5e1" />
-        <Text style={[styles.pageTitle, { marginTop: 16, textAlign: 'center' }]}>Check Lists</Text>
+        <Text style={[styles.pageTitle, { marginTop: 16, textAlign: 'center' }]}>
+          {t('checklistTemplates.noAccessTitle')}
+        </Text>
         <Text style={[styles.pageSubtitle, { textAlign: 'center', maxWidth: 320, marginTop: 8 }]}>
-          Checklist templates are managed by administrators during shift scheduling. Your assigned work appears on
-          the Tasks page.
+          {t('checklistTemplates.noAccessSubtitle')}
         </Text>
       </View>
     );
@@ -640,15 +639,12 @@ export default function TemplateScreen() {
           <View style={styles.headerBlock}>
             <View style={styles.headerTop}>
               <View style={styles.headerTitles}>
-                <Text style={styles.pageTitle}>Check Lists</Text>
-                <Text style={styles.pageSubtitle}>
-                  Reusable checklist blueprints by organization and company. Assign tasks to employees during shift
-                  scheduling — not from this page.
-                </Text>
+                <Text style={styles.pageTitle}>{t('checklistTemplates.title')}</Text>
+                <Text style={styles.pageSubtitle}>{t('checklistTemplates.subtitle')}</Text>
               </View>
               {isAdmin && (
                 <TouchableOpacity style={styles.primaryBtn} onPress={openCreateModal} activeOpacity={0.9}>
-                  <Text style={styles.primaryBtnText}>+ New Checklist</Text>
+                  <Text style={styles.primaryBtnText}>+ {t('checklistTemplates.newChecklist')}</Text>
                 </TouchableOpacity>
               )}
             </View>
@@ -657,14 +653,14 @@ export default function TemplateScreen() {
               <View style={styles.scopeFilterRow}>
                 {showOrgFilter ? (
                   <View style={styles.scopeFilterCol}>
-                    <Text style={styles.scopeFilterLabel}>Organization</Text>
+                    <Text style={styles.scopeFilterLabel}>{t('common.organization')}</Text>
                     <TouchableOpacity
                       style={styles.scopeSelect}
                       onPress={() => setFilterPicker('organization')}
                       activeOpacity={0.85}
                     >
                       <Text style={styles.scopeSelectText} numberOfLines={1}>
-                        {labelFor(organizationOptions, filterOrgId, 'All organizations')}
+                        {labelFor(organizationOptions, filterOrgId, t('common.allOrganizations'))}
                       </Text>
                       <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                     </TouchableOpacity>
@@ -672,14 +668,14 @@ export default function TemplateScreen() {
                 ) : null}
                 {showCompanyFilter ? (
                   <View style={styles.scopeFilterCol}>
-                    <Text style={styles.scopeFilterLabel}>Company</Text>
+                    <Text style={styles.scopeFilterLabel}>{t('common.company')}</Text>
                     <TouchableOpacity
                       style={styles.scopeSelect}
                       onPress={() => setFilterPicker('company')}
                       activeOpacity={0.85}
                     >
                       <Text style={styles.scopeSelectText} numberOfLines={1}>
-                        {labelFor(companyOptions, filterCompanyId, 'All companies')}
+                        {labelFor(companyOptions, filterCompanyId, t('common.allCompanies'))}
                       </Text>
                       <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                     </TouchableOpacity>
@@ -691,11 +687,11 @@ export default function TemplateScreen() {
             {displayedTemplates.length === 0 ? (
               <View style={styles.emptyCard}>
                 <MaterialCommunityIcons name="book-open-page-variant-outline" size={64} color="#cbd5e1" />
-                <Text style={styles.emptyTitle}>No templates created yet</Text>
-                <Text style={styles.emptySubtitle}>Get started by creating your first Check-List</Text>
+                <Text style={styles.emptyTitle}>{t('checklistTemplates.noTemplates')}</Text>
+                <Text style={styles.emptySubtitle}>{t('checklistTemplates.noTemplatesHint')}</Text>
                 {isAdmin && (
                   <TouchableOpacity style={styles.emptyBtn} onPress={openCreateModal} activeOpacity={0.9}>
-                    <Text style={styles.emptyBtnText}>+ Create Your First Template</Text>
+                    <Text style={styles.emptyBtnText}>+ {t('checklistTemplates.createTemplate')}</Text>
                   </TouchableOpacity>
                 )}
               </View>
@@ -715,15 +711,15 @@ export default function TemplateScreen() {
                   <MaterialCommunityIcons name="book-open-variant" size={22} color="#fff" />
                 </View>
                 <View style={styles.cardTitleBlock}>
-                  <Text style={styles.cardTitle}>{item.name || item.title || 'Checklist'}</Text>
+                  <Text style={styles.cardTitle}>{item.name || item.title || t('checklistTemplates.checklistFallback')}</Text>
                   {item.description ? (
                     <Text style={styles.cardDesc}>{item.description}</Text>
                   ) : (
-                    <Text style={styles.cardDescMuted}>No description available</Text>
+                    <Text style={styles.cardDescMuted}>{t('checklistTemplates.noDescription')}</Text>
                   )}
                   <View style={styles.cardScopeBlock}>
                     <View style={styles.cardScopeItem}>
-                      <Text style={styles.cardScopeLabel}>ORGANIZATION</Text>
+                      <Text style={styles.cardScopeLabel}>{t('common.organization').toUpperCase()}</Text>
                       <View style={styles.cardScopeValueRow}>
                         <MaterialCommunityIcons name="lock-outline" size={14} color="#94a3b8" />
                         <Text style={styles.cardScopeValue} numberOfLines={1}>
@@ -732,7 +728,7 @@ export default function TemplateScreen() {
                       </View>
                     </View>
                     <View style={styles.cardScopeItem}>
-                      <Text style={styles.cardScopeLabel}>COMPANY</Text>
+                      <Text style={styles.cardScopeLabel}>{t('common.company').toUpperCase()}</Text>
                       <View style={styles.cardScopeValueRow}>
                         <MaterialCommunityIcons name="lock-outline" size={14} color="#94a3b8" />
                         <Text style={styles.cardScopeValue} numberOfLines={1}>
@@ -765,7 +761,7 @@ export default function TemplateScreen() {
                               openEdit(item);
                             }}
                           >
-                            <Text style={styles.dropdownItemText}>Edit Template</Text>
+                            <Text style={styles.dropdownItemText}>{t('checklistTemplates.editTemplate')}</Text>
                           </TouchableOpacity>
                           <TouchableOpacity
                             style={styles.dropdownItemDanger}
@@ -774,7 +770,7 @@ export default function TemplateScreen() {
                               deleteTemplate(item);
                             }}
                           >
-                            <Text style={styles.dropdownItemDangerText}>Delete Template</Text>
+                            <Text style={styles.dropdownItemDangerText}>{t('checklistTemplates.deleteTemplate')}</Text>
                           </TouchableOpacity>
                         </View>
                       ) : null}
@@ -792,22 +788,26 @@ export default function TemplateScreen() {
                     <View style={styles.sectionHeadRow}>
                       <View style={styles.sectionTitleRow}>
                         <MaterialCommunityIcons name="calendar-month-outline" size={20} color="#0f172a" />
-                        <Text style={styles.sectionTitle}>Tasks ({tasks.length})</Text>
+                        <Text style={styles.sectionTitle}>
+                          {t('checklistTemplates.tasksCount', { count: tasks.length })}
+                        </Text>
                       </View>
                       {isAdmin && (
                         <TouchableOpacity
                           style={styles.addTaskBtn}
-                          onPress={() => openTaskModal(tid, item.name || item.title || 'Checklist')}
+                          onPress={() =>
+                            openTaskModal(tid, item.name || item.title || t('checklistTemplates.checklistFallback'))
+                          }
                         >
                           <MaterialCommunityIcons name="plus" size={18} color="#fff" />
-                          <Text style={styles.addTaskBtnText}>Add Task</Text>
+                          <Text style={styles.addTaskBtnText}>{t('checklistTemplates.addTask')}</Text>
                         </TouchableOpacity>
                       )}
                     </View>
                     {tasks.length === 0 ? (
                       <View style={styles.tasksEmpty}>
                         <MaterialCommunityIcons name="calendar-blank-outline" size={48} color="#cbd5e1" />
-                        <Text style={styles.tasksEmptyText}>No tasks created yet</Text>
+                        <Text style={styles.tasksEmptyText}>{t('checklistTemplates.noTasksYet')}</Text>
                       </View>
                     ) : (
                       tasks.map((tk, idx) => {
@@ -816,9 +816,9 @@ export default function TemplateScreen() {
                         const pr = templateTaskPriority(tk);
                         const pb = priorityBadgeStyle(pr);
                         const coName = templateTaskCompanyName(tk, item);
-                        const created = templateTaskCreatedLine(tk);
+                        const created = templateTaskCreatedLine(tk, t('checklistTemplates.created'));
                         const notes = templateTaskNotes(tk);
-                        const tplName = item.name || item.title || 'Checklist';
+                        const tplName = item.name || item.title || t('checklistTemplates.checklistFallback');
 
                         return (
                           <View
@@ -832,7 +832,7 @@ export default function TemplateScreen() {
                             >
                               <View style={styles.tplTaskCollapsedMain}>
                                 <Text style={styles.tplTaskCollapsedTitle} numberOfLines={2}>
-                                  {tk.title || tk.name || 'Task'}
+                                  {tk.title || tk.name || t('checklistTemplates.taskFallback')}
                                 </Text>
                                 {created ? <Text style={styles.tplTaskCreated}>{created}</Text> : null}
                               </View>
@@ -846,11 +846,13 @@ export default function TemplateScreen() {
                                   </View>
                                 ) : null}
                                 <View style={[styles.tplPriorityPill, { backgroundColor: pb.bg, borderColor: pb.border }]}>
-                                  <Text style={[styles.tplPriorityPillText, { color: pb.text }]}>{pr}</Text>
+                                  <Text style={[styles.tplPriorityPillText, { color: pb.text }]}>
+                                    {priorityLabel(t, pr)}
+                                  </Text>
                                 </View>
                                 <View style={styles.tplTypePill}>
                                   <MaterialCommunityIcons name="book-open-variant" size={12} color="#475569" />
-                                  <Text style={styles.tplTypePillText}>Template</Text>
+                                  <Text style={styles.tplTypePillText}>{t('checklistTemplates.templateType')}</Text>
                                 </View>
                                 <MaterialCommunityIcons
                                   name={taskOpen ? 'chevron-down' : 'chevron-right'}
@@ -864,7 +866,9 @@ export default function TemplateScreen() {
                               <View style={styles.tplTaskExpanded}>
                                 <View style={styles.tplTaskExpandedHead}>
                                   <View style={{ flex: 1 }}>
-                                    <Text style={styles.tplTaskExpandedTitle}>{tk.title || tk.name || 'Task'}</Text>
+                                    <Text style={styles.tplTaskExpandedTitle}>
+                                      {tk.title || tk.name || t('checklistTemplates.taskFallback')}
+                                    </Text>
                                     <View style={styles.tplTaskExpandedMeta}>
                                       {coName ? (
                                         <View style={styles.tplMetaChip}>
@@ -875,11 +879,15 @@ export default function TemplateScreen() {
                                       <View
                                         style={[styles.tplPriorityPill, { backgroundColor: pb.bg, borderColor: pb.border }]}
                                       >
-                                        <Text style={[styles.tplPriorityPillText, { color: pb.text }]}>{pr}</Text>
+                                        <Text style={[styles.tplPriorityPillText, { color: pb.text }]}>
+                                          {priorityLabel(t, pr)}
+                                        </Text>
                                       </View>
                                       <View style={[styles.tplTypePill, styles.tplTypePillBlue]}>
                                         <MaterialCommunityIcons name="book-open-variant" size={12} color="#1d4ed8" />
-                                        <Text style={[styles.tplTypePillText, styles.tplTypePillTextBlue]}>Template Task</Text>
+                                        <Text style={[styles.tplTypePillText, styles.tplTypePillTextBlue]}>
+                                          {t('checklistTemplates.templateTaskType')}
+                                        </Text>
                                       </View>
                                     </View>
                                   </View>
@@ -890,19 +898,19 @@ export default function TemplateScreen() {
                                       activeOpacity={0.85}
                                     >
                                       <MaterialCommunityIcons name="pencil-outline" size={18} color="#475569" />
-                                      <Text style={styles.tplEditBtnText}>Edit</Text>
+                                      <Text style={styles.tplEditBtnText}>{t('common.edit')}</Text>
                                     </TouchableOpacity>
                                   ) : null}
                                 </View>
 
-                                <Text style={styles.tplNotesLabel}>Notes</Text>
+                                <Text style={styles.tplNotesLabel}>{t('common.notes')}</Text>
                                 <View style={styles.tplNotesBox}>
                                   {notes ? (
                                     <Text style={styles.tplNotesBody}>{notes}</Text>
                                   ) : (
                                     <View style={styles.tplNotesPlaceholder}>
                                       <MaterialCommunityIcons name="text-box-outline" size={20} color="#94a3b8" />
-                                      <Text style={styles.tplNotesPlaceholderText}>No notes</Text>
+                                      <Text style={styles.tplNotesPlaceholderText}>{t('tasks.noNotes')}</Text>
                                     </View>
                                   )}
                                 </View>
@@ -914,7 +922,7 @@ export default function TemplateScreen() {
                                     activeOpacity={0.85}
                                   >
                                     <MaterialCommunityIcons name="trash-can-outline" size={20} color="#dc2626" />
-                                    <Text style={styles.tplDeleteTaskText}>Delete Task</Text>
+                                    <Text style={styles.tplDeleteTaskText}>{t('checklistTemplates.deleteTaskTitle')}</Text>
                                   </TouchableOpacity>
                                 ) : null}
                               </View>
@@ -949,10 +957,8 @@ export default function TemplateScreen() {
               <Pressable style={styles.createBox} onPress={(e) => e.stopPropagation?.()}>
                 <View style={styles.createHeader}>
                   <View style={styles.createTitleBlock}>
-                    <Text style={styles.createTitle}>Create New Check-List</Text>
-                    <Text style={styles.createSubtitle}>
-                      Create a checklist template for a company. Tasks apply to everyone who works at that company.
-                    </Text>
+                    <Text style={styles.createTitle}>{t('checklistTemplates.createTitle')}</Text>
+                    <Text style={styles.createSubtitle}>{t('checklistTemplates.createSubtitle')}</Text>
                   </View>
                   <TouchableOpacity onPress={() => setCreateModal(false)} hitSlop={12}>
                     <MaterialCommunityIcons name="close" size={24} color="#64748b" />
@@ -961,19 +967,19 @@ export default function TemplateScreen() {
 
                 {isAdmin ? (
                   <>
-                    <Text style={[styles.fieldLabel, styles.fieldLabelFirst]}>Organization *</Text>
+                    <Text style={[styles.fieldLabel, styles.fieldLabelFirst]}>{t('common.organization')} *</Text>
                     <TouchableOpacity
                       style={styles.selectField}
                       onPress={() => setCreatePicker('organization')}
                       activeOpacity={0.85}
                     >
                       <Text style={styles.selectText} numberOfLines={1}>
-                        {labelFor(createOrgOptions, createOrgId, 'Select organization')}
+                        {labelFor(createOrgOptions, createOrgId, t('checklistTemplates.selectOrganization'))}
                       </Text>
                       <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                     </TouchableOpacity>
 
-                    <Text style={styles.fieldLabel}>Company *</Text>
+                    <Text style={styles.fieldLabel}>{t('common.company')} *</Text>
                     <TouchableOpacity
                       style={styles.selectField}
                       onPress={() => setCreatePicker('company')}
@@ -981,37 +987,39 @@ export default function TemplateScreen() {
                       disabled={!createOrgId}
                     >
                       <Text style={[styles.selectText, !createOrgId && styles.selectFieldPh]} numberOfLines={1}>
-                        {labelFor(createCompanyOptions, createCompanyId, 'Select company')}
+                        {labelFor(createCompanyOptions, createCompanyId, t('checklistTemplates.selectCompany'))}
                       </Text>
                       <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                     </TouchableOpacity>
                   </>
                 ) : null}
 
-                <Text style={[styles.fieldLabel, isAdmin ? undefined : styles.fieldLabelFirst]}>Template Name</Text>
+                <Text style={[styles.fieldLabel, isAdmin ? undefined : styles.fieldLabelFirst]}>
+                  {t('checklistTemplates.templateName')}
+                </Text>
                 <TextInput
                   style={styles.inputCreate}
                   value={newName}
                   onChangeText={setNewName}
-                  placeholder="e.g., React Development"
+                  placeholder={t('checklistTemplates.namePlaceholder')}
                   placeholderTextColor="#94a3b8"
                 />
-                <Text style={styles.fieldLabel}>Description</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.description')}</Text>
                 <TextInput
                   style={[styles.inputCreate, styles.textArea]}
                   value={newDescription}
                   onChangeText={setNewDescription}
-                  placeholder="Brief description of the learning template"
+                  placeholder={t('checklistTemplates.descriptionPlaceholder')}
                   placeholderTextColor="#94a3b8"
                   multiline
                   textAlignVertical="top"
                 />
-                <Text style={styles.fieldLabel}>Technology/Category</Text>
+                <Text style={styles.fieldLabel}>{t('checklistTemplates.technologyCategory')}</Text>
                 <TextInput
                   style={styles.inputCreate}
                   value={newCategory}
                   onChangeText={setNewCategory}
-                  placeholder="e.g., React, Python"
+                  placeholder={t('checklistTemplates.categoryPlaceholder')}
                   placeholderTextColor="#94a3b8"
                 />
                 <View style={styles.createActions}>
@@ -1022,10 +1030,12 @@ export default function TemplateScreen() {
                       setCreateModal(false);
                     }}
                   >
-                    <Text style={styles.cancelOutlineText}>Cancel</Text>
+                    <Text style={styles.cancelOutlineText}>{t('common.cancel')}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={[styles.saveBlue, saving && styles.disabled]} onPress={() => void submitCreate()} disabled={saving}>
-                    <Text style={styles.saveBlueText}>{saving ? 'Creating…' : 'Create Template'}</Text>
+                    <Text style={styles.saveBlueText}>
+                      {saving ? t('checklistTemplates.creating') : t('checklistTemplates.createTemplate')}
+                    </Text>
                   </TouchableOpacity>
                 </View>
               </Pressable>
@@ -1036,7 +1046,7 @@ export default function TemplateScreen() {
                 <Pressable style={StyleSheet.absoluteFill} onPress={() => setCreatePicker(null)} />
                 <View style={styles.createPickerBox}>
                   <Text style={styles.createPickerTitle}>
-                    {createPicker === 'organization' ? 'Organization' : 'Company'}
+                    {createPicker === 'organization' ? t('common.organization') : t('common.company')}
                   </Text>
                   <FlatList
                     data={createPicker === 'organization' ? createOrgOptions : createCompanyOptions}
@@ -1079,7 +1089,7 @@ export default function TemplateScreen() {
           <Pressable style={StyleSheet.absoluteFill} onPress={() => setFilterPicker(null)} />
           <View style={styles.filterPickerBox}>
             <Text style={styles.createPickerTitle}>
-              {filterPicker === 'organization' ? 'Organization' : 'Company'}
+              {filterPicker === 'organization' ? t('common.organization') : t('common.company')}
             </Text>
             <FlatList
               data={filterPicker === 'organization' ? organizationOptions : companyOptions}
@@ -1124,10 +1134,8 @@ export default function TemplateScreen() {
               <Pressable style={styles.createBox} onPress={(e) => e.stopPropagation?.()}>
                 <View style={styles.createHeader}>
                   <View style={styles.createTitleBlock}>
-                    <Text style={styles.createTitle}>Edit Template</Text>
-                    <Text style={styles.createSubtitle}>
-                      Update template details and which company it applies to.
-                    </Text>
+                    <Text style={styles.createTitle}>{t('checklistTemplates.editTemplate')}</Text>
+                    <Text style={styles.createSubtitle}>{t('checklistTemplates.editSubtitle')}</Text>
                   </View>
                   <TouchableOpacity
                     onPress={() => {
@@ -1141,19 +1149,19 @@ export default function TemplateScreen() {
                 </View>
                 {editModal ? (
                   <>
-                    <Text style={[styles.fieldLabel, styles.fieldLabelFirst]}>Organization *</Text>
+                    <Text style={[styles.fieldLabel, styles.fieldLabelFirst]}>{t('common.organization')} *</Text>
                     <TouchableOpacity
                       style={styles.selectField}
                       onPress={() => setEditPicker('organization')}
                       activeOpacity={0.85}
                     >
                       <Text style={styles.selectText} numberOfLines={1}>
-                        {labelFor(createOrgOptions, editModal.organizationId, 'Select organization')}
+                        {labelFor(createOrgOptions, editModal.organizationId, t('checklistTemplates.selectOrganization'))}
                       </Text>
                       <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                     </TouchableOpacity>
 
-                    <Text style={styles.fieldLabel}>Company *</Text>
+                    <Text style={styles.fieldLabel}>{t('common.company')} *</Text>
                     <TouchableOpacity
                       style={styles.selectField}
                       onPress={() => setEditPicker('company')}
@@ -1164,33 +1172,33 @@ export default function TemplateScreen() {
                         style={[styles.selectText, !editModal.organizationId && styles.selectFieldPh]}
                         numberOfLines={1}
                       >
-                        {labelFor(editCompanyOptions, editModal.companyId, 'Select company')}
+                        {labelFor(editCompanyOptions, editModal.companyId, t('checklistTemplates.selectCompany'))}
                       </Text>
                       <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                     </TouchableOpacity>
 
-                    <Text style={styles.fieldLabel}>Template Name</Text>
+                    <Text style={styles.fieldLabel}>{t('checklistTemplates.templateName')}</Text>
                     <TextInput
                       style={styles.inputCreate}
                       value={editModal.name}
-                      onChangeText={(t) => setEditModal({ ...editModal, name: t })}
+                      onChangeText={(text) => setEditModal({ ...editModal, name: text })}
                     />
-                    <Text style={styles.fieldLabel}>Description</Text>
+                    <Text style={styles.fieldLabel}>{t('tasks.description')}</Text>
                     <TextInput
                       style={[styles.inputCreate, styles.textArea]}
                       value={editModal.description}
-                      onChangeText={(t) => setEditModal({ ...editModal, description: t })}
-                      placeholder="Brief description of the learning template"
+                      onChangeText={(text) => setEditModal({ ...editModal, description: text })}
+                      placeholder={t('checklistTemplates.descriptionPlaceholder')}
                       placeholderTextColor="#94a3b8"
                       multiline
                       textAlignVertical="top"
                     />
-                    <Text style={styles.fieldLabel}>Technology/Category</Text>
+                    <Text style={styles.fieldLabel}>{t('checklistTemplates.technologyCategory')}</Text>
                     <TextInput
                       style={styles.inputCreate}
                       value={editModal.technology}
-                      onChangeText={(t) => setEditModal({ ...editModal, technology: t })}
-                      placeholder="e.g., React, Python, Java"
+                      onChangeText={(text) => setEditModal({ ...editModal, technology: text })}
+                      placeholder={t('checklistTemplates.categoryPlaceholderEdit')}
                       placeholderTextColor="#94a3b8"
                     />
                   </>
@@ -1203,14 +1211,16 @@ export default function TemplateScreen() {
                       setEditModal(null);
                     }}
                   >
-                    <Text style={styles.cancelOutlineText}>Cancel</Text>
+                    <Text style={styles.cancelOutlineText}>{t('common.cancel')}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.saveBlue, editSaving && styles.disabled]}
                     onPress={() => void submitEdit()}
                     disabled={editSaving}
                   >
-                    <Text style={styles.saveBlueText}>{editSaving ? 'Saving…' : 'Update Template'}</Text>
+                    <Text style={styles.saveBlueText}>
+                      {editSaving ? t('checklistTemplates.updating') : t('checklistTemplates.updateTemplate')}
+                    </Text>
                   </TouchableOpacity>
                 </View>
               </Pressable>
@@ -1221,7 +1231,7 @@ export default function TemplateScreen() {
                 <Pressable style={StyleSheet.absoluteFill} onPress={() => setEditPicker(null)} />
                 <View style={styles.createPickerBox}>
                   <Text style={styles.createPickerTitle}>
-                    {editPicker === 'organization' ? 'Organization' : 'Company'}
+                    {editPicker === 'organization' ? t('common.organization') : t('common.company')}
                   </Text>
                   <FlatList
                     data={editPicker === 'organization' ? createOrgOptions : editCompanyOptions}
@@ -1290,9 +1300,9 @@ export default function TemplateScreen() {
               <Pressable style={styles.createBox} onPress={(e) => e.stopPropagation?.()}>
                 <View style={styles.createHeader}>
                   <View style={styles.createTitleBlock}>
-                    <Text style={styles.createTitle}>Create Task</Text>
+                    <Text style={styles.createTitle}>{t('tasks.createTask')}</Text>
                     <Text style={styles.createSubtitle}>
-                      Create a new task for the &quot;{taskModal?.templateName}&quot; template.
+                      {t('checklistTemplates.createTaskSubtitle', { name: taskModal?.templateName })}
                     </Text>
                   </View>
                   <TouchableOpacity
@@ -1306,26 +1316,26 @@ export default function TemplateScreen() {
                   </TouchableOpacity>
                 </View>
 
-                <Text style={[styles.fieldLabel, styles.fieldLabelFirst]}>Task Title</Text>
+                <Text style={[styles.fieldLabel, styles.fieldLabelFirst]}>{t('checklistTemplates.taskTitle')}</Text>
                 <TextInput
                   style={styles.inputCreate}
                   value={taskTitle}
                   onChangeText={setTaskTitle}
-                  placeholder="Enter task title"
+                  placeholder={t('checklistTemplates.taskTitlePlaceholder')}
                   placeholderTextColor="#94a3b8"
                 />
-                <Text style={styles.fieldLabel}>Description</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.description')}</Text>
                 <TextInput
                   style={[styles.inputCreate, styles.textArea]}
                   value={taskDescription}
                   onChangeText={setTaskDescription}
-                  placeholder="Enter task description"
+                  placeholder={t('checklistTemplates.taskDescriptionPlaceholder')}
                   placeholderTextColor="#94a3b8"
                   multiline
                   textAlignVertical="top"
                 />
 
-                <Text style={styles.fieldLabel}>Priority</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.priorityLabel')}</Text>
                 <TouchableOpacity
                   style={styles.selectField}
                   onPress={() => setTaskPicker('priority')}
@@ -1343,14 +1353,16 @@ export default function TemplateScreen() {
                       setTaskPicker(null);
                     }}
                   >
-                    <Text style={styles.cancelOutlineText}>Cancel</Text>
+                    <Text style={styles.cancelOutlineText}>{t('common.cancel')}</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.savePurple, taskSaving && styles.disabled]}
                     onPress={() => void submitTask()}
                     disabled={taskSaving}
                   >
-                    <Text style={styles.saveBlueText}>{taskSaving ? 'Saving…' : 'Create Task'}</Text>
+                    <Text style={styles.saveBlueText}>
+                      {taskSaving ? t('common.saving') : t('tasks.createTask')}
+                    </Text>
                   </TouchableOpacity>
                 </View>
               </Pressable>
@@ -1360,9 +1372,9 @@ export default function TemplateScreen() {
               <View style={[styles.inlineLayer, { pointerEvents: 'box-none' }]}>
                 <Pressable style={StyleSheet.absoluteFill} onPress={() => setTaskPicker(null)} />
                 <View style={styles.inlineBox}>
-                  <Text style={styles.inlineTitle}>Priority</Text>
+                  <Text style={styles.inlineTitle}>{t('tasks.priorityLabel')}</Text>
                   <FlatList
-                    data={PRIORITY_OPTIONS}
+                    data={priorityOpts}
                     keyExtractor={(p) => p.id}
                     keyboardShouldPersistTaps="handled"
                     style={{ maxHeight: 200 }}
@@ -1417,9 +1429,9 @@ export default function TemplateScreen() {
               <Pressable style={styles.createBox} onPress={(e) => e.stopPropagation?.()}>
                 <View style={styles.createHeader}>
                   <View style={styles.createTitleBlock}>
-                    <Text style={styles.createTitle}>Edit Task</Text>
+                    <Text style={styles.createTitle}>{t('tasks.editTask')}</Text>
                     <Text style={styles.createSubtitle}>
-                      Update the task details for &quot;{editTaskModal?.originalTitle}&quot;.
+                      {t('checklistTemplates.editTaskSubtitle', { title: editTaskModal?.originalTitle })}
                     </Text>
                   </View>
                   <TouchableOpacity
@@ -1433,26 +1445,26 @@ export default function TemplateScreen() {
                   </TouchableOpacity>
                 </View>
 
-                <Text style={[styles.fieldLabel, styles.fieldLabelFirst]}>Task Title</Text>
+                <Text style={[styles.fieldLabel, styles.fieldLabelFirst]}>{t('checklistTemplates.taskTitle')}</Text>
                 <TextInput
                   style={styles.inputCreate}
                   value={editTaskTitle}
                   onChangeText={setEditTaskTitle}
-                  placeholder="Enter task title"
+                  placeholder={t('checklistTemplates.taskTitlePlaceholder')}
                   placeholderTextColor="#94a3b8"
                 />
-                <Text style={styles.fieldLabel}>Description</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.description')}</Text>
                 <TextInput
                   style={[styles.inputCreate, styles.textArea]}
                   value={editTaskDescription}
                   onChangeText={setEditTaskDescription}
-                  placeholder="Enter task description"
+                  placeholder={t('checklistTemplates.taskDescriptionPlaceholder')}
                   placeholderTextColor="#94a3b8"
                   multiline
                   textAlignVertical="top"
                 />
 
-                <Text style={styles.fieldLabel}>Priority</Text>
+                <Text style={styles.fieldLabel}>{t('tasks.priorityLabel')}</Text>
                 <TouchableOpacity
                   style={styles.selectField}
                   onPress={() => setEditTaskPicker('priority')}
@@ -1475,7 +1487,7 @@ export default function TemplateScreen() {
                     disabled={editTaskSaving || editTaskDeleting}
                   >
                     <Text style={styles.deleteTaskModalText}>
-                      {editTaskDeleting ? 'Deleting…' : 'Delete Task'}
+                      {editTaskDeleting ? t('checklistTemplates.deleting') : t('checklistTemplates.deleteTaskTitle')}
                     </Text>
                   </TouchableOpacity>
                   <View style={styles.editTaskActionsRight}>
@@ -1486,14 +1498,16 @@ export default function TemplateScreen() {
                         setEditTaskPicker(null);
                       }}
                     >
-                      <Text style={styles.cancelOutlineText}>Cancel</Text>
+                      <Text style={styles.cancelOutlineText}>{t('common.cancel')}</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={[styles.saveBlue, (editTaskSaving || editTaskDeleting) && styles.disabled]}
                       onPress={() => void submitEditTask()}
                       disabled={editTaskSaving || editTaskDeleting}
                     >
-                      <Text style={styles.saveBlueText}>{editTaskSaving ? 'Saving…' : 'Update Task'}</Text>
+                      <Text style={styles.saveBlueText}>
+                        {editTaskSaving ? t('common.saving') : t('checklistTemplates.updateTask')}
+                      </Text>
                     </TouchableOpacity>
                   </View>
                 </View>
@@ -1504,9 +1518,9 @@ export default function TemplateScreen() {
               <View style={[styles.inlineLayer, { pointerEvents: 'box-none' }]}>
                 <Pressable style={StyleSheet.absoluteFill} onPress={() => setEditTaskPicker(null)} />
                 <View style={styles.inlineBox}>
-                  <Text style={styles.inlineTitle}>Priority</Text>
+                  <Text style={styles.inlineTitle}>{t('tasks.priorityLabel')}</Text>
                   <FlatList
-                    data={PRIORITY_OPTIONS}
+                    data={priorityOpts}
                     keyExtractor={(p) => p.id}
                     keyboardShouldPersistTaps="handled"
                     style={{ maxHeight: 200 }}

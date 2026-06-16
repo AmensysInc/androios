@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider } from './src/context/AuthContext';
+import { LanguageProvider } from './src/i18n/LanguageProvider';
 import RootNavigator from './src/navigation/RootNavigator';
 import BiometricRegistrationHost from './src/components/BiometricRegistrationHost';
 import PostLoginFaceHost from './src/components/PostLoginFaceHost';
@@ -14,11 +15,13 @@ export default function App() {
   return (
     <>
       <StatusBar style="auto" />
-      <AuthProvider>
-        <BiometricRegistrationHost />
-        <PostLoginFaceHost />
-        <RootNavigator />
-      </AuthProvider>
+      <LanguageProvider>
+        <AuthProvider>
+          <BiometricRegistrationHost />
+          <PostLoginFaceHost />
+          <RootNavigator />
+        </AuthProvider>
+      </LanguageProvider>
     </>
   );
 }
