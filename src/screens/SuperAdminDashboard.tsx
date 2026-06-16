@@ -9,47 +9,52 @@ import {
   Platform,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
+import { useTranslation } from 'react-i18next';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useAuth } from '../context/AuthContext';
 
 type CardDef = {
-  title: string;
-  subtitle: string;
+  titleKey: string;
+  subtitleKey: string;
   icon: keyof typeof MaterialCommunityIcons.glyphMap;
   screen: string;
 };
 
-const DASHBOARD_CARDS: CardDef[] = [
-  {
-    title: 'Organizations & Companies',
-    subtitle: 'Manage organizations and companies',
-    icon: 'office-building-outline',
-    screen: 'Companies',
-  },
-  {
-    title: 'Employees',
-    subtitle: 'View and manage all employees',
-    icon: 'account-multiple-outline',
-    screen: 'Employees',
-  },
-  {
-    title: 'Schedules',
-    subtitle: 'Manage shifts and schedules',
-    icon: 'calendar-month-outline',
-    screen: 'Schedule',
-  },
-  {
-    title: 'User Management',
-    subtitle: 'Manage user accounts and roles',
-    icon: 'account-group-outline',
-    screen: 'UserManagement',
-  },
-];
-
 export default function SuperAdminDashboard() {
+  const { t } = useTranslation();
   const navigation = useNavigation<any>();
   const { user } = useAuth();
   const { width } = useWindowDimensions();
+
+  const dashboardCards = useMemo<CardDef[]>(
+    () => [
+      {
+        titleKey: 'superAdminDashboard.organizationsCompanies',
+        subtitleKey: 'superAdminDashboard.organizationsCompaniesDescription',
+        icon: 'office-building-outline',
+        screen: 'Companies',
+      },
+      {
+        titleKey: 'superAdminDashboard.employees',
+        subtitleKey: 'superAdminDashboard.employeesDescription',
+        icon: 'account-multiple-outline',
+        screen: 'Employees',
+      },
+      {
+        titleKey: 'superAdminDashboard.schedules',
+        subtitleKey: 'superAdminDashboard.schedulesDescription',
+        icon: 'calendar-month-outline',
+        screen: 'Schedule',
+      },
+      {
+        titleKey: 'superAdminDashboard.userManagement',
+        subtitleKey: 'superAdminDashboard.userManagementDescription',
+        icon: 'account-group-outline',
+        screen: 'UserManagement',
+      },
+    ],
+    []
+  );
 
   const cardWidth = useMemo(() => {
     const pad = 24 * 2;
@@ -66,12 +71,12 @@ export default function SuperAdminDashboard() {
       showsVerticalScrollIndicator={false}
     >
       <View style={styles.headerBlock}>
-        <Text style={styles.pageTitle}>Super Admin Dashboard</Text>
-        <Text style={styles.pageSubtitle}>Manage organizations, companies, and users.</Text>
+        <Text style={styles.pageTitle}>{t('superAdminDashboard.title')}</Text>
+        <Text style={styles.pageSubtitle}>{t('superAdminDashboard.subtitle')}</Text>
       </View>
 
       <View style={styles.grid}>
-        {DASHBOARD_CARDS.map((card) => (
+        {dashboardCards.map((card) => (
           <TouchableOpacity
             key={card.screen}
             style={[
@@ -83,17 +88,17 @@ export default function SuperAdminDashboard() {
             activeOpacity={0.85}
           >
             <View style={styles.cardTop}>
-              <Text style={styles.cardTitle}>{card.title}</Text>
+              <Text style={styles.cardTitle}>{t(card.titleKey)}</Text>
               <MaterialCommunityIcons name={card.icon} size={28} color="#64748b" style={styles.cardIcon} />
             </View>
-            <Text style={styles.cardSubtitle}>{card.subtitle}</Text>
+            <Text style={styles.cardSubtitle}>{t(card.subtitleKey)}</Text>
           </TouchableOpacity>
         ))}
       </View>
 
       {user?.email ? (
         <Text style={styles.footerNote} numberOfLines={1}>
-          Signed in as {user.email}
+          {t('superAdminDashboard.signedInAs', { email: user.email })}
         </Text>
       ) : null}
     </ScrollView>

@@ -16,9 +16,12 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 
 const KeyedView = View as React.ComponentType<React.ComponentProps<typeof View> & { key?: React.Key }>;
 import { useAuth } from '../../context/AuthContext';
+import { localizedEmployeeStatus } from '../../lib/i18nLabels';
 import * as api from '../../api';
 import {
   buildDepartmentFilterOptions,
@@ -70,7 +73,7 @@ function employeeSubtitle(e: Employee): string {
   return '—';
 }
 
-function departmentLabel(e: Employee, deptCatalog: any[]): string {
+function departmentLabel(e: Employee, deptCatalog: any[], t: TFunction): string {
   const d = e.department;
   if (d && typeof d === 'object' && (d as any).name) return String((d as any).name);
   const primary = departmentPrimaryId(e);
@@ -90,10 +93,10 @@ function departmentLabel(e: Employee, deptCatalog: any[]): string {
     if (hit) return hit;
     if (!isLikelyUuid(d)) return d;
   }
-  return 'No Department';
+  return t('employee.noDepartment');
 }
 
-function departmentKey(e: Employee, deptCatalog: any[]): string {
+function departmentKey(e: Employee, deptCatalog: any[], t: TFunction): string {
   let id: string | number | undefined = e.department_id;
   if ((id == null || id === '') && typeof e.department === 'object' && e.department?.id != null) {
     id = e.department.id;
@@ -101,19 +104,19 @@ function departmentKey(e: Employee, deptCatalog: any[]): string {
   if (id != null && id !== '') return String(id);
   const dn = (e as any).department_name;
   if (dn) return `name:${String(dn)}`;
-  if (departmentLabel(e, deptCatalog) === 'No Department') return '__none__';
-  return `name:${departmentLabel(e, deptCatalog)}`;
+  if (departmentLabel(e, deptCatalog, t) === t('employee.noDepartment')) return '__none__';
+  return `name:${departmentLabel(e, deptCatalog, t)}`;
 }
 
-function positionLabel(e: Employee): string {
+function positionLabel(e: Employee, t: TFunction): string {
   const p = e.position || e.job_title || e.title || (e as any).role;
   if (p && String(p).toLowerCase() !== 'employee') return String(p);
-  return 'No position';
+  return t('employee.noPosition');
 }
 
-function hourlyLabel(e: Employee): string {
+function hourlyLabel(e: Employee, t: TFunction): string {
   const r = e.hourly_rate ?? e.rate ?? (e as any).pay_rate;
-  if (r == null || r === '') return 'Not set';
+  if (r == null || r === '') return t('employee.notSet');
   const n = typeof r === 'number' ? r : parseFloat(String(r));
   if (Number.isFinite(n)) return `$${n.toFixed(2)}`;
   return String(r);
@@ -176,6 +179,7 @@ const COL = {
 };
 
 export default function EmployeesScreen() {
+  const { t } = useTranslation();
   const { user, role } = useAuth();
   const { width } = useWindowDimensions();
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -227,12 +231,12 @@ export default function EmployeesScreen() {
       setEmployees(Array.isArray(empRaw) ? empRaw : []);
       setDepartments(Array.isArray(deptRaw) ? deptRaw : []);
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Failed to load');
+      Alert.alert(t('common.error'), e?.message || t('employee.loadFailed'));
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [effectiveCompanyId, role, user?.id]);
+  }, [effectiveCompanyId, role, user?.id, t]);
 
   useEffect(() => {
     load();
@@ -243,26 +247,26 @@ export default function EmployeesScreen() {
   }, [effectiveCompanyId]);
 
   const departmentOptions = useMemo(() => {
-    const base = buildDepartmentFilterOptions(departments, employees, 'All Departments');
-    const hasNone = employees.some((e) => departmentKey(e, departments) === '__none__');
+    const base = buildDepartmentFilterOptions(departments, employees, t('common.allDepartments'));
+    const hasNone = employees.some((e) => departmentKey(e, departments, t) === '__none__');
     if (hasNone && !base.some((o) => o.id === '__none__')) {
-      return [...base, { id: '__none__', label: 'No Department' }];
+      return [...base, { id: '__none__', label: t('employee.noDepartment') }];
     }
     return base;
-  }, [departments, employees]);
+  }, [departments, employees, t]);
 
   const scopeLabel = useMemo(() => {
-    if (isManager) return companies[0]?.name || 'Company';
-    if (selectedCompanyId === 'all') return 'All Employees';
-    return companies.find((c) => c.id === selectedCompanyId)?.name || 'Company';
-  }, [isManager, selectedCompanyId, companies]);
+    if (isManager) return companies[0]?.name || t('common.company');
+    if (selectedCompanyId === 'all') return t('common.allEmployees');
+    return companies.find((c) => c.id === selectedCompanyId)?.name || t('common.company');
+  }, [isManager, selectedCompanyId, companies, t]);
 
   const filteredEmployees = useMemo(() => {
     const q = search.toLowerCase().trim();
     return employees.filter((e) => {
       if (departmentFilter !== 'all') {
         if (departmentFilter === '__none__') {
-          if (departmentKey(e, departments) !== '__none__') return false;
+          if (departmentKey(e, departments, t) !== '__none__') return false;
         } else if (!employeeMatchesDepartmentFilter(e, departmentFilter, departments)) {
           return false;
         }
@@ -271,8 +275,8 @@ export default function EmployeesScreen() {
       const name = employeeDisplayName(e).toLowerCase();
       const email = (e.email || '').toLowerCase();
       const sub = employeeSubtitle(e).toLowerCase();
-      const dept = departmentLabel(e, departments).toLowerCase();
-      const pos = positionLabel(e).toLowerCase();
+      const dept = departmentLabel(e, departments, t).toLowerCase();
+      const pos = positionLabel(e, t).toLowerCase();
       return (
         name.includes(q) ||
         email.includes(q) ||
@@ -281,13 +285,13 @@ export default function EmployeesScreen() {
         pos.includes(q)
       );
     });
-  }, [employees, search, departmentFilter, departments]);
+  }, [employees, search, departmentFilter, departments, t]);
 
   const kpis = useMemo(() => {
     const total = employees.length;
     const active = employees.filter(isActiveEmployee).length;
     const deptKeys = new Set(
-      employees.map((e) => departmentKey(e, departments)).filter((k) => k !== '__none__')
+      employees.map((e) => departmentKey(e, departments, t)).filter((k) => k !== '__none__')
     );
     const deptCount = deptKeys.size;
     const rates = employees
@@ -301,12 +305,12 @@ export default function EmployeesScreen() {
     const avg =
       rates.length > 0 ? (rates.reduce((a, b) => a + b, 0) / rates.length).toFixed(2) : null;
     return { total, active, deptCount, avg };
-  }, [employees, departments]);
+  }, [employees, departments, t]);
 
   const scopeOptions = useMemo(() => {
-    const base = [{ id: 'all', label: 'All Employees' }];
+    const base = [{ id: 'all', label: t('common.allEmployees') }];
     return [...base, ...companies.map((c) => ({ id: c.id, label: c.name }))];
-  }, [companies]);
+  }, [companies, t]);
 
   const openEdit = (emp: Employee) => {
     setEditing(emp);
@@ -350,7 +354,7 @@ export default function EmployeesScreen() {
       company_id,
     } = form;
     if (!first_name.trim() || !last_name.trim()) {
-      Alert.alert('Validation', 'First and last name required');
+      Alert.alert(t('common.validation'), t('employee.nameRequired'));
       return;
     }
     if (!editing) return;
@@ -372,12 +376,12 @@ export default function EmployeesScreen() {
         notes: notes.trim() || undefined,
         company_id: company_id || undefined,
       });
-        Alert.alert('Success', 'Employee updated');
+        Alert.alert(t('common.success'), t('employee.updatedSuccess'));
       setModalOpen(false);
       setEditing(null);
       await load();
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Failed to save');
+      Alert.alert(t('common.error'), e?.message || t('employee.saveFailed'));
     } finally {
       setSaving(false);
     }
@@ -390,24 +394,25 @@ export default function EmployeesScreen() {
       setModalOpen(false);
       setEditing(null);
       await load();
-      Alert.alert('Success', 'Employee deleted');
+      Alert.alert(t('common.success'), t('employee.deletedSuccess'));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Failed to delete');
+      Alert.alert(t('common.error'), e?.message || t('employee.deleteFailed'));
     } finally {
       setSaving(false);
     }
   };
 
   const deleteEmployee = (emp: Employee) => {
+    const confirmMessage = t('employee.deleteConfirm', { name: employeeDisplayName(emp) });
     if (Platform.OS === 'web' && typeof (globalThis as any).confirm === 'function') {
-      if ((globalThis as any).confirm(`Delete ${employeeDisplayName(emp)}?`)) {
+      if ((globalThis as any).confirm(confirmMessage)) {
         void runDeleteEmployee(emp);
       }
       return;
     }
-    Alert.alert('Delete employee', `Delete ${employeeDisplayName(emp)}?`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => void runDeleteEmployee(emp) },
+    Alert.alert(t('employee.deleteTitle'), confirmMessage, [
+      { text: t('common.cancel'), style: 'cancel' },
+      { text: t('common.delete'), style: 'destructive', onPress: () => void runDeleteEmployee(emp) },
     ]);
   };
 
@@ -430,31 +435,31 @@ export default function EmployeesScreen() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
       >
         <View style={styles.pageHeader}>
-          <Text style={styles.pageTitle}>Employee Management</Text>
-          <Text style={styles.pageSubtitle}>Manage your team members and their information.</Text>
+          <Text style={styles.pageTitle}>{t('employee.title')}</Text>
+          <Text style={styles.pageSubtitle}>{t('employee.subtitle')}</Text>
         </View>
 
         <View style={styles.kpiRow}>
           <View style={styles.kpiCard}>
-            <Text style={styles.kpiLabel}>Total Employees</Text>
+            <Text style={styles.kpiLabel}>{t('employee.totalEmployees')}</Text>
             <Text style={styles.kpiValue}>{kpis.total}</Text>
           </View>
           <View style={styles.kpiCard}>
-            <Text style={styles.kpiLabel}>Active</Text>
+            <Text style={styles.kpiLabel}>{t('employee.active')}</Text>
             <Text style={[styles.kpiValue, styles.kpiValueGreen]}>{kpis.active}</Text>
           </View>
           <View style={styles.kpiCard}>
-            <Text style={styles.kpiLabel}>Departments</Text>
+            <Text style={styles.kpiLabel}>{t('employee.departments')}</Text>
             <Text style={styles.kpiValue}>{kpis.deptCount}</Text>
           </View>
           <View style={styles.kpiCard}>
-            <Text style={styles.kpiLabel}>Avg. Hourly Rate</Text>
-            <Text style={styles.kpiValue}>{kpis.avg != null ? `$${kpis.avg}` : 'N/A'}</Text>
+            <Text style={styles.kpiLabel}>{t('employee.avgHourlyRate')}</Text>
+            <Text style={styles.kpiValue}>{kpis.avg != null ? `$${kpis.avg}` : t('common.notAvailable')}</Text>
           </View>
         </View>
 
         <View style={styles.directoryCard}>
-          <Text style={styles.directoryTitle}>Employee Directory</Text>
+          <Text style={styles.directoryTitle}>{t('employee.directory')}</Text>
 
           <View style={styles.filterRow}>
         {!isManager && (
@@ -469,7 +474,7 @@ export default function EmployeesScreen() {
               <MaterialCommunityIcons name="magnify" size={20} color="#94a3b8" style={styles.searchIcon} />
         <TextInput
                 style={styles.searchInput}
-                placeholder="Search employees..."
+                placeholder={t('employee.searchEmployees')}
                 placeholderTextColor="#94a3b8"
           value={search}
           onChangeText={setSearch}
@@ -477,7 +482,7 @@ export default function EmployeesScreen() {
             </View>
             <TouchableOpacity style={styles.filterSelect} onPress={() => setDeptModal(true)} activeOpacity={0.85}>
               <Text style={styles.filterSelectText} numberOfLines={1}>
-                {departmentOptions.find((o) => o.id === departmentFilter)?.label || 'All Departments'}
+                {departmentOptions.find((o) => o.id === departmentFilter)?.label || t('common.allDepartments')}
               </Text>
               <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
             </TouchableOpacity>
@@ -487,19 +492,19 @@ export default function EmployeesScreen() {
             <View style={{ minWidth: Math.max(tableMinWidth, width - 32) }}>
               <View style={[styles.tr, styles.trHeader]}>
                 <View style={[styles.th, { width: COL.employee }]}>
-                  <Text style={styles.thText}>Employee</Text>
+                  <Text style={styles.thText}>{t('common.employee')}</Text>
                 </View>
                 <View style={[styles.th, { width: COL.contact }]}>
-                  <Text style={styles.thText}>Contact</Text>
+                  <Text style={styles.thText}>{t('common.contact')}</Text>
                 </View>
                 <View style={[styles.th, { width: COL.department }]}>
-                  <Text style={styles.thText}>Department</Text>
+                  <Text style={styles.thText}>{t('common.department')}</Text>
                 </View>
                 <View style={[styles.th, { width: COL.rate }]}>
-                  <Text style={styles.thText}>Hourly Rate</Text>
+                  <Text style={styles.thText}>{t('employee.hourlyRate')}</Text>
                 </View>
                 <View style={[styles.th, { width: COL.status }]}>
-                  <Text style={styles.thText}>Status</Text>
+                  <Text style={styles.thText}>{t('common.status')}</Text>
                 </View>
                 <View style={[styles.th, { width: COL.actions, alignItems: 'center' }]}>
                   <Text style={styles.thText}> </Text>
@@ -510,8 +515,8 @@ export default function EmployeesScreen() {
                 <View style={styles.tableEmpty}>
                   <Text style={styles.tableEmptyText}>
                     {employees.length === 0
-                      ? 'No employees in this scope. Add employees to get started.'
-                      : 'No employees match your filters.'}
+                      ? t('employee.noEmployeesScope')
+                      : t('employee.noEmployeesFilter')}
                   </Text>
                 </View>
               ) : (
@@ -538,17 +543,19 @@ export default function EmployeesScreen() {
                     </View>
                     <View style={[styles.td, { width: COL.department }]}>
                       <Text style={styles.tdText} numberOfLines={2}>
-                        {departmentLabel(item, departments)}
+                        {departmentLabel(item, departments, t)}
                       </Text>
                     </View>
                     <View style={[styles.td, { width: COL.rate }]}>
                       <Text style={styles.tdMuted} numberOfLines={1}>
-                        {hourlyLabel(item)}
+                        {hourlyLabel(item, t)}
                       </Text>
                     </View>
                     <View style={[styles.td, { width: COL.status }]}>
                       <View style={styles.statusPill}>
-                        <Text style={styles.statusPillText}>{statusLabel(item)}</Text>
+                        <Text style={styles.statusPillText}>
+                          {localizedEmployeeStatus(t, statusLabel(item))}
+                        </Text>
                       </View>
                     </View>
                     <View style={[styles.td, { width: COL.actions, alignItems: 'center', justifyContent: 'center' }]}>
@@ -566,14 +573,14 @@ export default function EmployeesScreen() {
 
       <PickerModal
         visible={scopeModal}
-        title="Employee scope"
+        title={t('employee.employeeScope')}
         options={scopeOptions}
         onSelect={(id) => setSelectedCompanyId(id)}
         onClose={() => setScopeModal(false)}
       />
       <PickerModal
         visible={deptModal}
-        title="Department"
+        title={t('common.department')}
         options={departmentOptions}
         onSelect={(id) => setDepartmentFilter(id)}
         onClose={() => setDeptModal(false)}
@@ -584,130 +591,130 @@ export default function EmployeesScreen() {
           <ScrollView contentContainerStyle={styles.modalScroll} keyboardShouldPersistTaps="handled">
             <View style={styles.modalBox}>
               <View style={styles.modalTitleRow}>
-                <Text style={styles.modalTitle}>Edit Employee</Text>
+                <Text style={styles.modalTitle}>{t('employee.editEmployee')}</Text>
                 <TouchableOpacity onPress={() => setModalOpen(false)} hitSlop={8}>
                   <MaterialCommunityIcons name="close" size={20} color="#64748b" />
                 </TouchableOpacity>
               </View>
               <View style={styles.formRow2}>
                 <View style={styles.formCol}>
-                  <Text style={styles.label}>First Name *</Text>
+                  <Text style={styles.label}>{t('employeeModal.firstName')} *</Text>
                   <TextInput
                     style={styles.input}
                     value={form.first_name}
-                    onChangeText={(t) => setForm((f) => ({ ...f, first_name: t }))}
-                    placeholder="First name"
+                    onChangeText={(v) => setForm((f) => ({ ...f, first_name: v }))}
+                    placeholder={t('employeeModal.firstNamePlaceholder')}
                   />
                 </View>
                 <View style={styles.formCol}>
-                  <Text style={styles.label}>Last Name *</Text>
+                  <Text style={styles.label}>{t('employeeModal.lastName')} *</Text>
                   <TextInput
                     style={styles.input}
                     value={form.last_name}
-                    onChangeText={(t) => setForm((f) => ({ ...f, last_name: t }))}
-                    placeholder="Last name"
+                    onChangeText={(v) => setForm((f) => ({ ...f, last_name: v }))}
+                    placeholder={t('employeeModal.lastNamePlaceholder')}
                   />
                 </View>
               </View>
-              <Text style={styles.label}>Email *</Text>
+              <Text style={styles.label}>{t('employee.email')} *</Text>
               <TextInput
                 style={styles.input}
                 value={form.email}
-                onChangeText={(t) => setForm((f) => ({ ...f, email: t }))}
-                placeholder="Email"
+                onChangeText={(v) => setForm((f) => ({ ...f, email: v }))}
+                placeholder={t('employeeModal.emailPlaceholder')}
                 keyboardType="email-address"
               />
               <View style={styles.formRow2}>
                 <View style={styles.formCol}>
-                  <Text style={styles.label}>Phone</Text>
+                  <Text style={styles.label}>{t('employeeModal.phone')}</Text>
                   <TextInput
                     style={styles.input}
                     value={form.phone}
-                    onChangeText={(t) => setForm((f) => ({ ...f, phone: t }))}
-                    placeholder="(555) 123-4567"
+                    onChangeText={(v) => setForm((f) => ({ ...f, phone: v }))}
+                    placeholder={t('employeeModal.phonePlaceholder')}
                   />
                 </View>
                 <View style={styles.formCol}>
-                  <Text style={styles.label}>Hire Date</Text>
+                  <Text style={styles.label}>{t('employeeModal.hireDate')}</Text>
                   <TextInput
                     style={styles.input}
                     value={form.hire_date}
-                    onChangeText={(t) => setForm((f) => ({ ...f, hire_date: t }))}
-                    placeholder="dd-mm-yyyy"
+                    onChangeText={(v) => setForm((f) => ({ ...f, hire_date: v }))}
+                    placeholder={t('employeeModal.hireDatePlaceholder')}
                   />
                 </View>
               </View>
               <View style={styles.formRow2}>
                 <View style={styles.formCol}>
-                  <Text style={styles.label}>Department</Text>
+                  <Text style={styles.label}>{t('common.department')}</Text>
                   <TextInput
                     style={styles.input}
                     value={form.department_id}
-                    onChangeText={(t) => setForm((f) => ({ ...f, department_id: t }))}
-                    placeholder="Department id"
+                    onChangeText={(v) => setForm((f) => ({ ...f, department_id: v }))}
+                    placeholder={t('employeeModal.departmentIdPlaceholder')}
                   />
                 </View>
                 <View style={styles.formCol}>
-                  <Text style={styles.label}>Position</Text>
+                  <Text style={styles.label}>{t('employeeModal.position')}</Text>
                   <TextInput
                     style={styles.input}
                     value={form.position}
-                    onChangeText={(t) => setForm((f) => ({ ...f, position: t }))}
-                    placeholder="e.g., Manager, Cashier"
+                    onChangeText={(v) => setForm((f) => ({ ...f, position: v }))}
+                    placeholder={t('employeeModal.positionPlaceholder')}
                   />
                 </View>
               </View>
               <View style={styles.formRow2}>
                 <View style={styles.formCol}>
-                  <Text style={styles.label}>Hourly Rate ($)</Text>
+                  <Text style={styles.label}>{t('employeeModal.hourlyRate')}</Text>
                   <TextInput
                     style={styles.input}
                     value={form.hourly_rate}
-                    onChangeText={(t) => setForm((f) => ({ ...f, hourly_rate: t }))}
-                    placeholder="15.00"
+                    onChangeText={(v) => setForm((f) => ({ ...f, hourly_rate: v }))}
+                    placeholder={t('employeeModal.ratePlaceholder')}
                     keyboardType="decimal-pad"
                   />
                 </View>
                 <View style={styles.formCol}>
-                  <Text style={styles.label}>Status</Text>
+                  <Text style={styles.label}>{t('common.status')}</Text>
                   <TextInput
                     style={styles.input}
                     value={form.status}
-                    onChangeText={(t) => setForm((f) => ({ ...f, status: t }))}
-                    placeholder="active"
+                    onChangeText={(v) => setForm((f) => ({ ...f, status: v }))}
+                    placeholder={t('employeeModal.statusPlaceholder')}
                   />
                 </View>
               </View>
-              <Text style={styles.label}>Emergency Contact</Text>
+              <Text style={styles.label}>{t('employeeModal.emergencyContact')}</Text>
               <View style={styles.formRow2}>
                 <View style={styles.formCol}>
                   <TextInput
                     style={styles.input}
                     value={form.emergency_contact_name}
-                    onChangeText={(t) => setForm((f) => ({ ...f, emergency_contact_name: t }))}
-                    placeholder="Contact name"
+                    onChangeText={(v) => setForm((f) => ({ ...f, emergency_contact_name: v }))}
+                    placeholder={t('employeeModal.emergencyContactPlaceholder')}
                   />
                 </View>
                 <View style={styles.formCol}>
                   <TextInput
                     style={styles.input}
                     value={form.emergency_contact_phone}
-                    onChangeText={(t) => setForm((f) => ({ ...f, emergency_contact_phone: t }))}
-                    placeholder="(555) 123-4567"
+                    onChangeText={(v) => setForm((f) => ({ ...f, emergency_contact_phone: v }))}
+                    placeholder={t('employeeModal.phonePlaceholder')}
                   />
                 </View>
               </View>
-              <Text style={styles.label}>Notes</Text>
+              <Text style={styles.label}>{t('common.notes')}</Text>
               <TextInput
                 style={[styles.input, styles.notesInput]}
                 value={form.notes}
-                onChangeText={(t) => setForm((f) => ({ ...f, notes: t }))}
-                placeholder="Additional notes about the employee..."
+                onChangeText={(v) => setForm((f) => ({ ...f, notes: v }))}
+                placeholder={t('employeeModal.notesPlaceholder')}
                 multiline
               />
               {!isManager && companies.length > 0 && (
                 <>
-                  <Text style={styles.label}>Company</Text>
+                  <Text style={styles.label}>{t('common.company')}</Text>
                   <ScrollView horizontal style={styles.chipRow} showsHorizontalScrollIndicator={false}>
                     {companies.map((c) => (
                       <TouchableOpacity
@@ -730,13 +737,15 @@ export default function EmployeesScreen() {
                   disabled={saving || !editing}
                 >
                   <MaterialCommunityIcons name="trash-can-outline" size={16} color="#fff" />
-                  <Text style={styles.deleteButtonText}>Delete</Text>
+                  <Text style={styles.deleteButtonText}>{t('common.delete')}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.cancelButton} onPress={() => setModalOpen(false)}>
-                  <Text style={styles.cancelButtonText}>Cancel</Text>
+                  <Text style={styles.cancelButtonText}>{t('common.cancel')}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={[styles.primaryButton, saving && styles.disabled]} onPress={save} disabled={saving}>
-                  <Text style={styles.primaryButtonText}>{saving ? 'Saving…' : 'Save Changes'}</Text>
+                  <Text style={styles.primaryButtonText}>
+                    {saving ? t('common.saving') : t('employeeModal.saveChanges')}
+                  </Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -756,7 +765,7 @@ export default function EmployeesScreen() {
               }}
             >
               <MaterialCommunityIcons name="square-edit-outline" size={18} color="#0f172a" />
-              <Text style={styles.menuText}>Edit Employee</Text>
+              <Text style={styles.menuText}>{t('employee.editEmployee')}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.menuItem}
@@ -767,7 +776,7 @@ export default function EmployeesScreen() {
               }}
             >
               <MaterialCommunityIcons name="trash-can-outline" size={18} color="#ef4444" />
-              <Text style={styles.menuTextDanger}>Delete Employee</Text>
+              <Text style={styles.menuTextDanger}>{t('employee.deleteEmployee')}</Text>
             </TouchableOpacity>
           </View>
         </Pressable>

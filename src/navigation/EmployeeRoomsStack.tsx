@@ -1,9 +1,11 @@
 import React from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { useTranslation } from 'react-i18next';
 import type { MotelRoomRow } from '../api';
 import { MotelCleaningSessionProvider } from '../context/MotelCleaningSessionContext';
 import EmployeeRoomsScreen from '../screens/hotel/EmployeeRoomsScreen';
 import RoomCleaningDetailsScreen from '../screens/hotel/RoomCleaningDetailsScreen';
+import { motelRoomNumber } from '../lib/motelRoomDisplay';
 
 export type EmployeeRoomsStackParamList = {
   EmployeeRoomsList: { submittedRoomId?: string } | undefined;
@@ -12,9 +14,10 @@ export type EmployeeRoomsStackParamList = {
 
 const Stack = createNativeStackNavigator<EmployeeRoomsStackParamList>();
 
-export default function EmployeeRoomsStack() {
+function EmployeeRoomsStackInner() {
+  const { t } = useTranslation();
+
   return (
-    <MotelCleaningSessionProvider>
     <Stack.Navigator
       screenOptions={{
         headerStyle: { backgroundColor: '#fff' },
@@ -25,16 +28,23 @@ export default function EmployeeRoomsStack() {
       <Stack.Screen
         name="EmployeeRoomsList"
         component={EmployeeRoomsScreen}
-        options={{ title: 'Rooms', headerShown: false }}
+        options={{ title: t('screens.rooms'), headerShown: false }}
       />
       <Stack.Screen
         name="RoomCleaningDetails"
         component={RoomCleaningDetailsScreen}
         options={({ route }) => ({
-          title: `Room ${(route.params.room as any)?.room_number ?? route.params.room?.number ?? 'Details'}`,
+          title: t('housekeeping.roomTitle', { number: motelRoomNumber(route.params.room) }),
         })}
       />
     </Stack.Navigator>
+  );
+}
+
+export default function EmployeeRoomsStack() {
+  return (
+    <MotelCleaningSessionProvider>
+      <EmployeeRoomsStackInner />
     </MotelCleaningSessionProvider>
   );
 }

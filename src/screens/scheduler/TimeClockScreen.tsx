@@ -16,6 +16,7 @@ import {
   KeyboardAvoidingView,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
 import * as api from '../../api';
 import { buildTaskCalendarRangeParams } from '../../lib/schedulerParams';
@@ -115,6 +116,7 @@ function ClockEditDateTimePickerModal({
   onConfirm: (d: Date) => void;
   onClearField?: () => void;
 }) {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState(() => new Date());
   const [viewMonth, setViewMonth] = useState(() => new Date());
   const hourScrollRef = useRef<ScrollView>(null);
@@ -215,7 +217,7 @@ function ClockEditDateTimePickerModal({
                       onClose();
                     }}
                   >
-                    <Text style={dtStyles.footerLink}>Clear</Text>
+                    <Text style={dtStyles.footerLink}>{t('common.clear')}</Text>
                   </TouchableOpacity>
                 ) : (
                   <TouchableOpacity
@@ -225,7 +227,7 @@ function ClockEditDateTimePickerModal({
                       setViewMonth(new Date(t0.getFullYear(), t0.getMonth(), 1));
                     }}
                   >
-                    <Text style={dtStyles.footerLink}>Clear</Text>
+                    <Text style={dtStyles.footerLink}>{t('common.clear')}</Text>
                   </TouchableOpacity>
                 )}
                 <TouchableOpacity
@@ -237,12 +239,12 @@ function ClockEditDateTimePickerModal({
                     setViewMonth(new Date(t0.getFullYear(), t0.getMonth(), 1));
                   }}
                 >
-                  <Text style={dtStyles.footerLink}>Today</Text>
+                  <Text style={dtStyles.footerLink}>{t('timeClock.periodToday')}</Text>
                 </TouchableOpacity>
               </View>
             </View>
             <View style={dtStyles.timeCol}>
-              <Text style={dtStyles.timeColTitle}>Time</Text>
+              <Text style={dtStyles.timeColTitle}>{t('timeClock.timeColumn')}</Text>
               <View style={dtStyles.timeWheels}>
                 <ScrollView
                   ref={hourScrollRef}
@@ -309,7 +311,7 @@ function ClockEditDateTimePickerModal({
           </View>
           <View style={dtStyles.doneRow}>
             <TouchableOpacity style={dtStyles.doneBtn} onPress={() => onConfirm(draft)}>
-              <Text style={dtStyles.doneBtnText}>Done</Text>
+              <Text style={dtStyles.doneBtnText}>{t('common.done')}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -419,20 +421,6 @@ function overtimeHours(entry: any): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function breakLabel(entry: any): string {
-  if (entry.break_start && entry.break_end) {
-    const m = Math.round((parseMs(entry.break_end)! - parseMs(entry.break_start)!) / 60000);
-    return `${m}m`;
-  }
-  if (entry.break_start && !entry.break_end) return 'On break';
-  return '—';
-}
-
-function entryStatusLabel(entry: any): string {
-  const s = entry?.status;
-  if (s != null && String(s).trim() !== '') return String(s);
-  return entry?.clock_out ? 'Complete' : 'Active';
-}
 
 function startOfDay(d: Date): Date {
   const x = new Date(d);
@@ -602,6 +590,7 @@ const pm = StyleSheet.create({
 });
 
 export default function TimeClockScreen() {
+  const { t } = useTranslation();
   const { user, role } = useAuth();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -823,8 +812,8 @@ export default function TimeClockScreen() {
   }, [effectiveCompanyId]);
 
   const departmentFilterOptions: PickerOption[] = useMemo(
-    () => buildDepartmentFilterOptions(departments, employees, 'All'),
-    [departments, employees]
+    () => buildDepartmentFilterOptions(departments, employees, t('common.allDepartments')),
+    [departments, employees, t]
   );
 
   const scopedEmployees = useMemo(() => {
@@ -902,15 +891,15 @@ export default function TimeClockScreen() {
   }, [tasksScoped]);
 
   const hoursEmpOptions: PickerOption[] = useMemo(() => {
-    const opts: PickerOption[] = [{ id: 'all', label: 'All Employees' }];
+    const opts: PickerOption[] = [{ id: 'all', label: t('common.allEmployees') }];
     for (const emp of scopedEmployees) {
       opts.push({ id: String(emp.id), label: employeeDisplayName(emp) });
     }
     return opts;
-  }, [scopedEmployees]);
+  }, [scopedEmployees, t]);
 
   const tasksEmployeeOptions: PickerOption[] = useMemo(() => {
-    const opts: PickerOption[] = [{ id: 'all', label: 'All Employees' }];
+    const opts: PickerOption[] = [{ id: 'all', label: t('common.allEmployees') }];
     const seen = new Set<string>();
     for (const emp of scopedEmployees) {
       const uid = String(emp.user ?? emp.user_id ?? '').trim();
@@ -919,7 +908,7 @@ export default function TimeClockScreen() {
       opts.push({ id: uid, label: employeeDisplayName(emp) });
     }
     return opts;
-  }, [scopedEmployees]);
+  }, [scopedEmployees, t]);
 
   const filteredEntries = useMemo(() => {
     const ids = new Set(scopedEmployees.map((e) => String(e.id)));
@@ -968,18 +957,47 @@ export default function TimeClockScreen() {
   const companyLabel =
     selectedCompanyId === 'all'
       ? isManager
-        ? companies[0]?.name || 'Company'
-        : 'All companies'
-      : companies.find((c) => String(c.id) === selectedCompanyId)?.name || 'Company';
+        ? companies[0]?.name || t('common.company')
+        : t('common.allCompanies')
+      : companies.find((c) => String(c.id) === selectedCompanyId)?.name || t('common.company');
 
-  const periodLabel = period === 'today' ? 'Today' : period === 'week' ? 'This Week' : 'This Month';
+  const periodLabel =
+    period === 'today'
+      ? t('timeClock.periodToday')
+      : period === 'week'
+        ? t('timeClock.periodWeek')
+        : t('timeClock.periodMonth');
 
   const companyOptions: PickerOption[] = useMemo(() => {
     if (isManager) {
       return companies.map((c) => ({ id: String(c.id), label: c.name || String(c.id) }));
     }
-    return [{ id: 'all', label: 'All companies' }, ...companies.map((c) => ({ id: String(c.id), label: c.name || String(c.id) }))];
-  }, [companies, isManager]);
+    return [
+      { id: 'all', label: t('common.allCompanies') },
+      ...companies.map((c) => ({ id: String(c.id), label: c.name || String(c.id) })),
+    ];
+  }, [companies, isManager, t]);
+
+  const displayBreakLabel = useCallback(
+    (entry: any) => {
+      if (entry.break_start && entry.break_end) {
+        const m = Math.round((parseMs(entry.break_end)! - parseMs(entry.break_start)!) / 60000);
+        return `${m}m`;
+      }
+      if (entry.break_start && !entry.break_end) return t('timeClock.onBreak');
+      return '—';
+    },
+    [t]
+  );
+
+  const displayEntryStatus = useCallback(
+    (entry: any) => {
+      const s = entry?.status;
+      if (s != null && String(s).trim() !== '') return String(s);
+      return entry?.clock_out ? t('timeClock.complete') : t('timeClock.active');
+    },
+    [t]
+  );
 
   const employeesNotClockedIn = useMemo(() => {
     const openEmp = new Set(openEntries.map((e) => entryEmployeeId(e)).filter(Boolean));
@@ -991,9 +1009,9 @@ export default function TimeClockScreen() {
     try {
       await api.clockIn({ employee_id: String(emp.id) });
       await load();
-      Alert.alert('Clock in', `${employeeDisplayName(emp)} clocked in.`);
+      Alert.alert(t('timeClock.clockIn'), t('timeClock.clockedInMessage', { name: employeeDisplayName(emp) }));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Clock in failed');
+      Alert.alert(t('common.error'), e?.message || t('timeClock.clockInFailed'));
     } finally {
       setActionLoading(false);
     }
@@ -1011,18 +1029,18 @@ export default function TimeClockScreen() {
         });
         await load();
       } catch (e: any) {
-        Alert.alert('Error', e?.message || 'Clock out failed');
+        Alert.alert(t('common.error'), e?.message || t('timeClock.clockOutFailed'));
       } finally {
         setActionLoading(false);
       }
     };
     if (Platform.OS === 'web' && typeof (globalThis as any).confirm === 'function') {
-      if ((globalThis as any).confirm('Clock out this entry?')) void run();
+      if ((globalThis as any).confirm(t('timeClock.clockOutConfirmMessage'))) void run();
       return;
     }
-    Alert.alert('Clock out', 'End this time entry?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Clock out', onPress: () => void run() },
+    Alert.alert(t('timeClock.clockOutConfirmTitle'), t('timeClock.clockOutConfirmMessage'), [
+      { text: t('common.cancel'), style: 'cancel' },
+      { text: t('timeClock.clockOut'), onPress: () => void run() },
     ]);
   };
 
@@ -1076,7 +1094,7 @@ export default function TimeClockScreen() {
     if (!id) return;
     const inParsed = parseEditDateTime(editClockInText);
     if (!inParsed) {
-      Alert.alert('Invalid time', 'Clock In must be DD-MM-YYYY HH:mm (e.g. 14-03-2026 01:21).');
+      Alert.alert(t('common.validationMessages.invalidTime'), t('timeClock.invalidClockInFormat'));
       return;
     }
     const outTrim = editClockOutText.trim();
@@ -1084,11 +1102,11 @@ export default function TimeClockScreen() {
     if (outTrim) {
       outParsed = parseEditDateTime(outTrim);
       if (!outParsed) {
-        Alert.alert('Invalid time', 'Clock Out must be DD-MM-YYYY HH:mm or left empty.');
+        Alert.alert(t('common.validationMessages.invalidTime'), t('timeClock.invalidClockOutFormat'));
         return;
       }
       if (outParsed.getTime() < inParsed.getTime()) {
-        Alert.alert('Invalid range', 'Clock out must be on or after clock in.');
+        Alert.alert(t('common.validation'), t('timeClock.invalidClockRange'));
         return;
       }
     }
@@ -1098,7 +1116,7 @@ export default function TimeClockScreen() {
     const otTrim = editOvertimeText.trim().replace(',', '.');
     const otVal = parseFloat(otTrim);
     if (!Number.isFinite(otVal) || otVal < 0) {
-      Alert.alert('Invalid overtime', 'Enter overtime hours as a number (e.g. 0 or 1.5).');
+      Alert.alert(t('common.validation'), t('timeClock.invalidOvertime'));
       return;
     }
 
@@ -1141,9 +1159,9 @@ export default function TimeClockScreen() {
       }
       await load();
       closeEditEntryModal();
-      Alert.alert('Saved', 'Time entry updated.');
+      Alert.alert(t('common.success'), t('timeClock.entryUpdated'));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Could not save changes');
+      Alert.alert(t('common.error'), e?.message || t('timeClock.saveChangesFailed'));
     } finally {
       setEditSaving(false);
     }
@@ -1156,9 +1174,9 @@ export default function TimeClockScreen() {
     try {
       await api.approveUnscheduled(id);
       await load();
-      Alert.alert('Approved', 'Clock-in request approved.');
+      Alert.alert(t('requests.statusLabels.approved'), t('timeClock.clockInApproved'));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Approve failed');
+      Alert.alert(t('common.error'), e?.message || t('timeClock.approveFailed'));
     } finally {
       setActionLoading(false);
     }
@@ -1172,14 +1190,14 @@ export default function TimeClockScreen() {
       if (isLocalPendingId(id)) {
         await removePendingLocalLeaveRequest(id);
         await load();
-        Alert.alert('Approved', 'Leave request cleared from pending list.');
+        Alert.alert(t('requests.statusLabels.approved'), t('timeClock.leaveCleared'));
         return;
       }
       await api.approveLeaveRequest(id);
       await load();
-      Alert.alert('Approved', 'Leave request approved.');
+      Alert.alert(t('requests.statusLabels.approved'), t('timeClock.leaveApproved'));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Approve failed');
+      Alert.alert(t('common.error'), e?.message || t('timeClock.approveFailed'));
     } finally {
       setActionLoading(false);
     }
@@ -1193,27 +1211,30 @@ export default function TimeClockScreen() {
       if (isLocalPendingId(id)) {
         await removePendingLocalSwapRequest(id);
         await load();
-        Alert.alert('Approved', 'Swap request cleared from pending list.');
+        Alert.alert(t('requests.statusLabels.approved'), t('timeClock.swapCleared'));
         return;
       }
       await api.approveReplacementRequest(id);
       await load();
-      Alert.alert('Approved', 'Swap request approved.');
+      Alert.alert(t('requests.statusLabels.approved'), t('timeClock.swapApproved'));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Approve failed');
+      Alert.alert(t('common.error'), e?.message || t('timeClock.approveFailed'));
     } finally {
       setActionLoading(false);
     }
   };
 
   const hoursReportPeriodLabel =
-    hoursReportPeriod === 'today' ? 'Today' : hoursReportPeriod === 'week' ? 'This Week' : 'This Month';
+    hoursReportPeriod === 'today'
+      ? t('timeClock.periodToday')
+      : hoursReportPeriod === 'week'
+        ? t('timeClock.periodWeek')
+        : t('timeClock.periodMonth');
 
   const exportHoursReportCsv = () => {
     const q = (v: string) => `"${String(v).replace(/"/g, '""')}"`;
-    const lines = [
-      ['Employee', 'Date', 'Clock In', 'Clock Out', 'Break', 'Hours', 'Overtime', 'Status'].join(','),
-    ];
+    const headers = ['Employee', 'Date', 'Clock In', 'Clock Out', 'Break', 'Hours', 'Overtime', 'Status'];
+    const lines = [headers.map((h) => q(t(`table.${h}`))).join(',')];
     const sorted = hoursReportFiltered
       .slice()
       .sort((a, b) => (parseMs(b.clock_in) ?? 0) - (parseMs(a.clock_in) ?? 0));
@@ -1226,10 +1247,10 @@ export default function TimeClockScreen() {
           q(formatDateShort(en.clock_in)),
           q(formatHm(en.clock_in)),
           q(en.clock_out ? formatHm(en.clock_out) : '—'),
-          q(breakLabel(en)),
+          q(displayBreakLabel(en)),
           durationHours(en).toFixed(2),
           overtimeHours(en).toFixed(1),
-          en.clock_out ? 'Complete' : 'Active',
+          en.clock_out ? t('timeClock.complete') : t('timeClock.active'),
         ].join(',')
       );
     }
@@ -1245,7 +1266,7 @@ export default function TimeClockScreen() {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } else {
-      Alert.alert('Export', 'CSV export is available in the web app.');
+      Alert.alert(t('timeClock.exportToExcel'), t('timeClock.exportCsvWebOnly'));
     }
   };
 
@@ -1271,8 +1292,8 @@ export default function TimeClockScreen() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
         showsVerticalScrollIndicator={false}
       >
-        <Text style={styles.pageTitle}>Time Clock</Text>
-        <Text style={styles.pageSubtitle}>Track employee time and manage attendance</Text>
+        <Text style={styles.pageTitle}>{t('timeClock.title')}</Text>
+        <Text style={styles.pageSubtitle}>{t('timeClock.subtitle')}</Text>
 
         <View style={styles.filterRow}>
           <TouchableOpacity style={styles.filterChip} onPress={() => !isManager && setCompanyPicker(true)} disabled={isManager}>
@@ -1290,7 +1311,7 @@ export default function TimeClockScreen() {
         </View>
 
         <View style={styles.deptFilterBlock}>
-          <Text style={styles.deptFilterTitle}>Department</Text>
+          <Text style={styles.deptFilterTitle}>{t('common.department')}</Text>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -1324,29 +1345,29 @@ export default function TimeClockScreen() {
         <View style={styles.tabs}>
           {(
             [
-              { key: 'clock' as const, label: 'Time Clock', icon: 'clock-outline' as const, badge: 0 },
-              { key: 'hours' as const, label: 'Hours Report', icon: 'file-document-outline' as const, badge: 0 },
-              { key: 'tasks' as const, label: 'Tasks Overview', icon: 'view-grid-outline' as const, badge: 0 },
+              { key: 'clock' as const, label: t('timeClock.title'), icon: 'clock-outline' as const, badge: 0 },
+              { key: 'hours' as const, label: t('timeClock.hoursReport'), icon: 'file-document-outline' as const, badge: 0 },
+              { key: 'tasks' as const, label: t('timeClock.tasksOverview'), icon: 'view-grid-outline' as const, badge: 0 },
               {
                 key: 'requests' as const,
-                label: 'Clock-in Requests',
+                label: t('timeClock.clockInRequests'),
                 icon: 'account-clock-outline' as const,
                 badge: requests.length + leaveRequests.length + swapRequests.length,
               },
             ] as const
-          ).map((t) => (
+          ).map((tabDef) => (
             <TouchableOpacity
-              key={t.key}
-              style={[styles.tab, tab === t.key && styles.tabActive]}
-              onPress={() => setTab(t.key)}
+              key={tabDef.key}
+              style={[styles.tab, tab === tabDef.key && styles.tabActive]}
+              onPress={() => setTab(tabDef.key)}
             >
-              <MaterialCommunityIcons name={t.icon} size={18} color={tab === t.key ? '#0f172a' : '#64748b'} />
-              <Text style={[styles.tabText, tab === t.key && styles.tabTextActive]} numberOfLines={1}>
-                {t.label}
+              <MaterialCommunityIcons name={tabDef.icon} size={18} color={tab === tabDef.key ? '#0f172a' : '#64748b'} />
+              <Text style={[styles.tabText, tab === tabDef.key && styles.tabTextActive]} numberOfLines={1}>
+                {tabDef.label}
               </Text>
-              {t.badge > 0 ? (
+              {tabDef.badge > 0 ? (
                 <View style={styles.tabBadge}>
-                  <Text style={styles.tabBadgeText}>{t.badge > 99 ? '99+' : t.badge}</Text>
+                  <Text style={styles.tabBadgeText}>{tabDef.badge > 99 ? '99+' : tabDef.badge}</Text>
                 </View>
               ) : null}
             </TouchableOpacity>
@@ -1357,19 +1378,19 @@ export default function TimeClockScreen() {
           <>
             <View style={styles.statsRow}>
               <View style={styles.statCard}>
-                <Text style={styles.statLabel}>Currently Clocked In</Text>
+                <Text style={styles.statLabel}>{t('timeClock.currentlyClockedIn')}</Text>
                 <Text style={[styles.statValue, { color: GREEN }]}>{stats.clockedIn}</Text>
               </View>
               <View style={styles.statCard}>
-                <Text style={styles.statLabel}>Total Hours Today</Text>
+                <Text style={styles.statLabel}>{t('timeClock.totalHoursToday')}</Text>
                 <Text style={styles.statValue}>{stats.totalToday}</Text>
               </View>
               <View style={styles.statCard}>
-                <Text style={styles.statLabel}>Average Hours</Text>
+                <Text style={styles.statLabel}>{t('timeClock.averageHours')}</Text>
                 <Text style={styles.statValue}>{stats.avgHours}</Text>
               </View>
               <View style={styles.statCard}>
-                <Text style={styles.statLabel}>Overtime Hours</Text>
+                <Text style={styles.statLabel}>{t('timeClock.overtimeHours')}</Text>
                 <Text style={[styles.statValue, { color: ORANGE }]}>{stats.overtime}</Text>
               </View>
             </View>
@@ -1378,27 +1399,27 @@ export default function TimeClockScreen() {
               <View style={styles.halfCard}>
                 <View style={styles.cardHead}>
                   <MaterialCommunityIcons name="clock-outline" size={22} color="#0f172a" />
-                  <Text style={styles.cardHeadTitle}>Currently Active</Text>
+                  <Text style={styles.cardHeadTitle}>{t('timeClock.currentlyActive')}</Text>
                 </View>
                 <View style={openEntries.length === 0 ? styles.cardBodyEmpty : styles.cardBodyList}>
                   {openEntries.length === 0 ? (
                     <>
                       <MaterialCommunityIcons name="clock-outline" size={48} color="#e2e8f0" />
-                      <Text style={styles.emptyText}>No employees currently clocked in</Text>
+                      <Text style={styles.emptyText}>{t('timeClock.noActiveEmployees')}</Text>
                     </>
                   ) : (
                     openEntries.map((en) => {
                       const emp = employeeById.get(entryEmployeeId(en));
                       return (
                         <View key={entryId(en)} style={styles.activeRow}>
-                          <Text style={styles.activeName}>{employeeDisplayName(emp || {}) || 'Employee'}</Text>
-                          <Text style={styles.activeSub}>In: {formatHm(en.clock_in)}</Text>
+                          <Text style={styles.activeName}>{employeeDisplayName(emp || {}) || t('timeClock.fallbackEmployee')}</Text>
+                          <Text style={styles.activeSub}>{t('timeClock.inPrefix')} {formatHm(en.clock_in)}</Text>
                           <TouchableOpacity
                             style={styles.smallBtn}
                             onPress={() => void handleClockOutEntry(en)}
                             disabled={actionLoading}
                           >
-                            <Text style={styles.smallBtnText}>Clock out</Text>
+                            <Text style={styles.smallBtnText}>{t('timeClock.clockOut')}</Text>
                           </TouchableOpacity>
                         </View>
                       );
@@ -1409,13 +1430,13 @@ export default function TimeClockScreen() {
               <View style={styles.halfCard}>
                 <View style={styles.cardHead}>
                   <MaterialCommunityIcons name="play-circle-outline" size={22} color="#0f172a" />
-                  <Text style={styles.cardHeadTitle}>Quick Clock In</Text>
+                  <Text style={styles.cardHeadTitle}>{t('timeClock.quickClockIn')}</Text>
                 </View>
                 <View style={employeesNotClockedIn.length === 0 ? styles.cardBodyEmpty : styles.cardBodyList}>
                   {employeesNotClockedIn.length === 0 ? (
                     <>
                       <MaterialCommunityIcons name="account-outline" size={48} color="#e2e8f0" />
-                      <Text style={styles.emptyText}>No active employees available</Text>
+                      <Text style={styles.emptyText}>{t('timeClock.noAvailableEmployees')}</Text>
                     </>
                   ) : (
                     employeesNotClockedIn.slice(0, 12).map((emp) => (
@@ -1436,20 +1457,20 @@ export default function TimeClockScreen() {
             </View>
 
             <View style={styles.entriesCard}>
-              <Text style={styles.entriesTitle}>Time Entries</Text>
+              <Text style={styles.entriesTitle}>{t('timeClock.timeEntries')}</Text>
               <ScrollView horizontal showsHorizontalScrollIndicator nestedScrollEnabled>
                 <View style={styles.table}>
                   <View style={styles.trHead}>
                     {['Employee', 'Date', 'Clock In', 'Clock Out', 'Total Hours', 'Actions'].map((h) => (
                       <Text key={h} style={[styles.th, h === 'Actions' && styles.thWide]}>
-                        {h}
+                        {t(`table.${h}`)}
                       </Text>
                     ))}
                   </View>
                   {filteredEntries.length === 0 ? (
                     <View style={styles.tableEmpty}>
                       <MaterialCommunityIcons name="clock-outline" size={40} color="#cbd5e1" />
-                      <Text style={styles.tableEmptyText}>No time entries found.</Text>
+                      <Text style={styles.tableEmptyText}>{t('timeClock.noTimeEntries')}</Text>
                     </View>
                   ) : (
                     filteredEntries
@@ -1473,11 +1494,11 @@ export default function TimeClockScreen() {
                                 disabled={actionLoading || editSaving}
                               >
                                 <MaterialCommunityIcons name="pencil-outline" size={16} color="#2563eb" />
-                                <Text style={styles.editEntryBtnText}>Edit</Text>
+                                <Text style={styles.editEntryBtnText}>{t('common.edit')}</Text>
                               </TouchableOpacity>
                               {!en.clock_out ? (
                                 <TouchableOpacity onPress={() => void handleClockOutEntry(en)} disabled={actionLoading}>
-                                  <Text style={styles.linkAction}>Clock out</Text>
+                                  <Text style={styles.linkAction}>{t('timeClock.clockOut')}</Text>
                                 </TouchableOpacity>
                               ) : null}
                             </View>
@@ -1494,10 +1515,10 @@ export default function TimeClockScreen() {
         {tab === 'hours' ? (
           <View style={styles.hoursMainCard}>
             <View style={styles.hoursCardHeader}>
-              <Text style={styles.hoursCardTitle}>Employee Hours Report</Text>
+              <Text style={styles.hoursCardTitle}>{t('timeClock.employeeHoursReport')}</Text>
               <TouchableOpacity style={styles.exportBtn} onPress={exportHoursReportCsv} activeOpacity={0.85}>
                 <MaterialCommunityIcons name="microsoft-excel" size={18} color="#fff" />
-                <Text style={styles.exportBtnText}>Export to Excel</Text>
+                <Text style={styles.exportBtnText}>{t('timeClock.exportToExcel')}</Text>
               </TouchableOpacity>
             </View>
             <View style={styles.hoursFilterRow}>
@@ -1509,33 +1530,33 @@ export default function TimeClockScreen() {
               </TouchableOpacity>
               <TouchableOpacity style={styles.hoursFilterChip} onPress={() => setHoursEmpPicker(true)}>
                 <Text style={styles.hoursFilterText} numberOfLines={1}>
-                  {hoursEmpOptions.find((o) => o.id === hoursEmpFilter)?.label ?? 'All Employees'}
+                  {hoursEmpOptions.find((o) => o.id === hoursEmpFilter)?.label ?? t('common.allEmployees')}
                 </Text>
                 <MaterialCommunityIcons name="chevron-down" size={18} color="#64748b" />
               </TouchableOpacity>
             </View>
             <View style={styles.hoursStatsRow}>
               <View style={styles.hoursStatCard}>
-                <Text style={styles.hoursStatLabel}>Employees</Text>
+                <Text style={styles.hoursStatLabel}>{t('table.Employee')}</Text>
                 <Text style={styles.hoursStatValue}>{hoursReportStats.employeeCount}</Text>
               </View>
               <View style={styles.hoursStatCard}>
-                <Text style={styles.hoursStatLabel}>Total Hours</Text>
+                <Text style={styles.hoursStatLabel}>{t('timeClock.totalHours')}</Text>
                 <Text style={styles.hoursStatValue}>{hoursReportStats.totalHours}h</Text>
               </View>
               <View style={styles.hoursStatCard}>
-                <Text style={styles.hoursStatLabel}>Overtime</Text>
+                <Text style={styles.hoursStatLabel}>{t('table.Overtime')}</Text>
                 <Text style={styles.hoursStatValue}>{hoursReportStats.overtime}h</Text>
               </View>
               <View style={styles.hoursStatCard}>
-                <Text style={styles.hoursStatLabel}>Est. Cost</Text>
+                <Text style={styles.hoursStatLabel}>{t('timeClock.estCost')}</Text>
                 <Text style={styles.hoursStatValue}>${hoursReportStats.estCost}</Text>
               </View>
             </View>
             {hoursReportFiltered.length === 0 ? (
               <View style={styles.hoursEmpty}>
                 <MaterialCommunityIcons name="account-group-outline" size={48} color="#cbd5e1" />
-                <Text style={styles.hoursEmptyText}>No time entries found for this period.</Text>
+                <Text style={styles.hoursEmptyText}>{t('timeClock.noTimeEntriesPeriod')}</Text>
               </View>
             ) : (
               <ScrollView horizontal showsHorizontalScrollIndicator nestedScrollEnabled>
@@ -1543,7 +1564,7 @@ export default function TimeClockScreen() {
                   <View style={styles.hoursTrHead}>
                     {['Employee', 'Date', 'Clock In', 'Clock Out', 'Break', 'Hours', 'Overtime', 'Status'].map((h) => (
                       <Text key={h} style={styles.hoursTh}>
-                        {h}
+                        {t(`table.${h}`)}
                       </Text>
                     ))}
                   </View>
@@ -1555,14 +1576,14 @@ export default function TimeClockScreen() {
                       const emp = employeeById.get(eid);
                       const hrs = durationHours(en);
                       const ot = overtimeHours(en);
-                      const status = en.clock_out ? 'Complete' : 'Active';
+                      const status = en.clock_out ? t('timeClock.complete') : t('timeClock.active');
                       return (
                         <View key={entryId(en)} style={styles.hoursTr}>
                           <Text style={styles.hoursTd}>{employeeDisplayName(emp || {})}</Text>
                           <Text style={styles.hoursTd}>{formatDateShort(en.clock_in)}</Text>
                           <Text style={styles.hoursTd}>{formatHm(en.clock_in)}</Text>
                           <Text style={styles.hoursTd}>{en.clock_out ? formatHm(en.clock_out) : '—'}</Text>
-                          <Text style={styles.hoursTd}>{breakLabel(en)}</Text>
+                          <Text style={styles.hoursTd}>{displayBreakLabel(en)}</Text>
                           <Text style={styles.hoursTd}>{hrs.toFixed(2)}</Text>
                           <Text style={[styles.hoursTd, ot > 0 && { color: ORANGE }]}>{ot.toFixed(1)}</Text>
                           <Text style={styles.hoursTd}>{status}</Text>
@@ -1578,10 +1599,10 @@ export default function TimeClockScreen() {
         {tab === 'tasks' ? (
           <View style={styles.hoursMainCard}>
             <View style={styles.tasksOverviewHeader}>
-              <Text style={styles.hoursCardTitle}>All Employee Tasks</Text>
+              <Text style={styles.hoursCardTitle}>{t('timeClock.allEmployeeTasks')}</Text>
               <TouchableOpacity style={styles.tasksEmpChip} onPress={() => setTasksEmpPicker(true)}>
                 <Text style={styles.hoursFilterText} numberOfLines={1}>
-                  {tasksEmployeeOptions.find((o) => o.id === tasksEmpFilter)?.label ?? 'All Employees'}
+                  {tasksEmployeeOptions.find((o) => o.id === tasksEmpFilter)?.label ?? t('common.allEmployees')}
                 </Text>
                 <MaterialCommunityIcons name="chevron-down" size={18} color="#64748b" />
               </TouchableOpacity>
@@ -1589,27 +1610,27 @@ export default function TimeClockScreen() {
             <View style={styles.taskStatsRow}>
               <View style={[styles.taskStatCard, styles.taskStatCardPrimary]}>
                 <Text style={styles.taskStatValueLight}>{taskStats.total}</Text>
-                <Text style={styles.taskStatLabelLight}>Total</Text>
+                <Text style={styles.taskStatLabelLight}>{t('timeClock.total')}</Text>
               </View>
               <View style={styles.taskStatCard}>
                 <Text style={styles.taskStatValueDark}>{taskStats.pending}</Text>
-                <Text style={styles.taskStatLabelDark}>Pending</Text>
+                <Text style={styles.taskStatLabelDark}>{t('timeClock.pending')}</Text>
               </View>
               <View style={styles.taskStatCard}>
                 <Text style={styles.taskStatValueDark}>{taskStats.completed}</Text>
-                <Text style={styles.taskStatLabelDark}>Completed</Text>
+                <Text style={styles.taskStatLabelDark}>{t('timeClock.completed')}</Text>
               </View>
               <View style={styles.taskStatCard}>
                 <Text style={[styles.taskStatValueDark, taskStats.overdue > 0 && { color: '#dc2626' }]}>
                   {taskStats.overdue}
                 </Text>
-                <Text style={styles.taskStatLabelDark}>Overdue</Text>
+                <Text style={styles.taskStatLabelDark}>{t('timeClock.overdue')}</Text>
               </View>
             </View>
             {tasksScoped.length === 0 ? (
               <View style={styles.hoursEmpty}>
                 <MaterialCommunityIcons name="clipboard-text-outline" size={48} color="#cbd5e1" />
-                <Text style={styles.hoursEmptyText}>No tasks in this view.</Text>
+                <Text style={styles.hoursEmptyText}>{t('timeClock.noTasksInView')}</Text>
               </View>
             ) : (
               <View style={styles.taskList}>
@@ -1620,33 +1641,35 @@ export default function TimeClockScreen() {
                     const tb = parseMs(b.start_time ?? b.end_time) ?? 0;
                     return tb - ta;
                   })
-                  .map((t, tix) => {
-                    const due = t.end_time ?? t.due_date ?? t.start_time;
+                  .map((task, tix) => {
+                    const due = task.end_time ?? task.due_date ?? task.start_time;
                     const overdue =
-                      !t.completed &&
+                      !task.completed &&
                       (() => {
                         const end = parseMs(due);
                         return end != null && end < Date.now();
                       })();
                     return (
-                      <View key={taskEventId(t) || `task-${tix}`} style={styles.taskRow}>
+                      <View key={taskEventId(task) || `task-${tix}`} style={styles.taskRow}>
                         <View style={{ flex: 1, minWidth: 0 }}>
                           <Text style={styles.taskRowTitle} numberOfLines={2}>
-                            {t.title || 'Task'}
+                            {task.title || t('timeClock.taskFallback')}
                           </Text>
                           <Text style={styles.taskRowMeta}>
-                            {taskAssigneeDisplay(t)}
-                            {due ? ` · Due ${formatDateShort(due)}` : ''}
-                            {overdue ? ' · Overdue' : ''}
+                            {taskAssigneeDisplay(task)}
+                            {due ? ` · ${t('timeClock.due')} ${formatDateShort(due)}` : ''}
+                            {overdue ? ` · ${t('timeClock.overdue')}` : ''}
                           </Text>
                         </View>
                         <View
                           style={[
                             styles.taskStatusPill,
-                            t.completed ? styles.taskPillDone : overdue ? styles.taskPillOverdue : styles.taskPillPending,
+                            task.completed ? styles.taskPillDone : overdue ? styles.taskPillOverdue : styles.taskPillPending,
                           ]}
                         >
-                          <Text style={styles.taskPillText}>{t.completed ? 'Done' : overdue ? 'Overdue' : 'Pending'}</Text>
+                          <Text style={styles.taskPillText}>
+                            {task.completed ? t('common.done') : overdue ? t('timeClock.overdue') : t('timeClock.pending')}
+                          </Text>
                         </View>
                       </View>
                     );
@@ -1661,16 +1684,13 @@ export default function TimeClockScreen() {
             <View style={styles.hoursMainCard}>
               <View style={styles.requestsTitleRow}>
                 <MaterialCommunityIcons name="account-clock-outline" size={22} color="#0f172a" />
-                <Text style={styles.hoursCardTitle}>Clock-in Requests</Text>
+                <Text style={styles.hoursCardTitle}>{t('timeClock.clockInRequests')}</Text>
               </View>
-              <Text style={styles.requestsHelp}>
-                Employees who clocked in without a scheduled shift. Approve to add the shift to their schedule (shows in
-                reports).
-              </Text>
+              <Text style={styles.requestsHelp}>{t('timeClock.clockInRequestsHint')}</Text>
               {requests.length === 0 ? (
                 <View style={styles.hoursEmpty}>
                   <MaterialCommunityIcons name="check-circle-outline" size={48} color="#cbd5e1" />
-                  <Text style={styles.hoursEmptyText}>No pending clock-in requests.</Text>
+                  <Text style={styles.hoursEmptyText}>{t('timeClock.noPendingClockInRequests')}</Text>
                 </View>
               ) : (
                 <ScrollView horizontal showsHorizontalScrollIndicator nestedScrollEnabled>
@@ -1678,7 +1698,7 @@ export default function TimeClockScreen() {
                     <View style={styles.reqTrHead}>
                       {['Employee', 'Department', 'Clock In', 'Clock Out', 'Hours', 'Action'].map((h) => (
                         <Text key={h} style={h === 'Action' ? styles.reqThAction : styles.reqTh}>
-                          {h}
+                          {t(`table.${h}`)}
                         </Text>
                       ))}
                     </View>
@@ -1709,7 +1729,7 @@ export default function TimeClockScreen() {
                               onPress={() => void handleApproveRequest(req)}
                               disabled={actionLoading}
                             >
-                              <Text style={styles.approveBtnPrimaryText}>Approve</Text>
+                              <Text style={styles.approveBtnPrimaryText}>{t('common.approve')}</Text>
                             </TouchableOpacity>
                           </View>
                         </View>
@@ -1739,7 +1759,7 @@ export default function TimeClockScreen() {
 
       <PickerModal
         visible={companyPicker}
-        title="Select Company"
+        title={t('timeClock.selectCompany')}
         options={companyOptions}
         selectedId={selectedCompanyId}
         onSelect={setSelectedCompanyId}
@@ -1747,11 +1767,11 @@ export default function TimeClockScreen() {
       />
       <PickerModal
         visible={periodPicker}
-        title="Time Period"
+        title={t('timeClock.selectPeriod')}
         options={[
-          { id: 'today', label: 'Today' },
-          { id: 'week', label: 'This Week' },
-          { id: 'month', label: 'This Month' },
+          { id: 'today', label: t('timeClock.periodToday') },
+          { id: 'week', label: t('timeClock.periodWeek') },
+          { id: 'month', label: t('timeClock.periodMonth') },
         ]}
         selectedId={period}
         onSelect={(id) => setPeriod(id as typeof period)}
@@ -1759,11 +1779,11 @@ export default function TimeClockScreen() {
       />
       <PickerModal
         visible={hoursReportPeriodPicker}
-        title="Report timeframe"
+        title={t('timeClock.selectPeriod')}
         options={[
-          { id: 'today', label: 'Today' },
-          { id: 'week', label: 'This Week' },
-          { id: 'month', label: 'This Month' },
+          { id: 'today', label: t('timeClock.periodToday') },
+          { id: 'week', label: t('timeClock.periodWeek') },
+          { id: 'month', label: t('timeClock.periodMonth') },
         ]}
         selectedId={hoursReportPeriod}
         onSelect={(id) => setHoursReportPeriod(id as typeof hoursReportPeriod)}
@@ -1771,7 +1791,7 @@ export default function TimeClockScreen() {
       />
       <PickerModal
         visible={hoursEmpPicker}
-        title="Employee"
+        title={t('common.employee')}
         options={hoursEmpOptions}
         selectedId={hoursEmpFilter}
         onSelect={setHoursEmpFilter}
@@ -1779,7 +1799,7 @@ export default function TimeClockScreen() {
       />
       <PickerModal
         visible={tasksEmpPicker}
-        title="Filter by employee"
+        title={t('timeClock.filterByEmployee')}
         options={tasksEmployeeOptions}
         selectedId={tasksEmpFilter}
         onSelect={setTasksEmpFilter}
@@ -1795,10 +1815,10 @@ export default function TimeClockScreen() {
           <View style={styles.editModalBox}>
             <View style={styles.editModalHeaderRow}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.editModalTitle}>Edit clock in / out</Text>
+                <Text style={styles.editModalTitle}>{t('timeClock.editEntry')}</Text>
                 <Text style={styles.editModalSubtitle}>
                   {editEntry
-                    ? employeeDisplayName(employeeById.get(entryEmployeeId(editEntry)) || {}) || 'Employee'
+                    ? employeeDisplayName(employeeById.get(entryEmployeeId(editEntry)) || {}) || t('timeClock.fallbackEmployee')
                     : ''}
                 </Text>
               </View>
@@ -1806,7 +1826,7 @@ export default function TimeClockScreen() {
                 <MaterialCommunityIcons name="close" size={24} color="#64748b" />
               </TouchableOpacity>
             </View>
-            <Text style={styles.editFieldLabel}>Clock In</Text>
+            <Text style={styles.editFieldLabel}>{t('table.Clock In')}</Text>
             <View style={styles.editFieldInputWrap}>
               <TextInput
                 style={[styles.editFieldInput, styles.editFieldInputFlex]}
@@ -1826,7 +1846,7 @@ export default function TimeClockScreen() {
                 <MaterialCommunityIcons name="calendar-clock" size={22} color="#64748b" />
               </TouchableOpacity>
             </View>
-            <Text style={[styles.editFieldLabel, { marginTop: 14 }]}>Clock Out (leave empty if still clocked in)</Text>
+            <Text style={[styles.editFieldLabel, { marginTop: 14 }]}>{t('timeClock.clockInLeaveEmpty')}</Text>
             <View style={styles.editFieldInputWrap}>
               <TextInput
                 style={[styles.editFieldInput, styles.editFieldInputFlex]}
@@ -1848,9 +1868,9 @@ export default function TimeClockScreen() {
             </View>
             {editEntry ? (
               <>
-                <Text style={[styles.editFieldLabel, { marginTop: 14 }]}>Break</Text>
-                <Text style={styles.editReadonlyValue}>{breakLabel(editEntry)}</Text>
-                <Text style={[styles.editFieldLabel, { marginTop: 14 }]}>Overtime (hours)</Text>
+                <Text style={[styles.editFieldLabel, { marginTop: 14 }]}>{t('timeClock.break')}</Text>
+                <Text style={styles.editReadonlyValue}>{displayBreakLabel(editEntry)}</Text>
+                <Text style={[styles.editFieldLabel, { marginTop: 14 }]}>{t('timeClock.overtimeHoursLabel')}</Text>
                 <View style={styles.editFieldInputWrap}>
                   <TextInput
                     style={[styles.editFieldInput, styles.editFieldInputFlex]}
@@ -1863,8 +1883,8 @@ export default function TimeClockScreen() {
                     autoCorrect={false}
                   />
                 </View>
-                <Text style={[styles.editFieldLabel, { marginTop: 14 }]}>Status</Text>
-                <Text style={styles.editReadonlyValue}>{entryStatusLabel(editEntry)}</Text>
+                <Text style={[styles.editFieldLabel, { marginTop: 14 }]}>{t('common.status')}</Text>
+                <Text style={styles.editReadonlyValue}>{displayEntryStatus(editEntry)}</Text>
               </>
             ) : null}
             <View style={styles.editModalActions}>
@@ -1873,7 +1893,7 @@ export default function TimeClockScreen() {
                 onPress={closeEditEntryModal}
                 disabled={editSaving}
               >
-                <Text style={styles.editCancelBtnText}>Cancel</Text>
+                <Text style={styles.editCancelBtnText}>{t('common.cancel')}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.editSaveBtn, editSaving && { opacity: 0.7 }]}
@@ -1883,7 +1903,7 @@ export default function TimeClockScreen() {
                 {editSaving ? (
                   <ActivityIndicator color="#fff" size="small" />
                 ) : (
-                  <Text style={styles.editSaveBtnText}>Save</Text>
+                  <Text style={styles.editSaveBtnText}>{t('common.save')}</Text>
                 )}
               </TouchableOpacity>
             </View>

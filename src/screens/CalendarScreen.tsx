@@ -11,12 +11,13 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../context/AuthContext';
 import { getPrimaryRoleFromUser } from '../types/auth';
 import * as api from '../api';
 import { buildCalendarRangeParams } from '../lib/schedulerParams';
 
-const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+const WEEKDAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const;
 
 function pad2(n: number) {
   return String(n).padStart(2, '0');
@@ -133,6 +134,7 @@ function filterShiftLikeEventsToAssignee(events: any[], userId: string | undefin
 }
 
 export default function CalendarScreen() {
+  const { t, i18n } = useTranslation();
   const { user, role } = useAuth();
   const effectiveRole = role ?? (user ? getPrimaryRoleFromUser(user) : null);
   const { width } = useWindowDimensions();
@@ -247,7 +249,10 @@ export default function CalendarScreen() {
     return combined.filter((item) => toDayKey(new Date(item.start)) === selectedKey);
   }, [combined, selectedKey]);
 
-  const monthTitle = viewMonth.toLocaleString(undefined, { month: 'long', year: 'numeric' });
+  const monthTitle = viewMonth.toLocaleString(i18n.language === 'es' ? 'es' : undefined, {
+    month: 'long',
+    year: 'numeric',
+  });
   const cardMaxWidth = Math.min(width - 32, 720);
   const cellSize = Math.floor((cardMaxWidth - 2) / 7);
 
@@ -266,7 +271,7 @@ export default function CalendarScreen() {
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} />}
     >
       <View style={styles.pageHeader}>
-        <Text style={styles.pageTitle}>Calendar</Text>
+        <Text style={styles.pageTitle}>{t('calendar.title')}</Text>
       </View>
 
       <View style={[styles.calendarCard, { width: cardMaxWidth, alignSelf: 'center' }, styles.cardShadow]}>
@@ -289,9 +294,9 @@ export default function CalendarScreen() {
         </View>
 
         <View style={styles.weekdayRow}>
-          {WEEKDAYS.map((d) => (
-            <View key={d} style={[styles.weekdayCell, { width: cellSize }]}>
-              <Text style={styles.weekdayText}>{d}</Text>
+          {WEEKDAY_KEYS.map((key) => (
+            <View key={key} style={[styles.weekdayCell, { width: cellSize }]}>
+              <Text style={styles.weekdayText}>{t(`days.${key}`)}</Text>
             </View>
           ))}
         </View>
@@ -347,10 +352,16 @@ export default function CalendarScreen() {
 
       <View style={[styles.eventsSection, { maxWidth: cardMaxWidth, alignSelf: 'center', width: '100%' }]}>
         <Text style={styles.eventsSectionTitle}>
-          {selectedDate.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
+          {t('calendar.eventsSection', {
+            date: selectedDate.toLocaleDateString(i18n.language === 'es' ? 'es' : undefined, {
+              weekday: 'long',
+              month: 'long',
+              day: 'numeric',
+            }),
+          })}
         </Text>
         {itemsForSelectedDay.length === 0 ? (
-          <Text style={styles.eventsEmpty}>No events or shifts</Text>
+          <Text style={styles.eventsEmpty}>{t('calendar.noEvents')}</Text>
         ) : (
           itemsForSelectedDay.map((item) => (
             <View key={`${item.kind}-${item.id}`} style={styles.eventRow}>

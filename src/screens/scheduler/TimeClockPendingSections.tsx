@@ -1,5 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform } from 'react-native';
+import { useTranslation } from 'react-i18next';
 
 function formatHm(iso: string | null | undefined): string {
   if (!iso) return '—';
@@ -140,6 +141,8 @@ function replacementDepartmentOrCompany(r: any, emp: any, companies: any[]): str
   return requestCompanyLabel(fake, companies);
 }
 
+const TABLE_HEADERS = ['Employee', 'Department', 'Start', 'End', 'Duration', 'Action'] as const;
+
 type SectionBase = {
   employeeById: Map<string, any>;
   companies: any[];
@@ -156,18 +159,20 @@ export function LeaveRequestsSection({
   items: any[];
   onApprove: (row: any) => void;
 }) {
+  const { t } = useTranslation();
+
   return (
     <View style={styles.card}>
-      <Text style={styles.sectionTitle}>Leave Requests</Text>
+      <Text style={styles.sectionTitle}>{t('requests.leaveRequests')}</Text>
       {items.length === 0 ? (
-        <Text style={styles.plainEmpty}>No pending leave requests</Text>
+        <Text style={styles.plainEmpty}>{t('requests.noPendingLeave')}</Text>
       ) : (
         <ScrollView horizontal showsHorizontalScrollIndicator nestedScrollEnabled>
           <View style={styles.table}>
             <View style={styles.trHead}>
-              {['Employee', 'Department', 'Start', 'End', 'Duration', 'Action'].map((h) => (
+              {TABLE_HEADERS.map((h) => (
                 <Text key={h} style={h === 'Action' ? styles.thAction : styles.th}>
-                  {h}
+                  {t(`table.${h}`)}
                 </Text>
               ))}
             </View>
@@ -193,7 +198,7 @@ export function LeaveRequestsSection({
                       onPress={() => onApprove(row)}
                       disabled={actionLoading || !id}
                     >
-                      <Text style={styles.approveBtnText}>Approve</Text>
+                      <Text style={styles.approveBtnText}>{t('common.approve')}</Text>
                     </TouchableOpacity>
                   </View>
                 </View>
@@ -216,18 +221,20 @@ export function SwapRequestsSection({
   items: any[];
   onApprove: (row: any) => void;
 }) {
+  const { t } = useTranslation();
+
   return (
     <View style={styles.card}>
-      <Text style={styles.sectionTitle}>Swap Requests</Text>
+      <Text style={styles.sectionTitle}>{t('requests.swapRequests')}</Text>
       {items.length === 0 ? (
-        <Text style={styles.plainEmpty}>No pending swap requests</Text>
+        <Text style={styles.plainEmpty}>{t('requests.noPendingSwap')}</Text>
       ) : (
         <ScrollView horizontal showsHorizontalScrollIndicator nestedScrollEnabled>
           <View style={styles.table}>
             <View style={styles.trHead}>
-              {['Employee', 'Department', 'Start', 'End', 'Duration', 'Action'].map((h) => (
+              {TABLE_HEADERS.map((h) => (
                 <Text key={h} style={h === 'Action' ? styles.thAction : styles.th}>
-                  {h}
+                  {t(`table.${h}`)}
                 </Text>
               ))}
             </View>
@@ -254,7 +261,7 @@ export function SwapRequestsSection({
                       onPress={() => onApprove(row)}
                       disabled={actionLoading || !id}
                     >
-                      <Text style={styles.approveBtnText}>Approve</Text>
+                      <Text style={styles.approveBtnText}>{t('common.approve')}</Text>
                     </TouchableOpacity>
                   </View>
                 </View>

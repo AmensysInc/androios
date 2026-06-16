@@ -11,7 +11,10 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../context/AuthContext';
+import { useLanguage } from '../i18n/LanguageProvider';
+import type { SupportedLanguage } from '../i18n/language-storage';
 import * as api from '../api';
 import {
   deleteFaceEnrollment,
@@ -20,11 +23,19 @@ import {
   pickFacePhotoFromCamera,
 } from '../lib/accountFaceAuth';
 
+const LANGUAGE_OPTIONS: { code: SupportedLanguage; labelKey: 'language.english' | 'language.spanish' }[] = [
+  { code: 'en', labelKey: 'language.english' },
+  { code: 'es', labelKey: 'language.spanish' },
+];
+
 export default function AccountScreen() {
+  const { t } = useTranslation();
+  const { language, setLanguage } = useLanguage();
   const { user } = useAuth();
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
   const [changingPassword, setChangingPassword] = useState(false);
+  const [languageBusy, setLanguageBusy] = useState(false);
   const [hasEmployee, setHasEmployee] = useState(false);
   const [faceEnrolled, setFaceEnrolled] = useState(false);
   const [faceBusy, setFaceBusy] = useState(false);
@@ -62,8 +73,8 @@ export default function AccountScreen() {
           setFaceEnrolled(false);
         }
       }
-    } catch (e) {
-      console.warn(e);
+    } catch {
+      /* ignore */
     } finally {
       setLoading(false);
     }
@@ -77,11 +88,24 @@ export default function AccountScreen() {
         email: profile.email,
         mobile_number: profile.mobile_number,
       });
-      Alert.alert('Success', 'Profile updated successfully');
+      Alert.alert(t('common.success'), t('settings.toast.updatedSuccessfully'));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Failed to update profile');
+      Alert.alert(t('common.error'), e?.message || t('account.updateFailed'));
     } finally {
       setUpdating(false);
+    }
+  };
+
+  const handleLanguageChange = async (code: SupportedLanguage) => {
+    if (code === language || languageBusy) return;
+    setLanguageBusy(true);
+    try {
+      await setLanguage(code);
+      Alert.alert(t('common.success'), t('settings.toast.languageUpdatedSuccessfully'));
+    } catch {
+      Alert.alert(t('common.error'), t('settings.languageSettings.changeFailed'));
+    } finally {
+      setLanguageBusy(false);
     }
   };
 
@@ -92,49 +116,45 @@ export default function AccountScreen() {
       if (!uri) return;
       await enrollFaceWithUri(uri);
       setFaceEnrolled(true);
-      Alert.alert('Saved', 'Your face is stored for verification on any device when you clock in or out.');
+      Alert.alert(t('common.success'), t('account.faceSaved'));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Could not save face enrollment.');
+      Alert.alert(t('common.error'), e?.message || t('account.faceSaveFailed'));
     } finally {
       setFaceBusy(false);
     }
   };
 
   const removeFaceEnrollment = async () => {
-    Alert.alert(
-      'Remove face enrollment?',
-      'Clock actions will no longer require a matching photo on the server. Device Face ID / fingerprint settings are unchanged.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Remove',
-          style: 'destructive',
-          onPress: () => {
-            void (async () => {
-              setFaceBusy(true);
-              try {
-                await deleteFaceEnrollment();
-                setFaceEnrolled(false);
-                Alert.alert('Removed', 'Account face enrollment was deleted.');
-              } catch (e: any) {
-                Alert.alert('Error', e?.message || 'Could not remove enrollment.');
-              } finally {
-                setFaceBusy(false);
-              }
-            })();
-          },
+    Alert.alert(t('account.removeFaceTitle'), t('account.removeFaceMessage'), [
+      { text: t('common.cancel'), style: 'cancel' },
+      {
+        text: t('account.remove'),
+        style: 'destructive',
+        onPress: () => {
+          void (async () => {
+            setFaceBusy(true);
+            try {
+              await deleteFaceEnrollment();
+              setFaceEnrolled(false);
+              Alert.alert(t('common.success'), t('account.faceRemoved'));
+            } catch (e: any) {
+              Alert.alert(t('common.error'), e?.message || t('account.faceRemoveFailed'));
+            } finally {
+              setFaceBusy(false);
+            }
+          })();
         },
-      ],
-    );
+      },
+    ]);
   };
 
   const changePassword = async () => {
     if (passwords.newPassword !== passwords.confirmPassword) {
-      Alert.alert('Error', 'New passwords do not match');
+      Alert.alert(t('common.error'), t('settings.password.passwordsDoNotMatch'));
       return;
     }
     if (passwords.newPassword.length < 6) {
-      Alert.alert('Error', 'Password must be at least 6 characters');
+      Alert.alert(t('common.error'), t('settings.password.invalidPassword'));
       return;
     }
     setChangingPassword(true);
@@ -144,9 +164,9 @@ export default function AccountScreen() {
         new_password: passwords.newPassword,
       });
       setPasswords({ currentPassword: '', newPassword: '', confirmPassword: '' });
-      Alert.alert('Success', 'Password changed successfully');
+      Alert.alert(t('common.success'), t('settings.password.updatedSuccessfully'));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Failed to change password');
+      Alert.alert(t('common.error'), e?.message || t('settings.password.invalidPassword'));
     } finally {
       setChangingPassword(false);
     }
@@ -167,32 +187,56 @@ export default function AccountScreen() {
     >
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.header}>
-          <Text style={styles.title}>Account Settings</Text>
-          <Text style={styles.subtitle}>Manage your profile and security</Text>
+          <Text style={styles.title}>{t('settings.title')}</Text>
+          <Text style={styles.subtitle}>{t('settings.subtitle')}</Text>
         </View>
 
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Profile</Text>
+          <Text style={styles.sectionTitle}>{t('settings.languageSettings.title')}</Text>
+          <Text style={styles.helpText}>{t('language.settingsDescription')}</Text>
+          <View style={styles.langRow}>
+            {LANGUAGE_OPTIONS.map((opt) => {
+              const active = language === opt.code;
+              return (
+                <TouchableOpacity
+                  key={opt.code}
+                  style={[styles.langChip, active && styles.langChipActive, languageBusy && styles.btnDisabled]}
+                  onPress={() => handleLanguageChange(opt.code)}
+                  disabled={languageBusy}
+                  activeOpacity={0.85}
+                >
+                  <Text style={[styles.langChipText, active && styles.langChipTextActive]}>{t(opt.labelKey)}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>{t('settings.profile')}</Text>
+          <Text style={styles.fieldLabel}>{t('settings.profileSection.fullName')}</Text>
           <TextInput
             style={styles.input}
-            placeholder="Full name"
+            placeholder={t('settings.profileSection.fullName')}
             value={profile.full_name}
-            onChangeText={(t) => setProfile((p) => ({ ...p, full_name: t }))}
+            onChangeText={(v) => setProfile((p) => ({ ...p, full_name: v }))}
             autoCapitalize="words"
           />
+          <Text style={styles.fieldLabel}>{t('settings.profileSection.email')}</Text>
           <TextInput
             style={styles.input}
-            placeholder="Email"
+            placeholder={t('settings.profileSection.email')}
             value={profile.email}
-            onChangeText={(t) => setProfile((p) => ({ ...p, email: t }))}
+            onChangeText={(v) => setProfile((p) => ({ ...p, email: v }))}
             keyboardType="email-address"
             autoCapitalize="none"
           />
+          <Text style={styles.fieldLabel}>{t('settings.profileSection.phoneNumber')}</Text>
           <TextInput
             style={styles.input}
-            placeholder="Mobile number"
+            placeholder={t('settings.profileSection.phoneNumber')}
             value={profile.mobile_number}
-            onChangeText={(t) => setProfile((p) => ({ ...p, mobile_number: t }))}
+            onChangeText={(v) => setProfile((p) => ({ ...p, mobile_number: v }))}
             keyboardType="phone-pad"
           />
           <TouchableOpacity
@@ -200,31 +244,34 @@ export default function AccountScreen() {
             onPress={updateProfile}
             disabled={updating}
           >
-            <Text style={styles.btnText}>{updating ? 'Saving…' : 'Save profile'}</Text>
+            <Text style={styles.btnText}>{updating ? t('common.saving') : t('common.save')}</Text>
           </TouchableOpacity>
         </View>
 
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Change password</Text>
+          <Text style={styles.sectionTitle}>{t('settings.password.title')}</Text>
+          <Text style={styles.fieldLabel}>{t('settings.password.currentPassword')}</Text>
           <TextInput
             style={styles.input}
-            placeholder="Current password"
+            placeholder={t('settings.password.currentPassword')}
             value={passwords.currentPassword}
-            onChangeText={(t) => setPasswords((p) => ({ ...p, currentPassword: t }))}
+            onChangeText={(v) => setPasswords((p) => ({ ...p, currentPassword: v }))}
             secureTextEntry
           />
+          <Text style={styles.fieldLabel}>{t('settings.password.newPassword')}</Text>
           <TextInput
             style={styles.input}
-            placeholder="New password"
+            placeholder={t('settings.password.newPassword')}
             value={passwords.newPassword}
-            onChangeText={(t) => setPasswords((p) => ({ ...p, newPassword: t }))}
+            onChangeText={(v) => setPasswords((p) => ({ ...p, newPassword: v }))}
             secureTextEntry
           />
+          <Text style={styles.fieldLabel}>{t('settings.password.confirmPassword')}</Text>
           <TextInput
             style={styles.input}
-            placeholder="Confirm new password"
+            placeholder={t('settings.password.confirmPassword')}
             value={passwords.confirmPassword}
-            onChangeText={(t) => setPasswords((p) => ({ ...p, confirmPassword: t }))}
+            onChangeText={(v) => setPasswords((p) => ({ ...p, confirmPassword: v }))}
             secureTextEntry
           />
           <TouchableOpacity
@@ -232,23 +279,22 @@ export default function AccountScreen() {
             onPress={changePassword}
             disabled={changingPassword}
           >
-            <Text style={styles.btnText}>{changingPassword ? 'Changing…' : 'Change password'}</Text>
+            <Text style={styles.btnText}>
+              {changingPassword ? t('account.changing') : t('settings.password.changePassword')}
+            </Text>
           </TouchableOpacity>
         </View>
 
         {hasEmployee ? (
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Face verification (account)</Text>
-            <Text style={styles.helpText}>
-              Enroll once here; the server checks a live photo when you clock in or out on any phone or tablet. This is
-              separate from device Face ID in Settings.
-            </Text>
+            <Text style={styles.sectionTitle}>{t('account.faceSection')}</Text>
+            <Text style={styles.helpText}>{t('account.faceHelp')}</Text>
             <TouchableOpacity
               style={[styles.btn, faceBusy && styles.btnDisabled]}
               onPress={enrollOrReplaceFace}
               disabled={faceBusy}
             >
-              <Text style={styles.btnText}>{faceEnrolled ? 'Replace face photo' : 'Enroll face'}</Text>
+              <Text style={styles.btnText}>{faceEnrolled ? t('account.replaceFace') : t('account.enrollFace')}</Text>
             </TouchableOpacity>
             {faceEnrolled ? (
               <TouchableOpacity
@@ -256,7 +302,7 @@ export default function AccountScreen() {
                 onPress={removeFaceEnrollment}
                 disabled={faceBusy}
               >
-                <Text style={styles.btnText}>Remove enrollment</Text>
+                <Text style={styles.btnText}>{t('account.removeEnrollment')}</Text>
               </TouchableOpacity>
             ) : null}
           </View>
@@ -275,6 +321,7 @@ const styles = StyleSheet.create({
   subtitle: { fontSize: 14, color: '#64748b', marginTop: 4 },
   section: { marginBottom: 28 },
   sectionTitle: { fontSize: 16, fontWeight: '600', color: '#0f172a', marginBottom: 12 },
+  fieldLabel: { fontSize: 13, fontWeight: '600', color: '#475569', marginBottom: 6 },
   input: {
     backgroundColor: '#fff',
     borderWidth: 1,
@@ -284,6 +331,20 @@ const styles = StyleSheet.create({
     fontSize: 16,
     marginBottom: 12,
   },
+  langRow: { flexDirection: 'row', gap: 10 },
+  langChip: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    backgroundColor: '#fff',
+    alignItems: 'center',
+  },
+  langChipActive: { backgroundColor: '#3b82f6', borderColor: '#3b82f6' },
+  langChipText: { fontSize: 15, fontWeight: '600', color: '#0f172a' },
+  langChipTextActive: { color: '#fff' },
   btn: { backgroundColor: '#3b82f6', padding: 14, borderRadius: 10, alignItems: 'center' },
   btnSecondary: { backgroundColor: '#64748b' },
   btnDanger: { backgroundColor: '#b91c1c', marginTop: 10 },

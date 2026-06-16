@@ -17,6 +17,7 @@ import {
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
 import { getPrimaryRoleFromUser } from '../../types/auth';
 import * as api from '../../api';
@@ -126,11 +127,11 @@ function formatRangeLabel(view: ViewMode, start: Date, end: Date): string {
   return `${start.toLocaleDateString(undefined, left)} - ${end.toLocaleDateString(undefined, right)}`;
 }
 
-function employeeDisplayName(e: Employee): string {
+function employeeDisplayName(e: Employee, employeeFallback = 'Employee'): string {
   const fn = (e.first_name || '').trim();
   const ln = (e.last_name || '').trim();
   if (fn || ln) return `${fn} ${ln}`.trim();
-  return e.email || 'Employee';
+  return e.email || employeeFallback;
 }
 
 function initials(e: Employee): string {
@@ -149,10 +150,10 @@ function sameCalendarDay(a: Date, b: Date): boolean {
   );
 }
 
-function employeeRoleLabel(emp: Employee): string {
+function employeeRoleLabel(emp: Employee, employeeFallback = 'Employee'): string {
   const r = String(emp.role || '').toLowerCase();
-  if (!r || ['employee', 'house_keeping', 'maintenance', 'user'].includes(r)) return 'Employee';
-  return emp.role || 'Employee';
+  if (!r || ['employee', 'house_keeping', 'maintenance', 'user'].includes(r)) return employeeFallback;
+  return emp.role || employeeFallback;
 }
 
 function cellContentForDay(employee: Employee, day: Date, shiftList: any[]): string {
@@ -253,7 +254,11 @@ function buildScheduleCsv(opts: {
   return lines.join('\n');
 }
 
-async function saveAndShareCsv(filename: string, csv: string): Promise<void> {
+async function saveAndShareCsv(
+  filename: string,
+  csv: string,
+  t: (key: string, options?: Record<string, unknown>) => string
+): Promise<void> {
   if (Platform.OS === 'web' && typeof document !== 'undefined') {
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -269,16 +274,16 @@ async function saveAndShareCsv(filename: string, csv: string): Promise<void> {
 
   const base = FileSystem.cacheDirectory;
   if (!base) {
-    Alert.alert('Export', 'Could not access file storage on this device.');
+    Alert.alert(t('common.error'), t('scheduler.exportNoStorage'));
     return;
   }
   const path = `${base}${filename}`;
   await FileSystem.writeAsStringAsync(path, csv, { encoding: FileSystem.EncodingType.UTF8 });
   const canShare = await Sharing.isAvailableAsync();
   if (canShare) {
-    await Sharing.shareAsync(path, { mimeType: 'text/csv', dialogTitle: 'Download report' });
+    await Sharing.shareAsync(path, { mimeType: 'text/csv', dialogTitle: t('scheduler.downloadReportTitle') });
   } else {
-    Alert.alert('Report saved', path);
+    Alert.alert(t('scheduler.reportSaved'), path);
   }
 }
 
@@ -286,11 +291,12 @@ type PickerModalProps = {
   visible: boolean;
   title: string;
   options: { id: string; label: string }[];
+  emptyText: string;
   onSelect: (id: string) => void;
   onClose: () => void;
 };
 
-function PickerModal({ visible, title, options, onSelect, onClose }: PickerModalProps) {
+function PickerModal({ visible, title, options, emptyText, onSelect, onClose }: PickerModalProps) {
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <View style={modalStyles.overlay} pointerEvents="box-none">
@@ -303,9 +309,7 @@ function PickerModal({ visible, title, options, onSelect, onClose }: PickerModal
             style={modalStyles.list}
             keyboardShouldPersistTaps="handled"
             nestedScrollEnabled
-            ListEmptyComponent={
-              <Text style={modalStyles.emptyList}>No options available. Pull to refresh or check permissions.</Text>
-            }
+            ListEmptyComponent={<Text style={modalStyles.emptyList}>{emptyText}</Text>}
             renderItem={({ item }) => (
               <Pressable
                 style={modalStyles.row}
@@ -353,6 +357,7 @@ const KeyedView = View as React.ComponentType<React.ComponentProps<typeof View> 
 const KeyedFragment = Fragment as React.ComponentType<{ children?: React.ReactNode; key?: React.Key }>;
 
 export default function EmployeeScheduleScreen() {
+  const { t } = useTranslation();
   const { user, role } = useAuth();
   const effectiveRole = role ?? (user ? getPrimaryRoleFromUser(user) : null);
   const { width } = useWindowDimensions();
@@ -724,7 +729,10 @@ export default function EmployeeScheduleScreen() {
 
   const goToday = () => setAnchor(new Date());
 
-  const orgOptions = useMemo(() => organizations.map((o) => ({ id: String(o.id), label: String(o.name || 'Organization') })), [organizations]);
+  const orgOptions = useMemo(
+    () => organizations.map((o) => ({ id: String(o.id), label: String(o.name || t('common.organization')) })),
+    [organizations, t]
+  );
   const companyOptions = useMemo(() => {
     const seen = new Set<string>();
     const rows: { id: string; label: string }[] = [];
@@ -734,10 +742,11 @@ export default function EmployeeScheduleScreen() {
       const id = String((c as any).id ?? (c as any).pk ?? '').trim();
       if (!id || seen.has(id)) continue;
       seen.add(id);
-      rows.push({ id, label: String(c.name || 'Company').trim() || 'Company' });
+      const name = String(c.name || '').trim();
+      rows.push({ id, label: name || t('common.company') });
     }
     return rows;
-  }, [companiesFiltered]);
+  }, [companiesFiltered, t]);
 
   const employeeStats = useMemo(() => {
     return employees.map((emp) => {
@@ -770,7 +779,7 @@ export default function EmployeeScheduleScreen() {
 
   const onDownloadReport = async () => {
     if (!selectedCompanyId) {
-      Alert.alert('Select company', 'Choose a company before exporting.');
+      Alert.alert(t('scheduler.selectCompany'), t('scheduler.selectCompanyBeforeExport'));
       return;
     }
     setExporting(true);
@@ -787,9 +796,9 @@ export default function EmployeeScheduleScreen() {
       const safe = (selectedCompanyName || 'schedule').replace(/[^a-z0-9-_]+/gi, '_');
       const d = rangeStart.toISOString().slice(0, 10);
       const filename = `employee_schedule_${safe}_${d}.csv`;
-      await saveAndShareCsv(filename, csv);
+      await saveAndShareCsv(filename, csv, t);
     } catch (e: any) {
-      Alert.alert('Export failed', e?.message || 'Could not create CSV.');
+      Alert.alert(t('common.error'), e?.message || t('scheduler.exportFailed'));
     } finally {
       setExporting(false);
     }
@@ -816,8 +825,8 @@ export default function EmployeeScheduleScreen() {
           <View style={styles.headerLeft}>
             <MaterialCommunityIcons name="calendar-month" size={28} color="#2563eb" />
             <View style={styles.headerTitles}>
-              <Text style={styles.pageTitle}>Employee Schedule</Text>
-              <Text style={styles.pageSubtitle}>Monitor employee schedules, shifts, and attendance</Text>
+              <Text style={styles.pageTitle}>{t('scheduler.employeeSchedule')}</Text>
+              <Text style={styles.pageSubtitle}>{t('scheduler.employeeScheduleSubtitle')}</Text>
             </View>
           </View>
           <TouchableOpacity
@@ -827,7 +836,7 @@ export default function EmployeeScheduleScreen() {
             activeOpacity={0.85}
           >
             <MaterialCommunityIcons name="download" size={18} color="#0f172a" />
-            <Text style={styles.downloadBtnText}>{exporting ? '…' : 'Download Report'}</Text>
+            <Text style={styles.downloadBtnText}>{exporting ? '…' : t('scheduler.downloadReport')}</Text>
           </TouchableOpacity>
         </View>
 
@@ -835,14 +844,14 @@ export default function EmployeeScheduleScreen() {
           <View style={styles.filtersBlock}>
             <View style={styles.filtersLabelRow}>
               <MaterialCommunityIcons name="filter-variant" size={18} color="#64748b" />
-              <Text style={styles.filtersLabel}>Filters:</Text>
+              <Text style={styles.filtersLabel}>{t('scheduler.filters')}</Text>
             </View>
             <View style={styles.filterDropdowns}>
               {needsOrgPicker && (
                 <TouchableOpacity style={styles.filterSelect} onPress={() => setOrgModal(true)} activeOpacity={0.85}>
                   <MaterialCommunityIcons name="office-building-outline" size={18} color="#64748b" />
                   <Text style={styles.filterSelectText} numberOfLines={1}>
-                    {selectedOrgId ? selectedOrgName || 'Organization' : 'Select organization'}
+                    {selectedOrgId ? selectedOrgName || t('common.organization') : t('scheduler.selectOrganization')}
                   </Text>
                   <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
                 </TouchableOpacity>
@@ -862,12 +871,12 @@ export default function EmployeeScheduleScreen() {
                   numberOfLines={1}
                 >
                   {needsOrgPicker && !selectedOrgId
-                    ? 'Select organization first'
+                    ? t('scheduler.selectOrganizationFirst')
                     : companiesFiltered.length === 0 && (selectedOrgId || resolvedOrgScopeId)
-                      ? 'No companies'
+                      ? t('scheduler.noCompanies')
                       : selectedCompanyId
-                        ? selectedCompanyName || 'Company'
-                        : 'Select company'}
+                        ? selectedCompanyName || t('common.company')
+                        : t('scheduler.selectCompany')}
                 </Text>
                 <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
               </TouchableOpacity>
@@ -883,7 +892,7 @@ export default function EmployeeScheduleScreen() {
                   onPress={() => setViewMode(m)}
                 >
                   <Text style={[styles.segmentText, viewMode === m && styles.segmentTextActive]}>
-                    {m === 'weekly' ? 'Weekly' : 'Daily'}
+                    {m === 'weekly' ? t('scheduler.weekly') : t('scheduler.daily')}
                   </Text>
                 </TouchableOpacity>
               ))}
@@ -899,7 +908,7 @@ export default function EmployeeScheduleScreen() {
                 <MaterialCommunityIcons name="chevron-right" size={22} color="#0f172a" />
               </TouchableOpacity>
               <TouchableOpacity onPress={goToday} style={styles.todayBtn} hitSlop={4}>
-                <Text style={styles.todayBtnText}>Today</Text>
+                <Text style={styles.todayBtnText}>{t('scheduler.today')}</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -909,13 +918,13 @@ export default function EmployeeScheduleScreen() {
           <View style={styles.emptyCard}>
             <Text style={styles.emptyText}>
               {needsOrgPicker && !selectedOrgId
-                ? 'Select an organization and company to view employee schedules.'
-                : 'Select a company to view employee schedules.'}
+                ? t('scheduler.selectOrgAndCompany')
+                : t('scheduler.selectCompanyToView')}
             </Text>
           </View>
         ) : employees.length === 0 ? (
           <View style={styles.emptyCard}>
-            <Text style={styles.emptyText}>No employees in this company.</Text>
+            <Text style={styles.emptyText}>{t('scheduler.noEmployeesInCompany')}</Text>
           </View>
         ) : viewMode === 'weekly' ? (
           <View style={styles.scheduleTableCard}>
@@ -923,7 +932,7 @@ export default function EmployeeScheduleScreen() {
               <View style={{ minWidth: Math.max(tableMinWidth, width - 40) }}>
                 <View style={[styles.tr, styles.trHeader]}>
                   <View style={[styles.thEmp, { width: empColWidth }]}>
-                    <Text style={styles.thText}>Employee</Text>
+                    <Text style={styles.thText}>{t('common.employee')}</Text>
                   </View>
                   {weekDays.map((day, idx) => {
                     const isToday = sameCalendarDay(day, today);
@@ -949,7 +958,7 @@ export default function EmployeeScheduleScreen() {
                           {employeeDisplayName(emp)}
                         </Text>
                         <Text style={styles.empRole} numberOfLines={1}>
-                          {employeeRoleLabel(emp)}
+                          {employeeRoleLabel(emp, t('common.employee'))}
                         </Text>
                       </View>
                     </View>
@@ -982,10 +991,10 @@ export default function EmployeeScheduleScreen() {
                   </Text>
                 </View>
                 <View style={styles.empCardRight}>
-                  <Text style={styles.shiftCount}>
-                    {count} shift{count === 1 ? '' : 's'}
+                  <Text style={styles.shiftCount}>{t('scheduler.shiftCount', { count })}</Text>
+                  <Text style={styles.hoursTotal}>
+                    {hours.toFixed(1)} {t('scheduler.hoursShort')}
                   </Text>
-                  <Text style={styles.hoursTotal}>{hours.toFixed(1)} hrs</Text>
                 </View>
               </KeyedView>
             ))}
@@ -995,8 +1004,9 @@ export default function EmployeeScheduleScreen() {
 
       <PickerModal
         visible={orgModal}
-        title="Organization"
+        title={t('common.organization')}
         options={orgOptions}
+        emptyText={t('scheduler.noOptions')}
         onSelect={(id) => {
           setSelectedOrgId(id);
           setSelectedCompanyId(null);
@@ -1005,8 +1015,9 @@ export default function EmployeeScheduleScreen() {
       />
       <PickerModal
         visible={companyModal}
-        title={effectiveRole === 'organization_manager' ? 'Companies (your organization)' : 'Company'}
+        title={t('common.company')}
         options={companyOptions}
+        emptyText={t('scheduler.noOptions')}
         onSelect={(id) => setSelectedCompanyId(String(id))}
         onClose={() => setCompanyModal(false)}
       />

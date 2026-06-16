@@ -1,34 +1,55 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
+import React, { useCallback } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Alert } from 'react-native';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../context/AuthContext';
-import { getRoleDisplayLabel } from '../types/auth';
 
 export default function ProfileScreen() {
+  const { t } = useTranslation();
   const { user, role, signOut } = useAuth();
+  const roleLabel = role
+    ? role === 'super_admin'
+      ? t('roles.superAdmin')
+      : role === 'organization_manager'
+        ? t('roles.organizationManager')
+        : role === 'company_manager'
+          ? t('roles.companyManager')
+          : t('roles.employee')
+    : null;
+
+  const handleSignOut = useCallback(() => {
+    Alert.alert(t('settings.logoutConfirm.title'), t('settings.logoutConfirm.message'), [
+      { text: t('settings.logoutConfirm.cancel'), style: 'cancel' },
+      {
+        text: t('settings.logoutConfirm.confirm'),
+        style: 'destructive',
+        onPress: () => void signOut(),
+      },
+    ]);
+  }, [signOut, t]);
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.title}>Profile</Text>
+      <Text style={styles.title}>{t('settings.profile')}</Text>
       {user && (
         <View style={styles.card}>
-          <Text style={styles.label}>Email</Text>
+          <Text style={styles.label}>{t('settings.profileSection.email')}</Text>
           <Text style={styles.value}>{user.email ?? '—'}</Text>
           {user.full_name && (
             <>
-              <Text style={styles.label}>Name</Text>
+              <Text style={styles.label}>{t('settings.profileSection.fullName')}</Text>
               <Text style={styles.value}>{user.full_name}</Text>
             </>
           )}
-          {role && (
+          {roleLabel && (
             <>
-              <Text style={styles.label}>Role</Text>
-              <Text style={styles.value}>{getRoleDisplayLabel(role)}</Text>
+              <Text style={styles.label}>{t('settings.profileSection.role')}</Text>
+              <Text style={styles.value}>{roleLabel}</Text>
             </>
           )}
         </View>
       )}
-      <TouchableOpacity style={styles.button} onPress={() => signOut()}>
-        <Text style={styles.buttonText}>Sign out</Text>
+      <TouchableOpacity style={styles.button} onPress={handleSignOut}>
+        <Text style={styles.buttonText}>{t('settings.logout')}</Text>
       </TouchableOpacity>
     </ScrollView>
   );

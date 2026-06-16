@@ -14,13 +14,13 @@ import {
 } from 'react-native';
 import { useNavigation, useRoute, type RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { useTranslation } from 'react-i18next';
 import type { MotelRoomRow, MotelCleaningImageAsset } from '../../api';
 import * as api from '../../api';
 import { HttpError } from '../../lib/api-client';
 import {
   canEmployeeStartCleaning,
   getEmployeeRoomCleaningBadge,
-  getEmployeeRoomStatusLabel,
   motelRoomFloor,
   motelRoomFloorLabel,
   motelRoomNumber,
@@ -28,6 +28,12 @@ import {
   motelRoomUuid,
   patchRoomAfterCleaningSubmit,
 } from '../../lib/motelRoomDisplay';
+import {
+  localizedCleaningBadgeLabel,
+  localizedEmployeeRoomStatus,
+  localizedFloorLabel,
+  localizedPhotoStepLabel,
+} from '../../lib/housekeepingI18n';
 import { useMotelCleaningSessionContext } from '../../context/MotelCleaningSessionContext';
 import type { EmployeeRoomsStackParamList } from '../../navigation/EmployeeRoomsStack';
 import {
@@ -46,20 +52,17 @@ type DetailsRoute = RouteProp<EmployeeRoomsStackParamList, 'RoomCleaningDetails'
 
 const CAMERA_QUALITY = 0.52;
 
-function toast(title: string, message?: string) {
-  Alert.alert(title, message || undefined);
-}
-
 export default function RoomCleaningDetailsScreen() {
+  const { t } = useTranslation();
   const navigation = useNavigation<Nav>();
   const route = useRoute<DetailsRoute>();
   const room = route.params.room;
   const roomId = motelRoomUuid(room);
 
   const cleaningSession = useMotelCleaningSessionContext();
-  const badge = useMemo(() => getEmployeeRoomCleaningBadge(room), [room]);
 
   const [localRoom, setLocalRoom] = useState<MotelRoomRow>(room);
+  const badge = useMemo(() => getEmployeeRoomCleaningBadge(localRoom), [localRoom]);
   const [startBusy, setStartBusy] = useState(false);
   const [submitBusy, setSubmitBusy] = useState(false);
   const [uploadPhase, setUploadPhase] = useState<'idle' | 'uploading' | 'completing'>('idle');
@@ -73,15 +76,24 @@ export default function RoomCleaningDetailsScreen() {
   const canStart = canEmployeeStartCleaning(localRoom, cleaningSession.roomId);
   const isPending = badge.status === 'pending_approval';
 
+  const showToast = useCallback((title: string, message?: string) => {
+    Alert.alert(title, message || undefined);
+  }, []);
+
   useEffect(() => {
     if (!toastMsg) return;
-    const t = setTimeout(() => setToastMsg(null), 3200);
-    return () => clearTimeout(t);
+    const timer = setTimeout(() => setToastMsg(null), 3200);
+    return () => clearTimeout(timer);
   }, [toastMsg]);
 
   const currentStep = useMemo(() => firstIncompletePhotoStep(photosByStep), [photosByStep]);
   const allPhotosDone = useMemo(() => allCleaningPhotosCaptured(photosByStep), [photosByStep]);
   const photoCount = useMemo(() => capturedPhotoCount(photosByStep), [photosByStep]);
+
+  const stepLabel = useCallback(
+    (key: MotelCleaningPhotoStepKey) => localizedPhotoStepLabel(t, key),
+    [t]
+  );
 
   const captureStepPhoto = async (stepKey?: MotelCleaningPhotoStepKey) => {
     const step = stepKey
@@ -90,7 +102,7 @@ export default function RoomCleaningDetailsScreen() {
     if (!step) return;
     const granted = await ensureCameraPermission();
     if (!granted) {
-      toast('Camera', 'Camera access is required. Gallery upload is not allowed.');
+      showToast(t('housekeeping.photos.title'), t('housekeeping.photos.cameraRequired'));
       return;
     }
     const result = await launchCleaningCameraAsync(CAMERA_QUALITY);
@@ -112,12 +124,12 @@ export default function RoomCleaningDetailsScreen() {
 
   const startCleaning = async () => {
     if (!roomId) {
-      toast('Start cleaning', 'This room has no server id. Refresh the room list.');
+      showToast(t('housekeeping.workflow.startCleaning'), t('housekeeping.validation.roomIdMissing'));
       return;
     }
     if (!canStart) {
       if (cleaningSession.hasActiveSession && cleaningSession.roomId !== roomId) {
-        toast('Cleaning in progress', 'Finish the other room first.');
+        showToast(t('housekeeping.cleaningInProgress'), t('housekeeping.finishOtherRoomFirst'));
       }
       return;
     }
@@ -126,7 +138,7 @@ export default function RoomCleaningDetailsScreen() {
       const res = (await api.startMotelCleaning(roomId)) as Record<string, unknown>;
       const sid = api.resolveMotelCleaningSessionId(res);
       if (!sid) {
-        toast('Start cleaning', 'Server did not return a session id.');
+        showToast(t('housekeeping.workflow.startCleaning'), t('housekeeping.validation.sessionIdMissing'));
         return;
       }
       await cleaningSession.beginSession(roomId, sid);
@@ -137,8 +149,8 @@ export default function RoomCleaningDetailsScreen() {
           ? String((e.body as any)?.detail ?? e.message)
           : e instanceof Error
             ? e.message
-            : 'Request failed';
-      toast('Start cleaning', msg);
+            : t('housekeeping.toast.requestFailed');
+      showToast(t('housekeeping.workflow.startCleaning'), msg);
     } finally {
       setStartBusy(false);
     }
@@ -147,12 +159,15 @@ export default function RoomCleaningDetailsScreen() {
   const finishCleaning = async () => {
     if (submitLockRef.current || submitBusy) return;
     if (!cleaningSession.sessionId || !cleaningActive) {
-      toast('Finish cleaning', 'Start cleaning first.');
+      showToast(t('housekeeping.workflow.finishCleaning'), t('housekeeping.validation.startCleaningFirst'));
       return;
     }
     const missing = MOTEL_CLEANING_PHOTO_STEPS.find((s) => !photosByStep[s.key]);
     if (missing) {
-      toast('Photos required', `Please capture: ${missing.label}`);
+      showToast(
+        t('housekeeping.validation.photosRequired'),
+        t('housekeeping.validation.capturePhoto', { label: stepLabel(missing.key) })
+      );
       return;
     }
 
@@ -179,7 +194,7 @@ export default function RoomCleaningDetailsScreen() {
       const patched = patchRoomAfterCleaningSubmit(localRoom);
       setLocalRoom(patched);
       setPhotosByStep({});
-      setToastMsg({ type: 'success', text: 'Cleaning submitted — Pending Approval' });
+      setToastMsg({ type: 'success', text: t('housekeeping.toast.submittedPendingApproval') });
       navigation.navigate({
         name: 'EmployeeRoomsList',
         params: { submittedRoomId: roomId },
@@ -191,11 +206,11 @@ export default function RoomCleaningDetailsScreen() {
           ? String((e.body as any)?.detail ?? e.message)
           : e instanceof Error
             ? e.message
-            : 'Upload failed';
+            : t('housekeeping.toast.uploadFailed');
       setToastMsg({ type: 'error', text: msg });
-      Alert.alert('Submit failed', msg, [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Retry', onPress: () => void finishCleaning() },
+      Alert.alert(t('housekeeping.toast.submitFailed'), msg, [
+        { text: t('common.cancel'), style: 'cancel' },
+        { text: t('housekeeping.retry'), onPress: () => void finishCleaning() },
       ]);
     } finally {
       setSubmitBusy(false);
@@ -209,8 +224,9 @@ export default function RoomCleaningDetailsScreen() {
     void finishCleaning();
   };
 
-  const statusLine = String((localRoom as any).status ?? '—');
-  const displayBadge = getEmployeeRoomCleaningBadge(localRoom);
+  const displayBadgeLabel = localizedCleaningBadgeLabel(t, localRoom);
+  const roomStatusLabel = localizedEmployeeRoomStatus(t, localRoom);
+  const floorDisplay = localizedFloorLabel(t, motelRoomFloorLabel(localRoom));
 
   return (
     <View style={styles.root}>
@@ -221,37 +237,37 @@ export default function RoomCleaningDetailsScreen() {
       ) : null}
 
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-        <Text style={styles.title}>Room {motelRoomNumber(localRoom)}</Text>
+        <Text style={styles.title}>{t('housekeeping.roomTitle', { number: motelRoomNumber(localRoom) })}</Text>
         <Text style={styles.subtitleHeader}>
-          {motelRoomFloorLabel(localRoom)} - {getEmployeeRoomStatusLabel(localRoom)}
+          {floorDisplay} - {roomStatusLabel}
         </Text>
 
         <View style={styles.detailCard}>
-          <Row label="Room number" value={motelRoomNumber(localRoom)} />
-          <Row label="Room type" value={motelRoomType(localRoom)} />
-          <Row label="Floor" value={motelRoomFloor(localRoom)} />
-          <Row label="Room status" value={statusLine} />
+          <Row label={t('housekeeping.details.roomNumber')} value={motelRoomNumber(localRoom)} />
+          <Row label={t('housekeeping.details.roomType')} value={motelRoomType(localRoom)} />
+          <Row label={t('housekeeping.details.floor')} value={motelRoomFloor(localRoom)} />
+          <Row label={t('housekeeping.details.roomStatus')} value={roomStatusLabel} />
           <View style={styles.badgeRow}>
-            <Text style={styles.rowLabel}>Cleaning status</Text>
-            <View style={[styles.badge, { backgroundColor: displayBadge.bg }]}>
-              <Text style={[styles.badgeText, { color: displayBadge.text }]}>{displayBadge.label}</Text>
+            <Text style={styles.rowLabel}>{t('housekeeping.details.cleaningStatus')}</Text>
+            <View style={[styles.badge, { backgroundColor: badge.bg }]}>
+              <Text style={[styles.badgeText, { color: badge.text }]}>
+                {displayBadgeLabel}
+              </Text>
             </View>
           </View>
         </View>
 
         {cleaningActive ? (
           <View style={styles.timerCard}>
-            <Text style={styles.timerLabel}>Cleaning timer</Text>
+            <Text style={styles.timerLabel}>{t('housekeeping.timer.cleaningTimer')}</Text>
             <Text style={styles.timerValue}>{cleaningSession.timerLabel}</Text>
-            <Text style={styles.timerHint}>Timer continues while you navigate or minimize the app.</Text>
+            <Text style={styles.timerHint}>{t('housekeeping.timer.timerHint')}</Text>
           </View>
         ) : null}
 
         {isPending ? (
           <View style={styles.infoBox}>
-            <Text style={styles.infoText}>
-              Cleaning is pending admin approval. You cannot start a new session until it is reviewed.
-            </Text>
+            <Text style={styles.infoText}>{t('housekeeping.inspection.pendingApprovalHint')}</Text>
           </View>
         ) : null}
 
@@ -264,7 +280,7 @@ export default function RoomCleaningDetailsScreen() {
             {startBusy ? (
               <ActivityIndicator color="#fff" />
             ) : (
-              <Text style={styles.btnPrimaryText}>Start cleaning</Text>
+              <Text style={styles.btnPrimaryText}>{t('housekeeping.workflow.startCleaning')}</Text>
             )}
           </TouchableOpacity>
         ) : null}
@@ -272,12 +288,15 @@ export default function RoomCleaningDetailsScreen() {
         {cleaningActive ? (
           <>
             <View style={styles.photosCard}>
-              <Text style={styles.sectionTitle}>Room photos (camera only)</Text>
+              <Text style={styles.sectionTitle}>{t('housekeeping.photos.title')}</Text>
 
               {currentStep && !allPhotosDone ? (
                 <>
                   <Text style={styles.stepIndicator}>
-                    Step {photoCount + 1}: {currentStep.label}
+                    {t('housekeeping.photos.stepIndicator', {
+                      current: photoCount + 1,
+                      label: stepLabel(currentStep.key),
+                    })}
                   </Text>
                   <TouchableOpacity
                     style={[styles.btnTakePhoto, submitBusy && styles.btnDisabled]}
@@ -285,11 +304,13 @@ export default function RoomCleaningDetailsScreen() {
                     disabled={submitBusy}
                     activeOpacity={0.9}
                   >
-                    <Text style={styles.btnTakePhotoText}>Take photo ({currentStep.label})</Text>
+                    <Text style={styles.btnTakePhotoText}>
+                      {t('housekeeping.photos.takePhoto', { label: stepLabel(currentStep.key) })}
+                    </Text>
                   </TouchableOpacity>
                 </>
               ) : allPhotosDone ? (
-                <Text style={styles.stepDoneHint}>All required photos captured. Review below, then save.</Text>
+                <Text style={styles.stepDoneHint}>{t('housekeeping.photos.allPhotosCaptured')}</Text>
               ) : null}
 
               <View style={styles.checklist}>
@@ -297,6 +318,7 @@ export default function RoomCleaningDetailsScreen() {
                   const img = photosByStep[step.key];
                   const done = Boolean(img);
                   const isCurrent = !allPhotosDone && currentStep?.key === step.key;
+                  const label = stepLabel(step.key);
                   return (
                     <View
                       key={step.key}
@@ -309,13 +331,19 @@ export default function RoomCleaningDetailsScreen() {
                       <View style={styles.checklistLeft}>
                         <Text style={[styles.checklistLabel, done && styles.checklistLabelDone]}>
                           {done ? '✓ ' : ''}
-                          {step.label}
+                          {label}
                         </Text>
-                        {isCurrent ? <Text style={styles.checklistSub}>Current step</Text> : null}
+                        {isCurrent ? (
+                          <Text style={styles.checklistSub}>{t('housekeeping.photos.currentStep')}</Text>
+                        ) : null}
                       </View>
                       {done && img ? (
                         <View style={styles.checklistRight}>
-                          <TouchableOpacity onPress={() => setImageViewerUri(img.uri)} activeOpacity={0.9}>
+                          <TouchableOpacity
+                            onPress={() => setImageViewerUri(img.uri)}
+                            activeOpacity={0.9}
+                            accessibilityLabel={t('housekeeping.photos.viewImage')}
+                          >
                             <Image source={{ uri: img.uri }} style={styles.checklistThumb} resizeMode="cover" />
                           </TouchableOpacity>
                           <TouchableOpacity
@@ -323,7 +351,7 @@ export default function RoomCleaningDetailsScreen() {
                             disabled={submitBusy}
                             hitSlop={8}
                           >
-                            <Text style={styles.retakeText}>Retake</Text>
+                            <Text style={styles.retakeText}>{t('housekeeping.photos.retake')}</Text>
                           </TouchableOpacity>
                         </View>
                       ) : !done && !allPhotosDone ? (
@@ -338,7 +366,7 @@ export default function RoomCleaningDetailsScreen() {
                               (!isCurrent && index > photoCount) && styles.captureLinkDisabled,
                             ]}
                           >
-                            Capture
+                            {t('housekeeping.photos.capture')}
                           </Text>
                         </TouchableOpacity>
                       ) : null}
@@ -349,13 +377,17 @@ export default function RoomCleaningDetailsScreen() {
 
               {photoCount > 0 ? (
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.previewScroll}>
-                  {MOTEL_CLEANING_PHOTO_STEPS.map(({ key, label }) => {
+                  {MOTEL_CLEANING_PHOTO_STEPS.map(({ key }) => {
                     const img = photosByStep[key];
                     if (!img) return null;
                     return (
                       <View key={key} style={styles.thumbWrap}>
-                        <Text style={styles.thumbCaption}>{label}</Text>
-                        <TouchableOpacity onPress={() => setImageViewerUri(img.uri)} activeOpacity={0.9}>
+                        <Text style={styles.thumbCaption}>{stepLabel(key)}</Text>
+                        <TouchableOpacity
+                          onPress={() => setImageViewerUri(img.uri)}
+                          activeOpacity={0.9}
+                          accessibilityLabel={t('housekeeping.photos.viewImage')}
+                        >
                           <Image source={{ uri: img.uri }} style={styles.thumb} resizeMode="cover" />
                         </TouchableOpacity>
                       </View>
@@ -363,18 +395,16 @@ export default function RoomCleaningDetailsScreen() {
                   })}
                 </ScrollView>
               ) : (
-                <Text style={styles.hint}>
-                  Capture Door, Bathroom, Bed, Tables, and Whole room — camera only.
-                </Text>
+                <Text style={styles.hint}>{t('housekeeping.photos.captureHint')}</Text>
               )}
             </View>
 
-            <Text style={styles.sectionTitle}>Cleaning Notes</Text>
+            <Text style={styles.sectionTitle}>{t('housekeeping.workflow.cleaningNotes')}</Text>
             <TextInput
               style={styles.notesInput}
               value={notes}
               onChangeText={setNotes}
-              placeholder="Optional notes about this cleaning…"
+              placeholder={t('housekeeping.details.notesPlaceholder')}
               placeholderTextColor="#94a3b8"
               multiline
               editable={!submitBusy}
@@ -383,7 +413,7 @@ export default function RoomCleaningDetailsScreen() {
             {submitBusy && uploadPhase !== 'idle' ? (
               <View style={styles.progressRow}>
                 <ActivityIndicator size="small" color="#0f172a" />
-                <Text style={styles.progressText}>Submitting cleaning photos…</Text>
+                <Text style={styles.progressText}>{t('housekeeping.submittingPhotos')}</Text>
               </View>
             ) : null}
 
@@ -392,7 +422,7 @@ export default function RoomCleaningDetailsScreen() {
               onPress={() => navigation.goBack()}
               disabled={submitBusy}
             >
-              <Text style={styles.cancelLinkText}>Cancel</Text>
+              <Text style={styles.cancelLinkText}>{t('common.cancel')}</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -403,7 +433,7 @@ export default function RoomCleaningDetailsScreen() {
               {submitBusy ? (
                 <ActivityIndicator color="#fff" />
               ) : (
-                <Text style={styles.btnPrimaryText}>Save & finish</Text>
+                <Text style={styles.btnPrimaryText}>{t('housekeeping.workflow.saveAndFinish')}</Text>
               )}
             </TouchableOpacity>
           </>
@@ -417,7 +447,7 @@ export default function RoomCleaningDetailsScreen() {
               <Image source={{ uri: imageViewerUri }} style={styles.viewerImage} resizeMode="contain" />
             ) : null}
             <TouchableOpacity style={styles.viewerClose} onPress={() => setImageViewerUri(null)}>
-              <Text style={styles.viewerCloseText}>Close</Text>
+              <Text style={styles.viewerCloseText}>{t('housekeeping.close')}</Text>
             </TouchableOpacity>
           </Pressable>
         </Pressable>
@@ -533,15 +563,6 @@ const styles = StyleSheet.create({
   },
   hint: { fontSize: 12, color: '#64748b', marginBottom: 4, textAlign: 'center' },
   subtitleHeader: { fontSize: 14, color: '#64748b', marginBottom: 16, textAlign: 'center' },
-  btnPrimary: {
-    backgroundColor: '#0f172a',
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginTop: 8,
-    minHeight: 48,
-    justifyContent: 'center',
-  },
   btnPrimaryBlue: {
     backgroundColor: '#2563eb',
     paddingVertical: 14,
@@ -552,16 +573,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   btnPrimaryText: { color: '#fff', fontWeight: '700', fontSize: 16 },
-  btnSecondary: {
-    backgroundColor: '#e2e8f0',
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginBottom: 12,
-    minHeight: 48,
-    justifyContent: 'center',
-  },
-  btnSecondaryText: { color: '#0f172a', fontWeight: '700', fontSize: 15 },
   btnDisabled: { opacity: 0.5 },
   notesInput: {
     backgroundColor: '#fff',
@@ -578,18 +589,6 @@ const styles = StyleSheet.create({
   previewScroll: { maxHeight: 110, marginBottom: 12 },
   thumbWrap: { marginRight: 10, position: 'relative' },
   thumb: { width: 88, height: 88, borderRadius: 10, backgroundColor: '#e2e8f0' },
-  removeBtn: {
-    position: 'absolute',
-    top: -6,
-    right: -6,
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: '#b91c1c',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  removeBtnText: { color: '#fff', fontSize: 16, fontWeight: '700', lineHeight: 18 },
   progressRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginVertical: 8 },
   progressText: { fontSize: 13, color: '#475569' },
   toast: {

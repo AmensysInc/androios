@@ -1,11 +1,13 @@
 import React, { memo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { useTranslation } from 'react-i18next';
 import type { MotelRoomRow } from '../../api';
 import {
   getEmployeeRoomTileColor,
   motelRoomFloorLabel,
   motelRoomNumber,
 } from '../../lib/motelRoomDisplay';
+import { localizedFloorLabel } from '../../lib/housekeepingI18n';
 
 type Props = {
   room: MotelRoomRow;
@@ -14,8 +16,9 @@ type Props = {
 };
 
 function MotelRoomGridTileInner({ room, width, onPress }: Props) {
+  const { t } = useTranslation();
   const bg = getEmployeeRoomTileColor(room);
-  const floor = motelRoomFloorLabel(room);
+  const floor = localizedFloorLabel(t, motelRoomFloorLabel(room));
   return (
     <TouchableOpacity
       style={[styles.tile, { width, backgroundColor: bg }]}

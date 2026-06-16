@@ -101,9 +101,6 @@ export async function loadDepartmentOptions(
     }
   }
 
-  if (__DEV__) {
-    console.log('[departments] org:', ctx.organizationId, 'company:', ctx.companyId, '→ count', merged.length);
-  }
   return merged;
 }
 

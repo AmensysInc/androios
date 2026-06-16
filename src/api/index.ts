@@ -2471,9 +2471,6 @@ export async function publishShiftsWeekWithFallbacks(params: {
     }
   }
 
-  if (typeof __DEV__ !== 'undefined' && __DEV__) {
-    console.log('[publish] fallback patch used', { companyId: cid, patchedCount: patched });
-  }
   return { ok: true, method: 'patch', patchedCount: patched };
 }
 export async function markShiftMissed(id: string) {
@@ -3716,13 +3713,6 @@ async function linkShiftsToScheduleTemplateViaShiftFk(templateId: string, shiftI
   const ids = shiftIds.map((x) => String(x).trim()).filter(Boolean);
   if (!ids.length) return false;
 
-  if (typeof __DEV__ !== 'undefined' && __DEV__) {
-    console.log('[schedule-template] linkShiftsToScheduleTemplateViaShiftFk', {
-      templateId,
-      shiftCount: ids.length,
-    });
-  }
-
   let chosen: Record<string, any> | null = null;
   for (const body of shiftTemplateFkWriteBodies(templateId)) {
     const w = scrubWrite(body);
@@ -3738,9 +3728,6 @@ async function linkShiftsToScheduleTemplateViaShiftFk(templateId: string, shiftI
     const verify = await apiClient.get<any>(`/scheduler/shifts/${encodeURIComponent(ids[0])}/`).catch(() => null);
     if (verify && shiftRowReferencesScheduleTemplate(verify, templateId)) {
       chosen = w;
-      if (typeof __DEV__ !== 'undefined' && __DEV__) {
-        console.log('[schedule-template] shift FK write verified', { keys: Object.keys(w) });
-      }
       break;
     }
   }
@@ -4052,13 +4039,6 @@ export async function createScheduleTemplateWithFallbacks(params: {
               shift_count: n,
             };
           }
-        }
-        if (typeof __DEV__ !== 'undefined' && __DEV__) {
-          console.log('[schedule-template] finalize after shift FK', {
-            templateId: tid,
-            count,
-            hasSignal,
-          });
         }
       }
     }
@@ -4779,6 +4759,45 @@ export async function deleteHabitCompletion(id: string) {
 // —— Motel / hotel cleaning (employee motel orgs) ——
 export type MotelRoomRow = { id: string; name?: string; number?: string; room_number?: string; label?: string; [k: string]: any };
 
+/** Canonical company scope for GET `/motel/rooms/` (matches web `motelCompanyQueryParams`). */
+export function motelCompanyQueryParams(companyId: string): { company_id: string } {
+  return { company_id: String(companyId || '').trim() };
+}
+
+/**
+ * Fetch rooms for one motel company — same contract as web `fetchMotelRoomsList`.
+ * Backend requires `company_id` for managers; response shape is `{ company_id, rooms: [...] }`.
+ */
+export async function getMotelRoomsForCompany(
+  companyId: string,
+  options?: { floor?: string }
+): Promise<MotelRoomRow[]> {
+  const cid = String(companyId || '').trim();
+  if (!cid) return [];
+
+  const params: Record<string, string> = { ...motelCompanyQueryParams(cid) };
+  if (options?.floor != null && String(options.floor).trim() !== '') {
+    params.floor = String(options.floor).trim();
+  }
+
+  const paths = ['/motel/rooms/', '/scheduler/motel/rooms/'];
+  let lastErr: unknown = null;
+  for (const path of paths) {
+    try {
+      const raw = await apiClient.get<any>(path, params);
+      const rows = extractMotelRoomListFromResponse(raw);
+      if (rows.length > 0) return rows;
+      if (raw != null && (Array.isArray(raw) || (typeof raw === 'object' && 'rooms' in (raw as object)))) {
+        return rows;
+      }
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  if (lastErr) throw lastErr;
+  return [];
+}
+
 export async function getMotelRooms(params?: Record<string, any>): Promise<MotelRoomRow[]> {
   const pageSize = 200;
   const base: Record<string, any> = { page_size: pageSize, limit: pageSize, ...(params ?? {}) };
@@ -4795,22 +4814,37 @@ export async function getMotelRooms(params?: Record<string, any>): Promise<Motel
     }
   };
 
-  const raw1 = await apiClient.get<any>('/motel/rooms/', base);
-  let batch = extractMotelRoomListFromResponse(raw1);
-  add(batch);
-  if (batch.length >= pageSize) {
-    for (let page = 2; page <= 15; page++) {
-      try {
-        const rawN = await apiClient.get<any>('/motel/rooms/', { ...base, page });
-        const next = extractMotelRoomListFromResponse(rawN);
-        if (next.length === 0) break;
-        add(next);
-        if (next.length < pageSize) break;
-      } catch {
-        break;
+  const paths = ['/motel/rooms/', '/scheduler/motel/rooms/'];
+  let lastErr: unknown = null;
+  let fetched = false;
+  for (const path of paths) {
+    try {
+      const raw1 = await apiClient.get<any>(path, base);
+      fetched = true;
+      let batch = extractMotelRoomListFromResponse(raw1);
+      add(batch);
+      if (batch.length >= pageSize) {
+        for (let page = 2; page <= 15; page++) {
+          try {
+            const rawN = await apiClient.get<any>(path, { ...base, page });
+            const next = extractMotelRoomListFromResponse(rawN);
+            if (next.length === 0) break;
+            add(next);
+            if (next.length < pageSize) break;
+          } catch {
+            break;
+          }
+        }
       }
+      if (merged.length > 0) return merged;
+      if (raw1 != null && (Array.isArray(raw1) || (typeof raw1 === 'object' && 'rooms' in (raw1 as object)))) {
+        return merged;
+      }
+    } catch (e) {
+      lastErr = e;
     }
   }
+  if (!fetched && lastErr) throw lastErr;
   return merged;
 }
 

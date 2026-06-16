@@ -30,6 +30,9 @@ import {
   employeeMatchesDepartmentFilter,
 } from '../../lib/departmentEmployeeMatch';
 import ShiftTasksModal from '../../components/scheduler/ShiftTasksModal';
+import { useTranslation } from 'react-i18next';
+
+const RANGE_WEEKDAY_KEYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
 
 type Organization = { id: string; name: string; [k: string]: any };
 type Company = { id: string; name: string; organization_id?: string; company_manager_id?: string; [k: string]: any };
@@ -507,8 +510,6 @@ function sameCalendarDay(a: Date, b: Date): boolean {
   );
 }
 
-const RANGE_WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-
 function ScheduleDateRangeModal({
   visible,
   onClose,
@@ -522,6 +523,7 @@ function ScheduleDateRangeModal({
   onUseStandardWeek: () => void;
   initialCursorMonth: Date;
 }) {
+  const { t } = useTranslation();
   const [cursor, setCursor] = useState(() => new Date());
   const [from, setFrom] = useState<Date | null>(null);
 
@@ -567,8 +569,8 @@ function ScheduleDateRangeModal({
       <View style={styles.modalOverlay}>
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
         <View style={styles.rangePickModalBox}>
-          <Text style={styles.rangePickTitle}>Date range</Text>
-          <Text style={styles.rangePickHint}>{from ? 'Tap end date' : 'Tap start date, then end date'}</Text>
+          <Text style={styles.rangePickTitle}>{t('scheduler.dateRange')}</Text>
+          <Text style={styles.rangePickHint}>{from ? t('scheduler.tapEndDate') : t('scheduler.tapStartDate')}</Text>
           <View style={styles.rangePickMonthRow}>
             <TouchableOpacity onPress={() => setCursor(new Date(y, mo - 1, 1))} hitSlop={8}>
               <MaterialCommunityIcons name="chevron-left" size={22} color="#0f172a" />
@@ -579,9 +581,9 @@ function ScheduleDateRangeModal({
             </TouchableOpacity>
           </View>
           <View style={styles.rangePickWeekHead}>
-            {RANGE_WEEKDAYS.map((w) => (
-              <Text key={w} style={styles.rangePickWeekHeadCell}>
-                {w}
+            {RANGE_WEEKDAY_KEYS.map((key) => (
+              <Text key={key} style={styles.rangePickWeekHeadCell}>
+                {t(`days.${key}`)}
               </Text>
             ))}
           </View>
@@ -609,7 +611,7 @@ function ScheduleDateRangeModal({
           <View style={styles.rangePickFooter}>
             {from ? (
               <TouchableOpacity onPress={() => setFrom(null)}>
-                <Text style={styles.rangePickLink}>Reselect start</Text>
+                <Text style={styles.rangePickLink}>{t('scheduler.reselectStart')}</Text>
               </TouchableOpacity>
             ) : (
               <View style={{ minWidth: 8 }} />
@@ -620,11 +622,11 @@ function ScheduleDateRangeModal({
                 onClose();
               }}
             >
-              <Text style={styles.rangePickLink}>This week (Mon–Sun)</Text>
+              <Text style={styles.rangePickLink}>{t('scheduler.thisWeekMonSun')}</Text>
             </TouchableOpacity>
           </View>
           <TouchableOpacity style={styles.rangePickCloseBtn} onPress={onClose}>
-            <Text style={styles.rangePickCloseBtnText}>Cancel</Text>
+            <Text style={styles.rangePickCloseBtnText}>{t('common.cancel')}</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -808,6 +810,7 @@ function PickerModal({ visible, title, options, onSelect, onClose }: PickerModal
 }
 
 export default function ScheduleScreen() {
+  const { t } = useTranslation();
   const { user, role } = useAuth();
   const { width, height } = useWindowDimensions();
   const isWide = width >= 900;
@@ -883,11 +886,11 @@ export default function ScheduleScreen() {
   const openShiftTasksModal = useCallback((emp: Employee, shiftRow: any) => {
     const sid = shiftRow?.id ?? shiftRow?.pk;
     if (!sid) {
-      Alert.alert('Save shift first', 'Save this shift before adding tasks.');
+      Alert.alert(t('scheduler.saveShiftFirstTitle'), t('scheduler.saveShiftFirstMessage'));
       return;
     }
     setShiftTasksTarget({ shift: shiftRow, employee: emp });
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (!shiftModalOpen) setTimePickerField(null);
@@ -914,8 +917,8 @@ export default function ScheduleScreen() {
   const selectedCompanyName = selectedCompany?.name;
 
   const scheduleDepartmentOptions = useMemo(
-    () => buildDepartmentFilterOptions(companyDepartments, employees, 'All Departments'),
-    [companyDepartments, employees]
+    () => buildDepartmentFilterOptions(companyDepartments, employees, t('common.allDepartments')),
+    [companyDepartments, employees, t]
   );
 
   const employeesForScheduleGrid = useMemo(() => {
@@ -927,8 +930,8 @@ export default function ScheduleScreen() {
 
   const scheduleDeptFilterLabel = useMemo(() => {
     const row = scheduleDepartmentOptions.find((o) => o.id === selectedDeptFilter);
-    return row?.label ?? 'All Departments';
-  }, [scheduleDepartmentOptions, selectedDeptFilter]);
+    return row?.label ?? t('common.allDepartments');
+  }, [scheduleDepartmentOptions, selectedDeptFilter, t]);
 
   /**
    * All Schedules: show templates that are not explicitly draft/unpublished (`published` is false only when
@@ -1273,23 +1276,13 @@ export default function ScheduleScreen() {
     const baseDay = parseDateInput(shiftDateInput) || shiftDay;
     const range = computeStartEndForDay(baseDay, shiftStart, shiftEnd);
     if (!range) {
-      Alert.alert('Validation', 'Use time format HH:mm for start and end.');
+      Alert.alert(t('common.validation'), t('scheduler.invalidTimeFormat'));
       return;
     }
     const { startAt, endAt } = range;
     const breakMin = parseFloat(String(shiftBreakMin).replace(/[^\d.]/g, '')) || 0;
     setShiftSaving(true);
     try {
-      if (typeof __DEV__ !== 'undefined' && __DEV__) {
-        console.log('[ScheduleScreen] submitShift', {
-          editing: !!editingShiftId,
-          companyId: selectedCompanyId,
-          employeeId: shiftEmployee?.id,
-          day: baseDay?.toISOString?.(),
-          start: startAt.toISOString(),
-          end: endAt.toISOString(),
-        });
-      }
       const clean = (obj: Record<string, any>) => {
         const out: Record<string, any> = {};
         Object.entries(obj).forEach(([k, v]) => {
@@ -1370,9 +1363,9 @@ export default function ScheduleScreen() {
       await loadEmployeesAndShifts();
     } catch (e: any) {
       Alert.alert(
-        'Error',
+        t('common.error'),
         api.formatSchedulerApiError(e) ||
-          (editingShiftId ? 'Failed to update shift' : 'Failed to create shift')
+          (editingShiftId ? t('scheduler.shiftUpdateFailed') : t('scheduler.shiftCreateFailed'))
       );
     } finally {
       setShiftSaving(false);
@@ -1388,18 +1381,18 @@ export default function ScheduleScreen() {
         setShiftModalOpen(false);
         await loadEmployeesAndShifts();
       } catch (e: any) {
-        Alert.alert('Error', e?.message || 'Failed to delete shift');
+        Alert.alert(t('common.error'), e?.message || t('scheduler.shiftDeleteFailed'));
       } finally {
         setShiftSaving(false);
       }
     };
     if (Platform.OS === 'web' && typeof (globalThis as any).confirm === 'function') {
-      if ((globalThis as any).confirm('Delete this shift?')) void run();
+      if ((globalThis as any).confirm(t('scheduler.deleteShiftConfirm'))) void run();
       return;
     }
-    Alert.alert('Delete shift', 'Delete this shift?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => void run() },
+    Alert.alert(t('scheduler.deleteShiftTitle'), t('scheduler.deleteShiftConfirm'), [
+      { text: t('common.cancel'), style: 'cancel' },
+      { text: t('common.delete'), style: 'destructive', onPress: () => void run() },
     ]);
   };
 
@@ -1456,7 +1449,7 @@ export default function ScheduleScreen() {
   const handleSaveTemplate = async () => {
     if (!selectedCompanyId || saveTemplateLoading) return;
     if (currentWeekShifts.length === 0) {
-      Alert.alert('Nothing to save', 'Add shifts to this week before saving as a template.');
+      Alert.alert(t('scheduler.nothingToSaveTitle'), t('scheduler.nothingToSaveMessage'));
       return;
     }
 
@@ -1539,16 +1532,13 @@ export default function ScheduleScreen() {
       // When updating an existing template, stay on the same week and do not create a new template id.
       if (isEditingExistingTemplate) {
         await loadScheduleTemplatesFromApi({ bustCache: true });
-        Alert.alert('Updated', 'Saved changes to the existing template.');
+        Alert.alert(t('scheduler.updated'), t('scheduler.templateUpdatedMessage'));
       } else {
         await removeWeekShiftsAndAdvance(ensured, { skipServerDelete: true });
-        Alert.alert(
-          'Saved',
-          'Schedule saved as a template. Moved to the next week — your shifts stay in the database for those dates (they are not deleted).'
-        );
+        Alert.alert(t('scheduler.saved'), t('scheduler.scheduleSavedMessage'));
       }
     } catch (e: any) {
-      Alert.alert('Save failed', api.formatSchedulerApiError(e));
+      Alert.alert(t('scheduler.saveFailed'), api.formatSchedulerApiError(e));
     } finally {
       setSaveTemplateLoading(false);
     }
@@ -1573,7 +1563,7 @@ export default function ScheduleScreen() {
   const handlePublishTemplate = async () => {
     if (!selectedCompanyId || publishWeekLoading) return;
     if (currentWeekShifts.length === 0) {
-      Alert.alert('Nothing to publish', 'Add shifts to this week before publishing.');
+      Alert.alert(t('scheduler.nothingToPublishTitle'), t('scheduler.nothingToPublishMessage'));
       return;
     }
 
@@ -1642,16 +1632,16 @@ export default function ScheduleScreen() {
       // can immediately reflect the published schedule. We only move the builder forward to the next week.
       await loadEmployeesAndShifts();
       Alert.alert(
-        'Published',
+        t('scheduler.publishedTitle'),
         res.method === 'patch'
-          ? `Schedule published (fallback). Updated ${res.patchedCount ?? shiftIds.length} shift(s). Employees will see these shifts on their dashboard and calendar. The builder is moved to next week — add shifts there.`
-          : 'Schedule published. Employees will see these shifts on their dashboard and calendar. The builder is moved to next week — add shifts there.'
+          ? t('scheduler.publishedFallbackMessage', { count: res.patchedCount ?? shiftIds.length })
+          : t('scheduler.publishedMessage')
       );
       goNextWeek();
     } catch (e: any) {
       const body = e?.body ?? e?.response?.data ?? e?.errors;
       const detail = body && typeof body === 'object' ? `\n${JSON.stringify(body).slice(0, 500)}` : '';
-      Alert.alert('Publish failed', `${e?.message || 'Could not publish this week.'}${detail}`);
+      Alert.alert(t('scheduler.publishFailed'), `${e?.message || t('scheduler.publishFailedDefault')}${detail}`);
     } finally {
       setPublishWeekLoading(false);
     }
@@ -1668,21 +1658,23 @@ export default function ScheduleScreen() {
           await api.deleteShift(id);
         }
         await loadEmployeesAndShifts();
-        Alert.alert('Cleared', 'Week schedule cleared');
+        Alert.alert(t('scheduler.clearedTitle'), t('scheduler.clearedMessage'));
       } catch (e: any) {
-        Alert.alert('Error', e?.message || 'Failed to clear schedule');
+        Alert.alert(t('common.error'), e?.message || t('scheduler.clearFailed'));
       } finally {
         setLoading(false);
       }
     };
+    const period = customRangeEnd
+      ? t('scheduler.clearScheduleConfirmRange')
+      : t('scheduler.clearScheduleConfirmWeek');
     if (Platform.OS === 'web' && typeof (globalThis as any).confirm === 'function') {
-      if ((globalThis as any).confirm(`Clear all shifts for ${customRangeEnd ? 'this date range' : 'this week'}?`)) void run();
+      if ((globalThis as any).confirm(period)) void run();
       return;
     }
-    const period = customRangeEnd ? 'this date range' : 'this week';
-    Alert.alert('Clear schedule', `Clear all shifts for ${period}?`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Clear', style: 'destructive', onPress: () => void run() },
+    Alert.alert(t('scheduler.clearScheduleTitle'), period, [
+      { text: t('common.cancel'), style: 'cancel' },
+      { text: t('common.clear'), style: 'destructive', onPress: () => void run() },
     ]);
   };
 
@@ -1738,16 +1730,19 @@ export default function ScheduleScreen() {
         dropTemplateIds: deletedOk ? [tid] : undefined,
       });
       if (err) {
-        Alert.alert('Delete failed', api.formatSchedulerApiError(err) || `Could not delete "${label}".`);
+        Alert.alert(
+          t('scheduler.deleteFailed'),
+          api.formatSchedulerApiError(err) || t('scheduler.deleteSavedFailed', { label })
+        );
       }
     };
     if (Platform.OS === 'web' && typeof (globalThis as any).confirm === 'function') {
-      if ((globalThis as any).confirm(`Delete saved template "${label}"?`)) void run();
+      if ((globalThis as any).confirm(t('scheduler.deleteSavedScheduleConfirm', { label }))) void run();
       return;
     }
-    Alert.alert('Delete saved schedule', `Delete "${label}"? This removes the template from the server.`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => void run() },
+    Alert.alert(t('scheduler.deleteSavedScheduleTitle'), t('scheduler.deleteSavedScheduleConfirm', { label }), [
+      { text: t('common.cancel'), style: 'cancel' },
+      { text: t('common.delete'), style: 'destructive', onPress: () => void run() },
     ]);
   };
 
@@ -1779,9 +1774,9 @@ export default function ScheduleScreen() {
         });
       }
       await loadEmployeesAndShifts();
-      Alert.alert('Copied', `Template copied to ${formatWeekToolbar(rangeStart, rangeEnd)}`);
+      Alert.alert(t('scheduler.copiedTitle'), t('scheduler.copiedMessage', { range: formatWeekToolbar(rangeStart, rangeEnd) }));
     } catch (e: any) {
-      Alert.alert('Error', e?.message || 'Failed to copy template');
+      Alert.alert(t('common.error'), e?.message || t('scheduler.copyTemplateFailed'));
     } finally {
       setLoading(false);
     }
@@ -1791,7 +1786,7 @@ export default function ScheduleScreen() {
     <>
       <TouchableOpacity style={styles.actionChip} onPress={() => setScheduleEditMode((v) => !v)}>
         <MaterialCommunityIcons name="pencil-outline" size={18} color="#0f172a" />
-        <Text style={styles.actionChipText}>{scheduleEditMode ? 'Exit Edit' : 'Edit'}</Text>
+        <Text style={styles.actionChipText}>{scheduleEditMode ? t('scheduler.exitEdit') : t('common.edit')}</Text>
       </TouchableOpacity>
       <TouchableOpacity
         style={styles.actionChipPrimary}
@@ -1801,19 +1796,19 @@ export default function ScheduleScreen() {
         }}
         accessibilityLabel="New template from this week"
       >
-        <Text style={styles.actionChipPrimaryText}>+ Duplicate</Text>
+        <Text style={styles.actionChipPrimaryText}>+ {t('scheduler.duplicate')}</Text>
       </TouchableOpacity>
       <TouchableOpacity style={styles.actionPlain} onPress={handlePrint}>
-        <Text style={styles.actionPlainText}>Print</Text>
+        <Text style={styles.actionPlainText}>{t('scheduler.print')}</Text>
       </TouchableOpacity>
       <TouchableOpacity style={styles.actionPlain} onPress={handleDownload}>
-        <Text style={styles.actionPlainText}>Download</Text>
+        <Text style={styles.actionPlainText}>{t('scheduler.download')}</Text>
       </TouchableOpacity>
       {scheduleEditMode && (
         <>
           <TouchableOpacity style={styles.actionDangerChip} onPress={() => void handleClearWeek()}>
             <MaterialCommunityIcons name="trash-can-outline" size={16} color="#ef4444" />
-            <Text style={styles.actionDangerText}>Clear</Text>
+            <Text style={styles.actionDangerText}>{t('common.clear')}</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.actionSaveChip, saveTemplateLoading && { opacity: 0.6 }]}
@@ -1821,14 +1816,14 @@ export default function ScheduleScreen() {
             disabled={saveTemplateLoading}
           >
             <MaterialCommunityIcons name="check" size={15} color="#0f172a" />
-            <Text style={styles.actionSaveChipText}>{saveTemplateLoading ? 'Saving…' : 'Save'}</Text>
+            <Text style={styles.actionSaveChipText}>{saveTemplateLoading ? t('common.saving') : t('common.save')}</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.actionPublishChip, publishWeekLoading && { opacity: 0.6 }]}
             onPress={() => void handlePublishTemplate()}
             disabled={publishWeekLoading}
           >
-            <Text style={styles.actionPublishChipText}>{publishWeekLoading ? 'Publishing…' : 'Publish'}</Text>
+            <Text style={styles.actionPublishChipText}>{publishWeekLoading ? t('scheduler.publishing') : t('scheduler.publish')}</Text>
           </TouchableOpacity>
         </>
       )}
@@ -1856,13 +1851,13 @@ export default function ScheduleScreen() {
         <View style={styles.titleRow}>
           <View style={styles.titleLeft}>
             <MaterialCommunityIcons name="calendar-month" size={26} color="#2563eb" />
-            <Text style={styles.pageTitle}>Schedule</Text>
+            <Text style={styles.pageTitle}>{t('scheduler.title')}</Text>
           </View>
           <View style={styles.filtersRow}>
             {needsOrg && (
               <TouchableOpacity style={styles.selectBtn} onPress={() => setOrgModal(true)} activeOpacity={0.8}>
                 <Text style={styles.selectBtnText} numberOfLines={1}>
-                  {selectedOrgId ? selectedOrgName || 'Organization' : 'Select organization'}
+                  {selectedOrgId ? selectedOrgName || t('common.organization') : t('scheduler.selectOrganization')}
                 </Text>
                 <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
               </TouchableOpacity>
@@ -1879,12 +1874,12 @@ export default function ScheduleScreen() {
             >
               <Text style={[styles.selectBtnText, needsOrg && !selectedOrgId && styles.mutedText]} numberOfLines={1}>
                 {needsOrg && !selectedOrgId
-                  ? 'Select organization first'
+                  ? t('scheduler.selectOrganizationFirst')
                   : companiesFiltered.length === 0 && selectedOrgId
-                    ? 'No companies in this organization'
+                    ? t('scheduler.noCompaniesInOrg')
                     : selectedCompanyId
-                      ? selectedCompanyName || 'Company'
-                      : 'Select company'}
+                      ? selectedCompanyName || t('common.company')
+                      : t('scheduler.selectCompany')}
               </Text>
               <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
             </TouchableOpacity>
@@ -1978,8 +1973,8 @@ export default function ScheduleScreen() {
           <View style={styles.emptyInner}>
             <Text style={styles.emptyText}>
               {needsOrg && !selectedOrgId
-                ? 'Select an organization, then a company, to view and build employee schedules.'
-                : 'Select a company to view the schedule.'}
+                ? t('scheduler.selectOrgThenCompany')
+                : t('scheduler.selectCompanyForSchedule')}
             </Text>
           </View>
         ) : (
@@ -1988,7 +1983,7 @@ export default function ScheduleScreen() {
               <View style={styles.table}>
                 <View style={[styles.tr, styles.trHeader]}>
                   <View style={[styles.thEmp, { width: empColWidth }]}>
-                    <Text style={styles.thText}>Employee</Text>
+                    <Text style={styles.thText}>{t('common.employee')}</Text>
                   </View>
                   {weekDays.map((day, idx) => {
                     const isToday = sameCalendarDay(day, today);
@@ -2006,13 +2001,13 @@ export default function ScheduleScreen() {
 
                 {employees.length === 0 ? (
                   <View style={styles.emptyRow}>
-                    <Text style={styles.emptyTextBold}>No employees found.</Text>
-                    <Text style={styles.emptySubtext}>Add employees to this company to start scheduling shifts.</Text>
+                    <Text style={styles.emptyTextBold}>{t('scheduler.noEmployeesFound')}</Text>
+                    <Text style={styles.emptySubtext}>{t('scheduler.addEmployeesHint')}</Text>
                   </View>
                 ) : employeesForScheduleGrid.length === 0 ? (
                   <View style={styles.emptyRow}>
-                    <Text style={styles.emptyTextBold}>No employees in this department.</Text>
-                    <Text style={styles.emptySubtext}>Choose &quot;All Departments&quot; or another department to see more rows.</Text>
+                    <Text style={styles.emptyTextBold}>{t('scheduler.noEmployeesInDepartment')}</Text>
+                    <Text style={styles.emptySubtext}>{t('scheduler.chooseDepartmentHint')}</Text>
                   </View>
                 ) : (
                   employeesForScheduleGrid.map((emp) => (
@@ -2056,7 +2051,7 @@ export default function ScheduleScreen() {
                                 scheduleEditMode ? (
                                   <TouchableOpacity style={styles.addShiftCellBtn} onPress={() => openAddShift(emp, day)}>
                                     <MaterialCommunityIcons name="plus" size={14} color="#0f172a" />
-                                    <Text style={styles.addShiftCellText}>Add Shift</Text>
+                                    <Text style={styles.addShiftCellText}>{t('scheduler.addShift')}</Text>
                                   </TouchableOpacity>
                                 ) : (
                                   <Text style={styles.cellText}>-</Text>
@@ -2101,7 +2096,7 @@ export default function ScheduleScreen() {
                                               size={12}
                                               color="#1d4ed8"
                                             />
-                                            <Text style={styles.shiftAddTaskText}>Add Task</Text>
+                                            <Text style={styles.shiftAddTaskText}>{t('scheduler.addTaskToShift')}</Text>
                                           </Pressable>
                                         ) : null}
                                       </View>
@@ -2135,41 +2130,41 @@ export default function ScheduleScreen() {
           {publishedSavedTemplatesForCompany.length === 0 ? (
             <View style={styles.savedEmpty}>
               <MaterialCommunityIcons name="calendar-blank-outline" size={48} color="#cbd5e1" />
-              <Text style={styles.savedEmptyText}>No saved schedules yet.</Text>
-              <Text style={styles.savedEmptyHint}>Use Save on the toolbar to create a template card here.</Text>
+              <Text style={styles.savedEmptyText}>{t('scheduler.noSavedSchedules')}</Text>
+              <Text style={styles.savedEmptyHint}>{t('scheduler.savedEmptyHint')}</Text>
             </View>
           ) : (
             <View style={styles.savedList}>
-              {publishedSavedTemplatesForCompany.map((t) => (
-                  <View key={t.id} style={styles.savedItemCard}>
-                    <Text style={styles.savedItemTitle}>{t.weekLabel}</Text>
+              {publishedSavedTemplatesForCompany.map((saved) => (
+                  <View key={saved.id} style={styles.savedItemCard}>
+                    <Text style={styles.savedItemTitle}>{saved.weekLabel}</Text>
                     <Text style={styles.savedItemMeta}>
-                      {t.publishTriState === 'yes' ? 'Published schedule' : 'Saved schedule'}
+                      {saved.publishTriState === 'yes' ? 'Published schedule' : 'Saved schedule'}
                     </Text>
                     <Text style={styles.savedItemMeta2}>
-                      Saved: {new Date(t.savedAtISO).toLocaleDateString()} · {t.shiftCount} shifts
+                      Saved: {new Date(saved.savedAtISO).toLocaleDateString()} · {saved.shiftCount} shifts
                     </Text>
                     <View style={styles.savedItemActions}>
                       <View style={styles.savedEditDeleteRow}>
                         <TouchableOpacity
                           style={styles.savedEditBtn}
                           onPress={() => {
-                            const ws = new Date(t.weekStartISO);
-                            const we = new Date(t.weekEndISO);
+                            const ws = new Date(saved.weekStartISO);
+                            const we = new Date(saved.weekEndISO);
                             ws.setHours(0, 0, 0, 0);
                             we.setHours(0, 0, 0, 0);
                             setWeekAnchor(ws);
                             setCustomRangeEnd(isStandardMondaySundayWeek(ws, we) ? null : we);
                             setScheduleEditMode(true);
-                            setEditingTemplate(t);
+                            setEditingTemplate(saved);
                           }}
                         >
                           <MaterialCommunityIcons name="pencil-outline" size={14} color="#fff" />
-                          <Text style={styles.savedEditBtnText}>Edit</Text>
+                          <Text style={styles.savedEditBtnText}>{t('common.edit')}</Text>
                         </TouchableOpacity>
                         <TouchableOpacity
                           style={styles.savedDeleteBtn}
-                          onPress={() => void handleDeleteSavedTemplate(t)}
+                          onPress={() => void handleDeleteSavedTemplate(saved)}
                           accessibilityLabel="Delete saved schedule"
                           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                         >
@@ -2178,7 +2173,7 @@ export default function ScheduleScreen() {
                       </View>
                       <TouchableOpacity
                         style={styles.savedCopyBtn}
-                        onPress={() => void handleCopyTemplateToCurrentWeek(t)}
+                        onPress={() => void handleCopyTemplateToCurrentWeek(saved)}
                       >
                         <MaterialCommunityIcons name="content-copy" size={14} color="#334155" />
                         <Text style={styles.savedCopyBtnText}>
@@ -2195,7 +2190,7 @@ export default function ScheduleScreen() {
 
       <PickerModal
         visible={orgModal}
-        title="Select organization"
+        title={t('scheduler.selectOrganization')}
         options={orgOptions}
         onSelect={(id) => {
           setSelectedOrgId(id);
@@ -2205,14 +2200,14 @@ export default function ScheduleScreen() {
       />
       <PickerModal
         visible={companyModal}
-        title="Select company"
+        title={t('scheduler.selectCompany')}
         options={companyOptions}
         onSelect={(id) => setSelectedCompanyId(id)}
         onClose={() => setCompanyModal(false)}
       />
       <PickerModal
         visible={deptModal}
-        title="Department"
+        title={t('common.department')}
         options={scheduleDepartmentOptions}
         onSelect={(id) => setSelectedDeptFilter(id)}
         onClose={() => setDeptModal(false)}
@@ -2247,7 +2242,9 @@ export default function ScheduleScreen() {
             ]}
           >
             <View style={styles.shiftModalHead}>
-              <Text style={styles.modalTitleNoBorder}>{editingShiftId ? 'Edit Shift' : 'Add Shift'}</Text>
+              <Text style={styles.modalTitleNoBorder}>
+                {editingShiftId ? t('scheduler.editShift') : t('scheduler.addShift')}
+              </Text>
               <TouchableOpacity onPress={() => !shiftSaving && setShiftModalOpen(false)} hitSlop={10}>
                 <MaterialCommunityIcons name="close" size={22} color="#64748b" />
               </TouchableOpacity>
@@ -2275,37 +2272,37 @@ export default function ScheduleScreen() {
               </View>
               <View style={styles.shiftRow2}>
                 <View style={styles.shiftCol}>
-                  <Text style={styles.shiftLbl}>Employee *</Text>
+                  <Text style={styles.shiftLbl}>{t('common.employee')} *</Text>
                   <View style={styles.shiftSelectStatic}>
                     <Text style={styles.shiftSelectText} numberOfLines={1}>
-                      {shiftEmployee ? employeeDisplayName(shiftEmployee) : 'Select employee'}
+                      {shiftEmployee ? employeeDisplayName(shiftEmployee) : t('employeeDashboard.selectEmployee')}
                     </Text>
                     <MaterialCommunityIcons name="chevron-down" size={20} color="#94a3b8" />
                   </View>
                 </View>
                 <View style={styles.shiftCol}>
-                  <Text style={styles.shiftLbl}>Department</Text>
+                  <Text style={styles.shiftLbl}>{t('common.department')}</Text>
                   <View style={styles.shiftSelectStatic}>
                     <Text style={[styles.shiftSelectText, !shiftDepartment && styles.mutedText]} numberOfLines={1}>
-                      {shiftDepartment || 'Select department'}
+                      {shiftDepartment || t('scheduler.selectDepartment')}
                     </Text>
                     <MaterialCommunityIcons name="chevron-down" size={20} color="#94a3b8" />
                   </View>
                 </View>
               </View>
 
-              <Text style={styles.shiftLbl}>Date *</Text>
+              <Text style={styles.shiftLbl}>{t('scheduler.shiftDate')} *</Text>
               <View style={styles.timeInputWrap}>
                 <TextInput
                   style={styles.timeInput}
                   value={shiftDateInput}
                   onChangeText={setShiftDateInput}
-                  placeholder="dd-mm-yyyy"
+                  placeholder={t('scheduler.datePlaceholder')}
                 />
                 <MaterialCommunityIcons name="calendar-month-outline" size={18} color="#94a3b8" />
               </View>
 
-              <Text style={styles.shiftLbl}>Shift Type</Text>
+              <Text style={styles.shiftLbl}>{t('scheduler.shiftType')}</Text>
               <TouchableOpacity
                 style={styles.shiftSelect}
                 onPress={() => !shiftSaving && setShiftTypePickerOpen(true)}
@@ -2319,7 +2316,7 @@ export default function ScheduleScreen() {
               </TouchableOpacity>
               <View style={styles.shiftRow2}>
                 <View style={styles.shiftCol}>
-                  <Text style={styles.shiftLbl}>Start Time</Text>
+                  <Text style={styles.shiftLbl}>{t('tasks.startTime')}</Text>
                   <View style={styles.timeInputWrap}>
                     <TextInput
                       style={styles.timeInput}
@@ -2338,7 +2335,7 @@ export default function ScheduleScreen() {
                   </View>
                 </View>
                 <View style={styles.shiftCol}>
-                  <Text style={styles.shiftLbl}>End Time</Text>
+                  <Text style={styles.shiftLbl}>{t('tasks.endTime')}</Text>
                   <View style={styles.timeInputWrap}>
                     <TextInput
                       style={styles.timeInput}
@@ -2357,7 +2354,7 @@ export default function ScheduleScreen() {
                   </View>
                 </View>
               </View>
-              <Text style={styles.shiftLbl}>Break Duration (minutes)</Text>
+              <Text style={styles.shiftLbl}>{t('scheduler.breakDurationMinutes')}</Text>
               <TouchableOpacity
                 style={styles.shiftSelect}
                 onPress={() => !shiftSaving && setShiftBreakPickerOpen(true)}
@@ -2380,11 +2377,11 @@ export default function ScheduleScreen() {
                     {shiftCopyWeek ? <MaterialCommunityIcons name="check" size={12} color="#fff" /> : null}
                   </View>
                   <MaterialCommunityIcons name="content-copy" size={16} color="#64748b" />
-                  <Text style={styles.copyShiftText}>Copy this shift to other days</Text>
+                  <Text style={styles.copyShiftText}>{t('scheduler.copyShiftToOtherDays')}</Text>
                 </TouchableOpacity>
               ) : null}
 
-              <Text style={styles.shiftLbl}>Hourly Rate</Text>
+              <Text style={styles.shiftLbl}>{t('scheduler.hourlyRate')}</Text>
               <TextInput
                 style={styles.shiftInput}
                 value={shiftHourlyRate}
@@ -2393,7 +2390,7 @@ export default function ScheduleScreen() {
                 placeholder="15.00"
               />
 
-              <Text style={styles.shiftLbl}>Status</Text>
+              <Text style={styles.shiftLbl}>{t('common.status')}</Text>
               <TouchableOpacity
                 style={styles.shiftSelect}
                 onPress={() => !shiftSaving && setShiftStatusPickerOpen(true)}
@@ -2405,12 +2402,12 @@ export default function ScheduleScreen() {
                 </Text>
                 <MaterialCommunityIcons name="chevron-down" size={20} color="#64748b" />
               </TouchableOpacity>
-              <Text style={styles.shiftLbl}>Notes (optional)</Text>
+              <Text style={styles.shiftLbl}>{t('scheduler.notesOptional')}</Text>
               <TextInput
                 style={styles.shiftNotesInput}
                 value={shiftNotes}
                 onChangeText={setShiftNotes}
-                placeholder="Any special instructions..."
+                placeholder={t('scheduler.shiftNotesPlaceholder')}
                 placeholderTextColor="#94a3b8"
                 multiline
               />
@@ -2419,7 +2416,7 @@ export default function ScheduleScreen() {
               {editingShiftId ? (
                 <TouchableOpacity style={styles.shiftDeleteBtn} onPress={deleteEditingShift} disabled={shiftSaving}>
                   <MaterialCommunityIcons name="trash-can-outline" size={16} color="#fff" />
-                  <Text style={styles.shiftDeleteText}>Delete</Text>
+                  <Text style={styles.shiftDeleteText}>{t('common.delete')}</Text>
                 </TouchableOpacity>
               ) : null}
               <TouchableOpacity
@@ -2427,7 +2424,7 @@ export default function ScheduleScreen() {
                 onPress={() => !shiftSaving && setShiftModalOpen(false)}
                 disabled={shiftSaving}
               >
-                <Text style={styles.shiftCancelText}>Cancel</Text>
+                <Text style={styles.shiftCancelText}>{t('common.cancel')}</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.shiftSaveBtn, shiftSaving && styles.shiftBtnDisabled]}
@@ -2435,7 +2432,11 @@ export default function ScheduleScreen() {
                 disabled={shiftSaving}
               >
                 <Text style={styles.shiftSaveText}>
-                  {shiftSaving ? 'Saving…' : editingShiftId ? 'Update Shift' : 'Add Shift'}
+                  {shiftSaving
+                    ? t('common.saving')
+                    : editingShiftId
+                      ? t('scheduler.updateShift')
+                      : t('scheduler.addShift')}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -2454,8 +2455,7 @@ export default function ScheduleScreen() {
           <View style={[styles.timePickerCenter, { pointerEvents: 'box-none' }]}>
             <View style={[styles.timePickerSheet, { pointerEvents: 'auto' }]}>
               <Text style={styles.timePickerSheetTitle}>
-                {timePickerField === 'start' ? 'Start time' : 'End time'}
-              </Text>
+                {timePickerField === 'start' ? t('scheduler.startTimePicker') : t('scheduler.endTimePicker')}             </Text>
               <View style={styles.timePickerColumns}>
                 <ScrollView style={styles.timePickerColumn} showsVerticalScrollIndicator keyboardShouldPersistTaps="handled">
                   {TIME_PICKER_HOURS.map((h) => (
@@ -2500,10 +2500,10 @@ export default function ScheduleScreen() {
               </View>
               <View style={styles.timePickerFooter}>
                 <TouchableOpacity style={styles.timePickerBtnGhost} onPress={() => setTimePickerField(null)}>
-                  <Text style={styles.timePickerBtnGhostText}>Cancel</Text>
+                  <Text style={styles.timePickerBtnGhostText}>{t('common.cancel')}</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.timePickerBtnPrimary} onPress={confirmShiftTimePicker}>
-                  <Text style={styles.timePickerBtnPrimaryText}>Done</Text>
+                  <Text style={styles.timePickerBtnPrimaryText}>{t('common.done')}</Text>
                 </TouchableOpacity>
               </View>
             </View>

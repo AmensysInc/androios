@@ -11,9 +11,11 @@ import {
   Modal,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '../../context/AuthContext';
 import * as api from '../../api';
 import { isLikelyUuid } from '../../lib/departmentEmployeeMatch';
+import { localizedRequestStatus } from '../../lib/i18nLabels';
 
 type Organization = { id: string; name: string; [k: string]: any };
 type Company = { id: string; name: string; organization_id?: string; company_manager_id?: string; [k: string]: any };
@@ -38,7 +40,7 @@ function lookupEmployeeName(lookup: Record<string, string>, raw: string): string
   return lookup[k.replace(/-/g, '').toLowerCase()] || '';
 }
 
-function employeeNameFromShift(s: any, lookup: Record<string, string> = {}): string {
+function employeeNameFromShift(s: any, lookup: Record<string, string> = {}, fallback = 'Employee'): string {
   const e = s.employee;
   if (e && typeof e === 'object') {
     const fn = String(e.first_name || '').trim();
@@ -67,21 +69,23 @@ function employeeNameFromShift(s: any, lookup: Record<string, string> = {}): str
     (s as any).original_employee_name ||
     (s as any).user_name;
   if (n) return String(n);
-  if (empId && isLikelyUuid(empId)) return 'Employee';
-  if (typeof e === 'string' && e && isLikelyUuid(e)) return 'Employee';
-  return empId || (typeof e === 'string' ? e : '') || 'Employee';
+  if (empId && isLikelyUuid(empId)) return fallback;
+  if (typeof e === 'string' && e && isLikelyUuid(e)) return fallback;
+  return empId || (typeof e === 'string' ? e : '') || fallback;
 }
 
 function shiftCompanyId(s: any): string {
   return String(s.company_id ?? s.company ?? (s as any).company?.id ?? '');
 }
 
-function markedAtLabel(s: any): string {
+function markedAtLabel(s: any, t: (key: string, opts?: object) => string): string {
   const raw = s.missed_at ?? s.marked_missed_at ?? s.missed_marked_at ?? s.updated_at;
   if (!raw) return '';
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) return '';
-  return `Marked at ${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+  return t('missedShifts.markedAt', {
+    time: d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }),
+  });
 }
 
 function formatShiftWhen(s: any): string {
@@ -164,6 +168,7 @@ const modalStyles = StyleSheet.create({
 type TabKey = 'missed' | 'replacement';
 
 export default function MissedShiftsScreen() {
+  const { t } = useTranslation();
   const { user, role } = useAuth();
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -193,17 +198,17 @@ export default function MissedShiftsScreen() {
   }, [companies, role, user?.id, orgFilter]);
 
   const orgOptions = useMemo(() => {
-    const base = [{ id: 'all', label: 'All Organizations' }];
+    const base = [{ id: 'all', label: t('common.allOrganizations') }];
     return [...base, ...organizations.map((o) => ({ id: o.id, label: o.name }))];
-  }, [organizations]);
+  }, [organizations, t]);
 
   const companyOptions = useMemo(() => {
-    const base = [{ id: 'all', label: 'All Companies' }];
+    const base = [{ id: 'all', label: t('common.allCompanies') }];
     return [...base, ...companiesForOrg.map((c) => ({ id: c.id, label: c.name }))];
-  }, [companiesForOrg]);
+  }, [companiesForOrg, t]);
 
-  const orgFilterLabel = orgOptions.find((o) => o.id === orgFilter)?.label || 'All Organizations';
-  const companyFilterLabel = companyOptions.find((o) => o.id === companyFilter)?.label || 'All Companies';
+  const orgFilterLabel = orgOptions.find((o) => o.id === orgFilter)?.label || t('common.allOrganizations');
+  const companyFilterLabel = companyOptions.find((o) => o.id === companyFilter)?.label || t('common.allCompanies');
 
   const loadMeta = useCallback(async () => {
     try {
@@ -355,8 +360,8 @@ export default function MissedShiftsScreen() {
   const listData = tab === 'missed' ? missedSorted : rrSorted;
   const emptyText =
     tab === 'missed'
-      ? 'No missed shifts match the current filters.'
-      : 'No replacement requests match the current filters.';
+      ? t('missedShifts.noMissedFilters')
+      : t('missedShifts.noReplacementFilters');
 
   const renderMissedCard = ({ item }: { item: any }) => (
     <View style={styles.missedCard}>
@@ -366,7 +371,7 @@ export default function MissedShiftsScreen() {
         </View>
         <View style={styles.missedCardBody}>
           <Text style={styles.empName} numberOfLines={1}>
-            {employeeNameFromShift(item, employeeLookup)}
+            {employeeNameFromShift(item, employeeLookup, t('timeClock.fallbackEmployee'))}
           </Text>
           <View style={styles.shiftRow}>
             <MaterialCommunityIcons name="clock-outline" size={16} color="#64748b" />
@@ -374,9 +379,9 @@ export default function MissedShiftsScreen() {
           </View>
           <View style={styles.badgeRow}>
             <View style={styles.missedBadge}>
-              <Text style={styles.missedBadgeText}>Missed</Text>
+              <Text style={styles.missedBadgeText}>{t('missedShifts.missedBadge')}</Text>
             </View>
-            {markedAtLabel(item) ? <Text style={styles.markedAt}>{markedAtLabel(item)}</Text> : null}
+            {markedAtLabel(item, t) ? <Text style={styles.markedAt}>{markedAtLabel(item, t)}</Text> : null}
           </View>
         </View>
       </View>
@@ -402,7 +407,9 @@ export default function MissedShiftsScreen() {
             <View style={styles.shiftRow}>
               <MaterialCommunityIcons name="information-outline" size={16} color="#64748b" />
               <Text style={styles.shiftWhen} numberOfLines={2}>
-                {item.id ? `Request #${String(item.id).slice(0, 8)}…` : 'Replacement request'}
+                {item.id
+                  ? t('requests.requestNumber', { id: String(item.id).slice(0, 8) })
+                  : t('requests.replacementRequest')}
                 {item.created_at
                   ? ` · ${new Date(item.created_at).toLocaleDateString(undefined, {
                       month: 'short',
@@ -414,7 +421,7 @@ export default function MissedShiftsScreen() {
             </View>
             <View style={styles.badgeRow}>
               <View style={[styles.missedBadge, styles.reqBadge]}>
-                <Text style={styles.missedBadgeText}>{status}</Text>
+                <Text style={styles.missedBadgeText}>{localizedRequestStatus(t, status)}</Text>
               </View>
             </View>
           </View>
@@ -444,15 +451,15 @@ export default function MissedShiftsScreen() {
             <View style={styles.header}>
               <View style={styles.titleRow}>
                 <MaterialCommunityIcons name="alert-circle-outline" size={28} color="#dc2626" />
-                <Text style={styles.title}>Missed Shifts</Text>
+                <Text style={styles.title}>{t('missedShifts.title')}</Text>
               </View>
-              <Text style={styles.subtitle}>Manage missed shifts and replacement requests</Text>
+              <Text style={styles.subtitle}>{t('missedShifts.subtitle')}</Text>
             </View>
 
             <View style={styles.filtersCard}>
               <View style={styles.filtersLabelRow}>
                 <MaterialCommunityIcons name="filter-variant" size={18} color="#64748b" />
-                <Text style={styles.filtersLabel}>Filters:</Text>
+                <Text style={styles.filtersLabel}>{t('common.filters')}</Text>
               </View>
               {needsOrg && (
                 <TouchableOpacity style={styles.filterSelect} onPress={() => setOrgModal(true)} activeOpacity={0.85}>
@@ -478,7 +485,7 @@ export default function MissedShiftsScreen() {
                 onPress={() => setTab('missed')}
                 activeOpacity={0.85}
               >
-                <Text style={[styles.tabText, tab === 'missed' && styles.tabTextActive]}>Missed Shifts</Text>
+                <Text style={[styles.tabText, tab === 'missed' && styles.tabTextActive]}>{t('missedShifts.tabMissed')}</Text>
                 <View style={styles.tabBadge}>
                   <Text style={styles.tabBadgeText}>{missedSorted.length}</Text>
                 </View>
@@ -489,7 +496,7 @@ export default function MissedShiftsScreen() {
                 activeOpacity={0.85}
               >
                 <Text style={[styles.tabText, tab === 'replacement' && styles.tabTextActive]}>
-                  Replacement Requests
+                  {t('missedShifts.tabReplacement')}
                 </Text>
                 <View style={[styles.tabBadge, styles.tabBadgeMuted]}>
                   <Text style={styles.tabBadgeTextMuted}>{rrSorted.length}</Text>
@@ -504,7 +511,7 @@ export default function MissedShiftsScreen() {
 
       <PickerModal
         visible={orgModal}
-        title="Organization"
+        title={t('common.organization')}
         options={orgOptions}
         onSelect={(id) => {
           setOrgFilter(id);
@@ -514,7 +521,7 @@ export default function MissedShiftsScreen() {
       />
       <PickerModal
         visible={companyModal}
-        title="Company"
+        title={t('common.company')}
         options={companyOptions}
         onSelect={(id) => setCompanyFilter(id)}
         onClose={() => setCompanyModal(false)}

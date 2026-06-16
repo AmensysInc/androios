@@ -49,6 +49,14 @@ function dedupeRooms(rows: MotelRoomRow[]): MotelRoomRow[] {
 }
 
 async function fetchRoomsOnce(params?: Record<string, string>): Promise<MotelRoomRow[]> {
+  const companyId = String(params?.company_id ?? params?.company ?? '').trim();
+  if (companyId) {
+    try {
+      return await api.getMotelRoomsForCompany(companyId);
+    } catch {
+      return [];
+    }
+  }
   try {
     const list = await api.getMotelRooms(params);
     return Array.isArray(list) ? list : [];
@@ -98,7 +106,7 @@ export function useEmployeeMotelRooms(user: unknown) {
 
     if (merged.length === 0) {
       for (const cid of companyIds) {
-        const rows = await fetchRoomsOnce({ company: cid });
+        const rows = await fetchRoomsOnce({ company_id: cid });
         if (rows.length > 0) {
           merged = dedupeRooms(rows);
           break;
